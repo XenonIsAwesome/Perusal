@@ -23,6 +23,8 @@ enum Cmd {
     View { repo: PathBuf, branch: String, path: String, #[arg(long)] unset: bool },
     /// Add a draft comment.
     Draft { repo: PathBuf, branch: String, body: String, #[arg(long)] file: Option<String>, #[arg(long)] line: Option<u32>, #[arg(long)] ai: bool },
+    /// Open an MR/PR from its https URL and print its info and CI state. `--api` overrides the API base (tests, mocks).
+    Mr { url: String, #[arg(long)] api: Option<String>, #[arg(long, env = "PERUSAL_TOKEN", default_value = "")] token: String },
     /// Export drafts as Markdown.
     Export { repo: PathBuf, branch: String },
 }
@@ -34,7 +36,8 @@ fn open(store: &Store, repo: &std::path::Path, branch: &str, base: &str) -> Resu
     Ok(store.open_review(&key(repo, branch), &format!("{branch} (local)"), branch, files.len() as u32)?)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Gen { dir, files, lines } => perusal_cli::generate(&dir, files, lines)?,
@@ -66,6 +69,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Draft { repo, branch, body, file, line, ai } => {
             let store = Store::open(&cli.db)?; let r = open(&store, &repo, &branch, "main")?;
             store.add_draft(r, file.as_deref(), line.map(|l| (l, l)), &body, ai)?;
+        }
+        Cmd::Mr { url, api, token } => {
+            use perusal_providers::{github::GitHub, gitlab::GitLab, Kind, Provider};
+            let r = perusal_providers::parse_mr_url(&url)?;
+            let http = perusal_providers::auth::client(None)?;
+            let p: Box<dyn Provider> = match r.kind {
+                Kind::GitHub => Box::new(GitHub { http, api: api.unwrap_or(GitHub::api_base(&r.host)), token }),
+                Kind::GitLab => Box::new(GitLab { http, api: api.unwrap_or(GitLab::api_base(&r.host)), token }),
+            };
+            let i = p.mr_info(&r).await?;
+            println!("{} [{}] by {} @ {}", i.title, i.state, i.author, i.head_sha);
+            println!("ci: {:?}", p.ci(&r, &i.head_sha).await?);
         }
         Cmd::Export { repo, branch } => {
             let store = Store::open(&cli.db)?; let r = open(&store, &repo, &branch, "main")?; print!("{}", store.export_markdown(r)?);

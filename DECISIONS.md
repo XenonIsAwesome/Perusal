@@ -6,3 +6,7 @@
 - Line/word diff uses `similar` (inline feature) instead of imara-diff: stable API, built-in word-level inline changes.
 - Tree-sitter highlighting ships rust and python grammars first; other languages load lazily in later work (return no spans now).
 - Re-anchor of drafts across a head move uses a line-diff map; ranges where either end changed are flagged for manual placement.
+- Token storage: FileStore (mode 0600, outside SQLite) is implemented; OS keychain backend (keyring crate needs libdbus) is deferred behind a future `keychain` feature. File is not encrypted; documented risk.
+- GitLab viewed-state: the API exposes none, so marks stay local (`Unsupported`). GitLab "request changes" has no equivalent: submit returns `Unsupported` and the UI hides the control.
+- GitHub viewed sync uses GraphQL markFileAsViewed/unmarkFileAsViewed (needs PR node id lookup first); implemented but only mock-tested.
+- GitLab submit sends positions with null base/start SHA; real instances need the MR diff_refs filled in (to verify against a live host).
