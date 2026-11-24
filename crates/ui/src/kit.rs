@@ -44,15 +44,6 @@ pub fn kbd(text: &'static str, p: &Pal) -> Div { div().px(px(5.0)).rounded_sm().
 #[derive(Clone, Copy, PartialEq)]
 pub enum Btn { Primary, Secondary, Ghost }
 
-pub fn button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, kind: Btn, p: &Pal) -> Stateful<Div> {
-    let (bg, fg, hover_bg, border) = match kind {
-        Btn::Primary => { let mut g = p.success; if g.l > 0.4 { g.l *= 0.62; } let mut h = g; h.l = (h.l * 1.15).min(1.0); (g, gpui::white(), h, g) }
-        Btn::Secondary => (p.surface, p.fg, p.hover, p.border),
-        Btn::Ghost => (gpui::transparent_black(), p.muted, p.hover, gpui::transparent_black()),
-    };
-    div().id(id).px_3().py(px(5.0)).rounded_md().border_1().border_color(border).bg(bg).text_color(fg).text_sm().font_weight(FontWeight::MEDIUM).cursor_pointer()
-        .hover(move |s| s.bg(hover_bg)).child(label.into())
-}
 
 /// Feeds a key to a field, doing clipboard I/O. Returns true if the key was used.
 pub fn field_key(f: &mut TextField, ks: &Keystroke, cx: &mut App) -> bool {

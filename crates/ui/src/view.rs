@@ -126,7 +126,6 @@ impl View {
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
             verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
     }
-    pub fn title(&self) -> String { self.m.store.review_title(self.m.vm.review).unwrap_or_else(|_| self.m.title.clone()) }
     pub fn key_id(&self) -> String { self.m.remote.clone().map(|u| format!("remote:{u}")).unwrap_or_else(|| format!("local:{}#{}", self.m.repo.display(), self.m.branch)) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
     fn save_settings(&self) { model::save_settings(&self.settings); }
@@ -160,7 +159,6 @@ impl View {
     }
     fn toggle_dir(&mut self, path: &str) { if !self.collapsed.remove(path) { self.collapsed.insert(path.to_string()); } }
     fn busy(&self) -> bool { self.ai_job.is_some() }
-    fn inp(&mut self, f: Fid) -> &mut Input { match f { Fid::Filter => &mut self.filter, Fid::Sort => &mut self.sort, Fid::Comment => &mut self.comment, Fid::Ask => &mut self.ask, Fid::Summary => &mut self.summary, Fid::Preset => &mut self.preset_name, Fid::Rename => &mut self.rename } }
 
     // ---------- diff rows
     fn load_diff(&mut self) {

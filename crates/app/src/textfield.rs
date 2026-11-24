@@ -19,7 +19,10 @@ impl TextField {
     /// (line index, column) of a char index.
     pub fn line_col(&self, ci: usize) -> (usize, usize) {
         let (mut line, mut col) = (0, 0);
-        for (i, c) in self.text.chars().enumerate() { if i == ci { break; } if c == '\n' { line += 1; col = 0; } else { col += 1; } }
+        for (i, c) in self.text.chars().enumerate() {
+            if i == ci { break; }
+            if c == '\n' { line += 1; col = 0; } else { col += 1; }
+        }
         (line, col)
     }
     pub fn lines(&self) -> Vec<&str> { self.text.split('\n').collect() }

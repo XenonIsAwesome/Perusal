@@ -255,10 +255,6 @@ pub fn find_mr_for_branch(repo: &Path, branch: &str, hosts: &[HostCfg]) -> Optio
     Some((MrRef { number: n, ..r }, web))
 }
 
-/// Edits or deletes of the signed-in user's own posted comments go through the provider.
-pub fn edit_remote_comment(mr: &MrRef, thread: &str, comment: &str, body: &str) -> Result<(), String> {
-    let p = provider(mr, token_for(&mr.host).ok_or("not signed in")?)?; rt()?.block_on(p.edit_comment(mr, thread, comment, body)).map_err(|e| e.to_string())
-}
 
 #[cfg(test)]
 mod tests {

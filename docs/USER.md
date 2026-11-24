@@ -74,3 +74,16 @@ Settings has the built-in rules (C/C++ headers and sources, TS/JS tests, Python 
 
 ## Custom themes
 Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/` in your file manager and creates an `AGENTS.md` there that explains the format to an AI agent. Open your agent in that folder and ask, for example: "Read AGENTS.md, then create a warmer dark theme called warm.toml and validate it with `perusal theme check warm.toml`."
+
+## v3 additions
+- **Tabs:** every review opens in its own tab next to Home (Ctrl+Tab and Ctrl+Shift+Tab switch, Ctrl+W closes). Esc goes to Home; reviews keep running in the background and are saved continuously.
+- **Home:** *Recent reviews* and *My reviews* tabs. My reviews lists your pull and merge requests from every account you signed in to (To review, Created by me, Assigned to me) with Remote (GitHub/GitLab) and State (Open/Merged/Closed) filters. Recent reviews has the same Remote/State filters. Rename, pin and delete reviews from the list; rename the open review with the pencil next to its title.
+- **Open a review:** URL, local branch (with an optional base branch or commit), or browse a repository. Public repositories work without a token.
+- **Accounts and setup:** Settings > Accounts, or the first-run setup. Sign in with a pasted token, your `gh`/`glab` login, or the browser (OAuth device flow; needs an OAuth app client ID for the host). Settings is also available from Home.
+- **Sort and presets:** next to the filter there is a sort field (`additions + deletions desc, name asc`) with autocomplete, and a presets menu to save filter+sort per project or globally and make one the default.
+- **Comments:** a Markdown editor (bold, italic, code, quote, list, link, suggestions, Preview tab). Comments, including other people's, appear under their line in the diff; collapse one or all of them, and switch a comment between rich and raw. Edit your own drafts, including AI ones, from the card or the Drafts list.
+- **Next vs viewed:** Next no longer marks files viewed. The eye box in the floating bar does.
+- **CI and updates:** a CI icon in the header (click for the checks page). Merged, closed, new commits and CI results appear as in-app notifications and as desktop notifications (Settings > Notifications).
+
+## Testing against a mock host
+`PERUSAL_API_BASE` replaces the API base URL, `PERUSAL_GIT_BASE` replaces the clone base (for example `file:///srv/git`), and `PERUSAL_POLL_SECS` sets the update interval. Useful for GitHub Enterprise proxies and for tests.
