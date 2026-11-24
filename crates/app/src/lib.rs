@@ -1,5 +1,7 @@
 //! UI-free view models for the GPUI shell. Everything here is testable headless.
 pub mod banner;
+pub mod ci;
+pub mod deeplink;
 pub mod filterbar;
 pub mod graph;
 pub mod keymap;

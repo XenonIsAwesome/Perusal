@@ -1,0 +1,22 @@
+app-id: io.github.perusal.Perusal
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: perusal
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --talk-name=org.freedesktop.Flatpak   # host-spawn: run the host's git and agent CLIs; weakens the sandbox, see docs/flatpak.md
+modules:
+  - name: perusal
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 perusal /app/bin/perusal
+      - install -Dm644 perusal.desktop /app/share/applications/io.github.perusal.Perusal.desktop
+    sources:
+      - type: file
+        path: ../target/release/perusal
+      - type: file
+        path: perusal.desktop

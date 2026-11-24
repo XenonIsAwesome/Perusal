@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Perusal: open merge requests",
+  "version": "0.1.0",
+  "description": "Adds an Open in Perusal button on GitHub pull requests and GitLab merge requests.",
+  "permissions": ["storage"],
+  "optional_host_permissions": ["https://*/*"],
+  "host_permissions": ["https://github.com/*", "https://gitlab.com/*"],
+  "content_scripts": [{ "matches": ["https://github.com/*", "https://gitlab.com/*"], "js": ["detect.js", "content.js"], "run_at": "document_idle" }],
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}
