@@ -61,7 +61,7 @@ pub fn launch_with(agent: &str, custom: &str, prompt: &str, o: &Options) -> Opti
         "claude" => {
             args.extend(["-p".into(), prompt.into(), "--output-format".into(), "stream-json".into(), "--verbose".into(), "--permission-mode".into(), "plan".into()]);
             if !m.is_empty() { args.extend(["--model".into(), m.into()]); }
-            if let Some(t) = match e { "low" => Some("4000"), "medium" => Some("12000"), "high" => Some("31999"), _ => None } { env.push(("MAX_THINKING_TOKENS".to_string(), t.to_string())); }
+            if let Some(t) = match e { "low" => Some("4000".to_string()), "medium" => Some("12000".to_string()), "high" => Some("31999".to_string()), n if n.parse::<u32>().is_ok() => Some(n.to_string()), _ => None } { env.push(("MAX_THINKING_TOKENS".to_string(), t)); }
             stream = true; "claude"
         }
         "gemini" => { if !m.is_empty() { args.extend(["-m".into(), m.into()]); } args.extend(["-p".into(), prompt.into()]); "gemini" }
@@ -85,6 +85,11 @@ pub fn launch_with(agent: &str, custom: &str, prompt: &str, o: &Options) -> Opti
 /// Model names worth offering as one-click choices for an agent (a custom model can always be typed).
 pub fn model_suggestions(agent: &str) -> &'static [&'static str] {
     match agent { "claude" => &["opus", "sonnet", "haiku"], "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"], "codex" => &["gpt-5", "gpt-5-codex"], _ => &[] }
+}
+
+/// Effort / variant names offered in the dropdown (a custom value can always be typed; for Claude it is a thinking-token budget).
+pub fn effort_suggestions(agent: &str) -> &'static [&'static str] {
+    match agent { "claude" | "codex" | "opencode" => match agent { "codex" => &["minimal", "low", "medium", "high"], "opencode" => &["minimal", "low", "medium", "high", "max"], _ => &["low", "medium", "high"] }, _ => &[] }
 }
 
 /// Whether the agent has an effort / variant control.
@@ -195,6 +200,7 @@ mod tests {
         let op = launch_with("opencode", "", "q", &o).unwrap(); assert!(op.args.windows(2).any(|w| w == ["--variant", "high"]));
         let d = launch_with("claude", "", "q", &Options::default()).unwrap(); assert!(!d.args.contains(&"--model".to_string()) && d.env.is_empty());
         assert!(launch_with("nope", "", "q", &o).is_none()); assert_eq!(launch_with("x", "my-agent -v", "q", &o).unwrap().program, "my-agent");
+        let n = launch_with("claude", "", "q", &Options { model: String::new(), effort: "20000".into() }).unwrap(); assert_eq!(n.env, vec![("MAX_THINKING_TOKENS".to_string(), "20000".to_string())]); assert!(effort_suggestions("codex").contains(&"minimal"));
         assert!(supports_effort("codex") && !supports_effort("gemini") && !model_suggestions("claude").is_empty());
     }
     #[test] fn skill_ships() { assert!(REVIEW_SKILL.contains("high-signal") && REVIEW_SKILL.contains("untrusted")); }

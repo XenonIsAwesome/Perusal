@@ -265,3 +265,37 @@ mod tests {
         assert_eq!(normalize_url_input("http://x/y"), "http://x/y"); assert_eq!(normalize_url_input("   "), "");
     }
 }
+
+/// Asks the configured agent to write a filter, sort or grouping rule (blocking; run it on a background thread).
+/// The answer is validated with the real parsers before it is returned: `[expr]` or `[label, pattern]`.
+pub fn run_gen(s: &perusal_app::settings::Settings, kind: perusal_agents::GenKind, request: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<String>, String> {
+    use perusal_agents::{gen_prompt, launch_with, on_path, parse_generated, GenKind, Options};
+    if request.trim().is_empty() { return Err("Describe what you want first.".into()); }
+    let reference = if kind == GenKind::GroupRule { String::new() } else { perusal_filter::reference() };
+    let prompt = gen_prompt(kind, request.trim(), &reference);
+    let l = launch_with(&s.agent, &s.agent_command, &prompt, &Options { model: s.model.clone(), effort: s.effort.clone() }).ok_or("No agent configured. Choose one in Settings.")?;
+    if !on_path(&l.program) { return Err(format!("`{}` was not found on your PATH. Install it or pick another agent in Settings.", l.program)); }
+    let dir = std::env::temp_dir().join("perusal-gen"); let _ = std::fs::create_dir_all(&dir);
+    let out = perusal_agents::run::run_streaming(&l, &dir, &perusal_agents::run::agent_env(), std::time::Duration::from_secs(180), cancel, |_| {}).map_err(|e| e.to_string())?;
+    let v = parse_generated(&out, match kind { GenKind::Filter => &["filter"][..], GenKind::Sort => &["sort"], GenKind::GroupRule => &["label", "pattern"] })?;
+    match kind {
+        GenKind::Filter => { perusal_filter::compile(&v[0]).map_err(|e| format!("The agent wrote an invalid filter ({e}): {}", v[0]))?; }
+        GenKind::Sort => { for (e, _) in perusal_filter::parse_tiers(&v[0]) { perusal_filter::compile(&e).map_err(|er| format!("The agent wrote an invalid sort ({er}): {}", v[0]))?; } }
+        GenKind::GroupRule => perusal_diff::rules::validate_pattern(&v[1]).map_err(|e| format!("The agent wrote an invalid rule: {e}"))?,
+    }
+    Ok(v)
+}
+
+/// Imports every login the `gh` and `glab` CLIs know about, including GitHub Enterprise and self-hosted GitLab.
+/// Returns (host, kind, token) for each login whose token could be read.
+pub fn import_all_cli() -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    for (prog, kind, args) in [("gh", "github", vec!["auth", "status"]), ("glab", "gitlab", vec!["auth", "status"])] {
+        let Ok(o) = std::process::Command::new(prog).args(&args).stdin(std::process::Stdio::null()).output() else { continue };
+        let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        for host in perusal_app::hosts::hosts_from_status(&text) {
+            if let Ok(tok) = import_cli_token(&host, kind) { out.push((host, kind.to_string(), tok)); }
+        }
+    }
+    out
+}

@@ -45,7 +45,6 @@ pub fn pick_fonts(cx: &App) -> Fonts {
 }
 
 pub fn badge(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> Div { div().px_2().rounded_full().text_xs().font_weight(FontWeight::MEDIUM).text_color(fg).bg(bg).child(text.into()) }
-pub fn pill(text: impl Into<SharedString>, p: &Pal) -> Div { div().px_2().py(px(1.0)).rounded_full().text_xs().border_1().border_color(p.border).text_color(p.muted).child(text.into()) }
 pub fn kbd(text: &'static str, p: &Pal) -> Div { div().px(px(5.0)).rounded_sm().border_1().border_color(p.border).bg(p.surface).text_xs().text_color(p.fg).child(text) }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -273,7 +272,7 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -
             row = row.child(match url { Some(u) => el.cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)).into_any_element(), None => el.into_any_element() });
             continue;
         }
-        for tok in s.text.split_inclusive(|c: char| c == ' ' || c == '\n') {
+        for tok in s.text.split_inclusive([' ', '\n']) {
             if tok == "\n" { row = row.child(div().w_full().h(px(0.0))); continue; }
             n += 1;
             let t = tok.trim_end_matches('\n').to_string();

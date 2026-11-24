@@ -4,7 +4,7 @@ use crate::kit::{self, badge, icon, icon_btn, icon_text_btn, input_text, loading
 use crate::model::{self, Model, OpenErr};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::view::{View, ViewEvent};
-use gpui::{deferred, div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, SharedString, Subscription, Window, WindowBounds, WindowOptions};
+use gpui::{CursorStyle, ResizeEdge, TitlebarOptions, WindowDecorations, deferred, div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, SharedString, Subscription, Window, WindowBounds, WindowOptions};
 use perusal_app::notify::{Kind as NKind, Toasts};
 use perusal_app::settings::Settings;
 use perusal_app::theme;
@@ -27,7 +27,7 @@ enum St { All, Open, Merged, Closed }
 struct TabItem { key: String, title: String, ci: String, view: Entity<View>, _sub: Subscription }
 
 pub struct Root {
-    settings: Settings, pal: Pal, fonts: Fonts, focus: FocusHandle,
+    settings: Settings, decor: WindowDecorations, pal: Pal, fonts: Fonts, focus: FocusHandle,
     tabs: Vec<TabItem>, active: Option<usize>, settings_view: Option<Entity<SettingsView>>, _ssub: Option<Subscription>, toasts: Toasts,
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>,
@@ -42,7 +42,7 @@ impl Root {
     fn new(initial: Initial, fonts: Fonts, cx: &mut Context<Self>) -> Self {
         let settings = model::load_settings();
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
-        let mut r = Root { pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
+        let mut r = Root { decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None,
             recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::ReviewRequested, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false,
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
@@ -93,7 +93,7 @@ impl Root {
                 let sub = cx.subscribe(&v, |this, v, ev: &ViewEvent, cx| match ev {
                     ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
                     ViewEvent::OpenSettings => this.open_settings(false, cx),
-                    ViewEvent::Notice(k, t, desktop) => { this.toast(*k, t.clone(), cx); if *desktop && this.settings.desktop_notifications { model::desktop_notify("Update", t); } }
+                    ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
                     ViewEvent::Renamed(t) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.title = t.clone(); } this.refresh_recent(); cx.notify(); }
                     ViewEvent::Ci(c) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.ci = c.clone(); } cx.notify(); }
                 });
@@ -221,7 +221,7 @@ impl Root {
     }
     fn state_dot(&self, s: &str) -> gpui::Hsla { let p = self.pal; match s { "merged" => p.ai, "closed" => p.danger, "open" => p.success, _ => p.accent } }
 
-    fn tab_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn tab_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
         let home_on = self.active.is_none();
         let home = div().id("tab-home").flex().items_center().gap_2().px_3().h(px(36.0)).cursor_pointer().border_b_2().border_color(if home_on { p.accent } else { gpui::transparent_black() }).bg(if home_on { p.bg } else { gpui::transparent_black() }).hover(move |s| s.bg(p.hover))
@@ -234,7 +234,20 @@ impl Root {
                 .children(ci).child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).child(t.title.clone()))
                 .child(icon_btn(("tabx", i), ic::CLOSE, "Close this tab (Ctrl+W)", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.close_tab(i, cx); cx.stop_propagation(); })))
         }).collect();
-        div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(div().flex_1())
+        let custom = self.settings.custom_titlebar;
+        let max = window.is_maximized();
+        let ctl = |id: &'static str, i: ic::Icon, tip_t: &'static str, danger: bool, cx: &mut Context<Self>, f: fn(&mut Window)| {
+            let hv = if danger { gpui::rgb(0xe81123).into() } else { p.hover };
+            kit::tip(div().id(id).flex().items_center().justify_center().w(px(46.0)).h(px(36.0)).cursor_pointer().hover(move |x| x.bg(hv)).child(icon(i, 16.0, p.fg))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |_, _, w, cx| { f(w); cx.notify(); })), tip_t, &p)
+        };
+        // the empty part of the strip drags the window; double click maximizes
+        let drag = div().id("strip-drag").flex_1().h(px(36.0)).when(custom, |d| d.on_mouse_down(MouseButton::Left, cx.listener(|_, ev: &gpui::MouseDownEvent, w, _| { if ev.click_count >= 2 { w.zoom_window(); } else { w.start_window_move(); } })));
+        div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(drag)
+            .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |w| w.minimize_window()))
+                .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |w| w.zoom_window()))
+                .child(ctl("win-close", ic::CLOSE, "Close", true, cx, |w| w.remove_window())))
     }
 
     fn recent_filtered(&self) -> Vec<RecentRow> {
@@ -399,9 +412,12 @@ impl Root {
 }
 
 impl Render for Root {
-    fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
-        let strip = self.tab_strip(cx);
+        let decor: WindowDecorations = if self.settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server };
+        if self.decor != decor { self.decor = decor; w.request_decorations(decor); }
+        let resizable = self.settings.custom_titlebar && !w.is_maximized() && !w.is_fullscreen();
+        let strip = self.tab_strip(w, cx);
         let body = match self.active.and_then(|i| self.tabs.get(i)) { Some(t) => div().flex().flex_col().flex_1().min_h_0().child(t.view.clone()).into_any_element(), None => self.render_home(cx).into_any_element() };
         let toasts = self.toast_stack(cx);
         let settings = self.settings_view.clone();
@@ -415,6 +431,18 @@ impl Render for Root {
                 if let Some(t) = this.active.and_then(|i| this.tabs.get(i)) { let v = t.view.clone(); v.update(cx, |v, cx| v.key(ev, cx)); } else { this.home_key(ev, cx); }
             }))
             .child(strip).child(body).children(settings).children(toasts)
+            .when(resizable, |d| {
+                let edge = |id: &'static str, e: ResizeEdge, c: CursorStyle| div().id(id).absolute().cursor(c).on_mouse_down(MouseButton::Left, move |_, w, cx| { w.start_window_resize(e); cx.stop_propagation(); });
+                let t = px(5.0); let k = px(12.0);
+                d.child(edge("rz-t", ResizeEdge::Top, CursorStyle::ResizeUpDown).top_0().left(k).right(k).h(t))
+                    .child(edge("rz-b", ResizeEdge::Bottom, CursorStyle::ResizeUpDown).bottom_0().left(k).right(k).h(t))
+                    .child(edge("rz-l", ResizeEdge::Left, CursorStyle::ResizeLeftRight).left_0().top(k).bottom(k).w(t))
+                    .child(edge("rz-r", ResizeEdge::Right, CursorStyle::ResizeLeftRight).right_0().top(k).bottom(k).w(t))
+                    .child(edge("rz-tl", ResizeEdge::TopLeft, CursorStyle::ResizeUpLeftDownRight).top_0().left_0().size(k))
+                    .child(edge("rz-tr", ResizeEdge::TopRight, CursorStyle::ResizeUpRightDownLeft).top_0().right_0().size(k))
+                    .child(edge("rz-bl", ResizeEdge::BottomLeft, CursorStyle::ResizeUpRightDownLeft).bottom_0().left_0().size(k))
+                    .child(edge("rz-br", ResizeEdge::BottomRight, CursorStyle::ResizeUpLeftDownRight).bottom_0().right_0().size(k))
+            })
     }
 }
 
@@ -423,7 +451,10 @@ pub fn run(initial: Initial) {
         let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/MaterialIcons-Regular.ttf").as_slice())]);
         let fonts = pick_fonts(cx);
         let bounds = Bounds::centered(None, size(px(1480.0), px(900.0)), cx);
-        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, move |window, cx| {
+        let custom = model::load_settings().custom_titlebar;
+        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), window_min_size: Some(size(px(900.0), px(560.0))),
+            window_decorations: Some(if custom { WindowDecorations::Client } else { WindowDecorations::Server }),
+            titlebar: Some(TitlebarOptions { title: Some("Perusal".into()), appears_transparent: true, ..Default::default() }), ..Default::default() }, move |window, cx| {
             let root = cx.new(|cx| Root::new(initial, fonts, cx));
             window.focus(&root.read(cx).focus.clone(), cx);
             root

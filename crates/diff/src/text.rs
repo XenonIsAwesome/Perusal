@@ -36,6 +36,25 @@ pub fn diff_lines(old: &str, new: &str, context: usize) -> Vec<Line> {
     out
 }
 
+/// Like [`diff_lines`] but lines that differ only in whitespace count as equal (context shows the new text). No word highlights.
+pub fn diff_lines_ws(old: &str, new: &str, context: usize) -> Vec<Line> {
+    let (ol, nl): (Vec<&str>, Vec<&str>) = (old.split_inclusive('\n').collect(), new.split_inclusive('\n').collect());
+    let norm = |v: &[&str]| v.iter().map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>() + "\n").collect::<String>();
+    let (a, b) = (norm(&ol), norm(&nl));
+    let d = TextDiff::from_lines(&a, &b);
+    let mut out = Vec::new();
+    for group in d.grouped_ops(context) {
+        for op in &group {
+            for ch in d.iter_changes(op) {
+                let kind = match ch.tag() { ChangeTag::Equal => Kind::Context, ChangeTag::Insert => Kind::Added, ChangeTag::Delete => Kind::Removed };
+                let text = match kind { Kind::Removed => ch.old_index().and_then(|i| ol.get(i)), _ => ch.new_index().and_then(|i| nl.get(i)) }.copied().unwrap_or("").trim_end_matches('\n').trim_end_matches('\r').to_string();
+                out.push(Line { kind, old_no: ch.old_index().map(|i| i as u32 + 1), new_no: ch.new_index().map(|i| i as u32 + 1), text, words: vec![] });
+            }
+        }
+    }
+    out
+}
+
 /// Number of hunks in a diff (contiguous change groups).
 pub fn hunk_count(old: &str, new: &str) -> u32 { TextDiff::from_lines(old, new).grouped_ops(0).len() as u32 }
 
@@ -223,5 +242,11 @@ mod reanchor_tests {
         let old = "a\nb\nc\nd\n"; let new = "x\ny\na\nB\nc\nd\n";
         assert_eq!(map_line(old, new, 1), Some(3)); assert_eq!(map_line(old, new, 2), None);
         assert_eq!(reanchor(old, new, (3, 4)), Some((5, 6))); assert_eq!(reanchor(old, new, (2, 3)), None);
+    }
+    #[test] fn whitespace_only_changes_vanish() {
+        let (a, b) = ("fn a() {\n  x();\n}\n", "fn a() {\n    x();\n    y();\n}\n");
+        assert!(diff_lines(a, b, 0).iter().any(|l| l.kind == Kind::Removed));
+        let w = diff_lines_ws(a, b, 0); assert_eq!(w.iter().filter(|l| l.kind == Kind::Removed).count(), 0); assert_eq!(w.iter().filter(|l| l.kind == Kind::Added).map(|l| l.text.trim()).collect::<Vec<_>>(), vec!["y();"]);
+        assert!(diff_lines_ws("a\n b\n", "a\n    b\n", 3).iter().all(|l| l.kind == Kind::Context));
     }
 }

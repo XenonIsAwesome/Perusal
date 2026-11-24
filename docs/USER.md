@@ -87,3 +87,11 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 
 ## Testing against a mock host
 `PERUSAL_API_BASE` replaces the API base URL, `PERUSAL_GIT_BASE` replaces the clone base (for example `file:///srv/git`), and `PERUSAL_POLL_SECS` sets the update interval. Useful for GitHub Enterprise proxies and for tests.
+
+## v4 additions
+- **Sort** is a button that opens a tier panel: add tiers from field chips or write an expression, flip asc/desc, reorder, remove. **Generate with AI** (sparkle next to the filter, inside the sort panel, and in Settings > Review > Grouping rules) turns a plain description into a filter, sort or rule using your agent.
+- **Hide whitespace-only changes** (space-bar button in the filter row, default in Settings > Review). Filter fields `whitespace` and `meaningful` work in filters and sorts.
+- Settings has tabs: Appearance (themes, built-in title bar), Accounts (Import all logins from gh/glab, including enterprise/self-hosted hosts), Notifications (per-event desktop notifications), Review, Presets (global and per-project), AI (model and effort dropdowns with a Custom option).
+- Grouping rules can be duplicated (built-ins too) and custom ones edited; the C/C++ rule covers .h .hh .hpp .hxx .inl .ipp .tpp .txx .c .cc .cpp .cxx .cu .cuh .m .mm.
+- Files in a grouped batch can be collapsed from their header. Next wraps from the last batch to the first. A symlink always shows "Go to the original" (it says so when the target is not part of the change). The merge request link in the header opens it in the browser.
+- Comments render bold, italic, mono code, clickable links and highlighted code blocks; suggestions are shown as a diff against the original lines.
