@@ -802,6 +802,10 @@ name = "perusal-app"
 version = "0.1.0"
 dependencies = [
  "perusal-core",
+ "perusal-diff",
+ "perusal-filter",
+ "serde",
+ "toml",
 ]
 
 [[package]]

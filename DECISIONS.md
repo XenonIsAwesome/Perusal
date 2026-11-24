@@ -10,3 +10,5 @@
 - GitLab viewed-state: the API exposes none, so marks stay local (`Unsupported`). GitLab "request changes" has no equivalent: submit returns `Unsupported` and the UI hides the control.
 - GitHub viewed sync uses GraphQL markFileAsViewed/unmarkFileAsViewed (needs PR node id lookup first); implemented but only mock-tested.
 - GitLab submit sends positions with null base/start SHA; real instances need the MR diff_refs filled in (to verify against a live host).
+- GPUI: crates.io `gpui` 0.2.2 was fetched but fails to compile in this sandbox (transitive `xattr` cannot find libc::ENOATTR on this toolchain/libc, also after `cargo update`). No window could be built or run, so `perusal-app` is a lib of tested view models (vm, tabs, keymap, theme) plus a stub binary. Wiring GPUI (pinned) is the first step on a machine where it builds; the view-model API is what the views bind to.
+- Built-in theme colors are first-pass values validated by `perusal theme check` contrast rules, not hand-tuned.

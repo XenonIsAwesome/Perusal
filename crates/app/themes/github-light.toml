@@ -1,0 +1,29 @@
+name = "GitHub Light"
+dark = false
+
+[ui]
+background = "#ffffff"
+foreground = "#24292f"
+accent = "#0969da"
+border = "#d0d7de"
+
+[syntax]
+keyword = "#cf222e"
+string = "#0a3069"
+comment = "#57606a"
+number = "#0550ae"
+type = "#953800"
+function = "#8250df"
+
+[diff]
+added = "#e6ffec"
+removed = "#ffebe9"
+added_word = "#abf2bc"
+removed_word = "#ffc1ba"
+
+[status]
+ci_running = "#d29922"
+ci_passed = "#2da44e"
+ci_failed = "#cf222e"
+viewed = "#8b949e"
+ai = "#a371f7"

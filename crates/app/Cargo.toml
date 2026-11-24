@@ -4,5 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "perusal_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "perusal"
+path = "src/main.rs"
+
 [dependencies]
 perusal-core.workspace = true
+perusal-diff.workspace = true
+perusal-filter.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

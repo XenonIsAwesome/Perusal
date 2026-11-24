@@ -1,0 +1,29 @@
+name = "GitHub Dark"
+dark = true
+
+[ui]
+background = "#0d1117"
+foreground = "#c9d1d9"
+accent = "#58a6ff"
+border = "#30363d"
+
+[syntax]
+keyword = "#ff7b72"
+string = "#a5d6ff"
+comment = "#8b949e"
+number = "#79c0ff"
+type = "#ffa657"
+function = "#d2a8ff"
+
+[diff]
+added = "#12261e"
+removed = "#2d1517"
+added_word = "#1f6f43"
+removed_word = "#8e2a2f"
+
+[status]
+ci_running = "#d29922"
+ci_passed = "#2da44e"
+ci_failed = "#cf222e"
+viewed = "#8b949e"
+ai = "#a371f7"
