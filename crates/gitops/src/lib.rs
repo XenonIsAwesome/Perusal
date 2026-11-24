@@ -121,6 +121,23 @@ pub fn local_base(dir: &Path, branch: &str, override_base: Option<&str>) -> Resu
     merge_base(dir, &b, branch)
 }
 
+/// Exports the tree at `rev` into `dest` (a plain read-only snapshot without .git), for agents to read.
+pub fn export_tree(dir: &Path, rev: &str, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut a = Command::new("git").args(["archive", "--format=tar", rev]).current_dir(dir).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let t = Command::new("tar").args(["-x", "-C"]).arg(dest).stdin(a.stdout.take().unwrap()).output().map_err(|e| e.to_string())?;
+    let o = a.wait_with_output().map_err(|e| e.to_string())?;
+    if !o.status.success() { return Err(redact(&String::from_utf8_lossy(&o.stderr))); }
+    if !t.status.success() { return Err(String::from_utf8_lossy(&t.stderr).to_string()); }
+    Ok(())
+}
+
+/// Unified patch for `base..head` (three-dot), for review prompts.
+pub fn patch(dir: &Path, base: &str, head: &str) -> Result<String> {
+    let o = Command::new("git").args(["diff", "--no-color", "-U2", &format!("{base}...{head}")]).current_dir(dir).output().map_err(|e| e.to_string())?;
+    if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(redact(&String::from_utf8_lossy(&o.stderr))) }
+}
+
 /// File content at a revision, if present. Exact bytes as text (no trimming: line diffs depend on the final newline).
 pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> {
     let o = Command::new("git").args(["show", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;
@@ -170,6 +187,8 @@ mod tests {
         let c1 = rows[1].sha.clone(); let c2 = rows[0].sha.clone();
         assert_eq!(files_in(&d, None, &c1).unwrap(), vec!["x"]); assert_eq!(files_in(&d, None, &c2).unwrap(), vec!["y"]);
         let mut both = files_in(&d, Some(&base), "feat").unwrap(); both.sort(); assert_eq!(both, vec!["x", "y"]);
+        let snap = d.join("snap"); export_tree(&d, "feat", &snap).unwrap(); assert_eq!(std::fs::read_to_string(snap.join("x")).unwrap(), "x"); assert!(!snap.join(".git").exists());
+        assert!(patch(&d, "main", "feat").unwrap().contains("+x"));
         assert_eq!(show(&d, "feat", "x").unwrap(), "x"); std::fs::write(d.join("nl"), "a\nb\n").unwrap(); g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "nl"]); assert_eq!(show(&d, "feat", "nl").unwrap(), "a\nb\n"); assert!(show(&d, "main", "x").is_none());
         let _ = std::fs::remove_dir_all(&d);
     }

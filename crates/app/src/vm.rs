@@ -20,6 +20,8 @@ pub struct ReviewVm {
     /// "mark as viewed" toggle carried by the next-batch button.
     pub mark_on_next: bool,
     history: Vec<usize>,
+    /// Batches the user built by hand (ctrl/shift-click). They override automatic grouping for their members.
+    pub manual: Vec<Vec<usize>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -30,7 +32,7 @@ impl ReviewVm {
         let viewed = store.viewed(review).unwrap_or_default();
         for f in &mut files { f.viewed = viewed.contains(&f.path); }
         let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, dir_order: false, exclude_noisy_from_progress: false,
-            commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: true, history: vec![] };
+            commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: true, history: vec![], manual: vec![] };
         let _ = vm.refresh(); vm
     }
     /// Recomputes visible files and batches after any filter/sort/scope change.
@@ -43,17 +45,37 @@ impl ReviewVm {
             let sel: Vec<FileStat> = idx.iter().map(|&i| self.files[i].clone()).collect();
             group_files(&sel).into_iter().map(|g| g.into_iter().map(|j| idx[j]).collect()).collect()
         } else { idx.iter().map(|&i| vec![i]).collect() };
+        // manual groups: members (that are visible) form one batch at the position of the first member
+        for g in &self.manual {
+            let members: Vec<usize> = idx.iter().copied().filter(|i| g.contains(i)).collect();
+            if members.len() < 2 { continue; }
+            let Some(pos) = self.batches.iter().position(|b| b.iter().any(|i| members.contains(i))) else { continue };
+            for b in &mut self.batches { b.retain(|i| !members.contains(i)); }
+            self.batches.insert(pos, members);
+            self.batches.retain(|b| !b.is_empty());
+        }
         self.visible = idx; self.cursor = self.cursor.min(self.batches.len().saturating_sub(1)); Ok(())
     }
     pub fn set_filter(&mut self, f: &str) -> Result<(), String> {
         let old = std::mem::replace(&mut self.filter, f.into());
         self.refresh().inspect_err(|_| { self.filter = old; })
     }
+    /// Makes `members` one batch (needs at least two). Files already in another manual group leave it.
+    pub fn group_files_manually(&mut self, members: Vec<usize>) {
+        if members.len() < 2 { return; }
+        for g in &mut self.manual { g.retain(|i| !members.contains(i)); }
+        self.manual.retain(|g| g.len() >= 2); self.manual.push(members.clone());
+        let _ = self.refresh(); self.select_file(members[0]);
+    }
+    /// Dissolves the manual group containing `fi`.
+    pub fn ungroup(&mut self, fi: usize) { self.manual.retain(|g| !g.contains(&fi)); let _ = self.refresh(); }
+    pub fn is_manually_grouped(&self, fi: usize) -> bool { self.manual.iter().any(|g| g.contains(&fi)) }
     /// Moves the cursor to the batch containing file `i` (clicking a file in the list).
     pub fn select_file(&mut self, i: usize) {
         if let Some(b) = self.batches.iter().position(|b| b.contains(&i)) { if b != self.cursor { self.history.push(self.cursor); } self.cursor = b; }
     }
     pub fn current_batch(&self) -> &[usize] { self.batches.get(self.cursor).map(|v| v.as_slice()).unwrap_or(&[]) }
+    pub fn batches_contain_together(&self, a: usize, b: usize) -> bool { self.batches.iter().any(|x| x.contains(&a) && x.contains(&b)) }
     pub fn batch_count(&self) -> usize { self.batches.len() }
     pub fn set_viewed(&mut self, store: &Store, i: usize, v: bool) {
         self.files[i].viewed = v; let _ = store.set_viewed(self.review, &self.files[i].path.clone(), v);
@@ -106,6 +128,14 @@ mod tests {
         vm.set_filter("additions > 8").unwrap(); assert_eq!(vm.batch_count(), 3);
         assert!(vm.set_filter("nope >").is_err()); assert_eq!(vm.filter, "additions > 8");
         vm.sort = "additions desc".into(); vm.refresh().unwrap(); assert_eq!(vm.files[vm.current_batch()[0]].path, "Cargo.lock");
+    }
+    #[test] fn manual_groups_override_and_ungroup() {
+        let (s, mut vm) = setup(); vm.group_files_manually(vec![2, 4]);
+        assert_eq!(vm.batch_count(), 4); assert_eq!(vm.current_batch(), &[2, 4]); assert!(vm.is_manually_grouped(4));
+        vm.next(&s); assert_eq!(vm.progress().0, 2); // the whole batch is marked together
+        vm.ungroup(2); assert_eq!(vm.batch_count(), 5); assert!(!vm.is_manually_grouped(4));
+        vm.group_files_manually(vec![0]); assert_eq!(vm.batch_count(), 5); // a single file is not a group
+        vm.grouping = true; vm.refresh().unwrap(); vm.group_files_manually(vec![0, 3]); assert!(vm.batches_contain_together(0, 3));
     }
     #[test] fn dir_order_follows_tree() {
         let (_s, mut vm) = setup(); vm.dir_order = true; vm.refresh().unwrap();

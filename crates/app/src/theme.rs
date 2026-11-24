@@ -52,6 +52,31 @@ pub fn builtin(name: &str) -> Option<Theme> {
     toml::from_str(s).ok()
 }
 
+pub const BUILTIN_NAMES: [&str; 4] = ["dark", "light", "github-dark", "github-light"];
+
+/// Loads a theme by name: a built-in, else `<dir>/<name>.toml` when it validates. Falls back to `dark`.
+pub fn load(name: &str, themes_dir: Option<&std::path::Path>) -> Theme {
+    if let Some(t) = builtin(name) { return t; }
+    if let Some(d) = themes_dir {
+        if let Ok(src) = std::fs::read_to_string(d.join(format!("{name}.toml"))) { if validate(&src).is_empty() { if let Ok(t) = toml::from_str(&src) { return t; } } }
+    }
+    builtin("dark").expect("built-in")
+}
+
+/// Built-in names followed by the valid custom theme files found in `themes_dir` (without the .toml extension).
+pub fn available(themes_dir: Option<&std::path::Path>) -> Vec<String> {
+    let mut v: Vec<String> = BUILTIN_NAMES.iter().map(|s| s.to_string()).collect();
+    if let Some(d) = themes_dir {
+        let mut custom: Vec<String> = std::fs::read_dir(d).into_iter().flatten().flatten().filter_map(|e| {
+            let p = e.path(); if p.extension()? != "toml" { return None; }
+            let n = p.file_stem()?.to_str()?.to_string();
+            (!v.contains(&n) && validate(&std::fs::read_to_string(&p).ok()?).is_empty()).then_some(n)
+        }).collect();
+        custom.sort(); v.extend(custom);
+    }
+    v
+}
+
 /// Picks the light or dark theme name from the OS appearance.
 pub fn follow_os(os_dark: bool, light: &str, dark: &str) -> String { if os_dark { dark.into() } else { light.into() } }
 
@@ -65,6 +90,13 @@ mod tests { use super::*;
         let e = validate(&bad).join("\n"); assert!(e.contains("not a #rrggbb")); assert!(e.contains("missing key 'added'")); assert!(e.contains("unknown key 'adde'"));
         let low = DARK.replace("foreground = \"#e6edf3\"", "foreground = \"#222222\""); assert!(validate(&low).iter().any(|m| m.contains("contrast")));
         assert!(validate("not toml [").iter().any(|m| m.contains("cannot parse")));
+    }
+    #[test] fn custom_themes_load_and_list() {
+        let d = std::env::temp_dir().join(format!("perusal-themes-{}", std::process::id())); std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("warm.toml"), DARK.replace("Perusal Dark", "Warm")).unwrap(); std::fs::write(d.join("broken.toml"), "nope").unwrap();
+        assert_eq!(available(Some(&d)), vec!["dark", "light", "github-dark", "github-light", "warm"]);
+        assert_eq!(load("warm", Some(&d)).name, "Warm"); assert_eq!(load("missing", Some(&d)).name, "Perusal Dark"); assert_eq!(load("light", None).name, "Perusal Light");
+        let _ = std::fs::remove_dir_all(&d);
     }
     #[test] fn zoom_and_os() { assert_eq!(zoom(1.0, 0), 1.0); assert!((zoom(1.0, 2) - 1.2).abs() < 1e-6); assert_eq!(zoom(3.0, 5), 3.0); assert_eq!(follow_os(true, "light", "dark"), "dark"); }
 }

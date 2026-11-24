@@ -4,6 +4,8 @@ pub mod ci;
 pub mod deeplink;
 pub mod filterbar;
 pub mod graph;
+pub mod markdown;
+pub mod settings;
 pub mod keymap;
 pub mod tabs;
 pub mod textfield;

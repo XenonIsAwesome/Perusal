@@ -13,6 +13,7 @@ perusal-core.workspace = true
 perusal-diff.workspace = true
 perusal-filter.workspace = true
 perusal-gitops.workspace = true
+perusal-agents.workspace = true
 perusal-app = { path = "../app" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "0855410ccd2040efbbf14d71409166b6c472e0bd" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "0855410ccd2040efbbf14d71409166b6c472e0bd", features = ["font-kit", "wayland", "x11"] }

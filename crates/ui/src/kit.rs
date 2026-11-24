@@ -81,3 +81,58 @@ pub fn input_box(f: &TextField, focused: bool, placeholder: &str, p: &Pal, secre
     div().px_3().py(px(6.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).text_color(p.fg).min_h(px(32.0)).flex().items_center().cursor_text()
         .child(field_text(f, focused, placeholder, p))
 }
+
+/// On/off switch visual (wrap in an element with an on_click).
+pub fn switch(on: bool, p: &Pal) -> Div {
+    div().w(px(34.0)).h(px(18.0)).rounded_full().p(px(2.0)).flex().when(on, |d| d.justify_end()).bg(if on { p.success } else { p.border }).flex_none()
+        .child(div().size(px(14.0)).rounded_full().bg(gpui::white()))
+}
+
+/// Segmented control cell.
+pub fn seg_cell(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool, p: &Pal) -> Stateful<Div> {
+    let (fg, hv) = (p.fg, p.hover);
+    div().id(id).px_3().py(px(3.0)).text_xs().font_weight(FontWeight::MEDIUM).cursor_pointer().text_color(if on { p.fg } else { p.muted }).bg(if on { p.hover } else { gpui::transparent_black() })
+        .hover(move |s| s.text_color(fg).bg(hv)).child(label.into())
+}
+pub fn seg_box(p: &Pal) -> Div { div().flex().rounded_md().border_1().border_color(p.border).overflow_hidden() }
+
+/// Renders parsed markdown as a document.
+pub fn markdown_view(blocks: &[perusal_app::markdown::Block], p: &Pal, mono: &SharedString) -> Div {
+    use perusal_app::markdown::Block;
+    let mut col = div().flex().flex_col().gap_3();
+    for b in blocks {
+        col = col.child(match b {
+            Block::Heading(l, spans) => {
+                let size = match l { 1 => 28.0, 2 => 22.0, 3 => 18.0, 4 => 16.0, _ => 14.0 };
+                div().pt_2().pb_1().when(*l <= 2, |d| d.border_b_1().border_color(p.border)).text_size(px(size)).font_weight(FontWeight::BOLD).child(inline(spans, p, mono))
+            }
+            Block::Para(spans) => div().text_color(p.fg).line_height(px(22.0)).child(inline(spans, p, mono)),
+            Block::Code { text, .. } => div().flex().flex_col().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface).font_family(mono.clone()).text_size(px(13.0)).overflow_hidden()
+                .children(text.lines().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() })).collect::<Vec<_>>()),
+            Block::List { ordered, start, items } => div().flex().flex_col().gap_1().pl_4().children(items.iter().enumerate().map(|(i, it)| {
+                div().flex().gap_2().child(div().w(px(22.0)).flex_none().text_color(p.muted).text_right().child(if *ordered { format!("{}.", start + i as u64) } else { "•".to_string() }))
+                    .child(markdown_view(it, p, mono).flex_1().min_w_0().gap_1())
+            }).collect::<Vec<_>>()),
+            Block::Quote(inner) => div().pl_3().border_l_4().border_color(p.border).text_color(p.muted).child(markdown_view(inner, p, mono)),
+            Block::Rule => div().h(px(1.0)).w_full().bg(p.border).my_2(),
+            Block::Table { head, rows } => div().flex().flex_col().rounded_md().border_1().border_color(p.border).overflow_hidden()
+                .child(div().flex().bg(p.surface).font_weight(FontWeight::SEMIBOLD).children(head.iter().map(|c| div().flex_1().min_w_0().px_3().py_1().border_r_1().border_color(p.border).child(inline(c, p, mono))).collect::<Vec<_>>()))
+                .children(rows.iter().map(|r| div().flex().border_t_1().border_color(p.border).children(r.iter().map(|c| div().flex_1().min_w_0().px_3().py_1().border_r_1().border_color(p.border).child(inline(c, p, mono))).collect::<Vec<_>>())).collect::<Vec<_>>()),
+        });
+    }
+    col
+}
+
+fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, _mono: &SharedString) -> gpui::StyledText {
+    let mut text = String::new(); let mut runs: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = vec![];
+    for s in spans {
+        let start = text.len(); text.push_str(&s.text);
+        let mut st = gpui::HighlightStyle::default(); let mut any = false;
+        if s.bold { st.font_weight = Some(FontWeight::BOLD); any = true; }
+        if s.italic { st.font_style = Some(gpui::FontStyle::Italic); any = true; }
+        if s.code { st.background_color = Some(p.hover); st.color = Some(p.fg); any = true; }
+        if s.link.is_some() { st.color = Some(p.accent); any = true; }
+        if any && text.len() > start { runs.push((start..text.len(), st)); }
+    }
+    gpui::StyledText::new(text).with_highlights(runs)
+}

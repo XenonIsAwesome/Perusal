@@ -280,9 +280,67 @@ pub fn complete(prefix: &str) -> Vec<&'static str> {
     FIELDS.iter().chain(FUNCS.iter()).copied().filter(|c| c.starts_with(&word) && *c != word).collect()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Suggestion { pub label: String, pub detail: &'static str, /// text that replaces the word being typed
+    pub insert: String, pub kind: &'static str }
+
+fn field_doc(f: &str) -> &'static str {
+    match f {
+        "name" => "file name", "path" => "full path", "extension" | "ext" => "extension without the dot", "language" => "detected language",
+        "status" => "added, modified, deleted, renamed", "binary" => "binary file", "generated" => "generated or vendored file", "noisy" => "collapsed by default (lockfiles, generated, huge)",
+        "additions" | "added" => "lines added", "deletions" | "removed" => "lines removed", "net" => "additions minus deletions", "changed" => "additions plus deletions",
+        "ratio" => "balance of adds and removes, 0 to 0.5", "hunks" => "number of hunks", "size" => "file size in bytes",
+        "viewed" => "marked as viewed", "comments" => "number of comments", "unresolved" => "unresolved threads", "ai" => "flagged by AI",
+        _ => "",
+    }
+}
+fn func_doc(f: &str) -> &'static str {
+    match f { "avg" => "average over all files", "sum" => "total over all files", "max" => "largest value", "min" => "smallest value", "count" => "how many files match", "top" => "top(n, expr): the n largest", "bottom" => "bottom(n, expr): the n smallest", _ => "" }
+}
+
+/// Suggestions for the text before the caret, plus how many chars before the caret the chosen suggestion replaces.
+pub fn suggest(before: &str) -> (Vec<Suggestion>, usize) {
+    let word: String = before.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+    let wl = word.chars().count();
+    let lower = word.to_lowercase();
+    // value suggestions after `field ==`
+    let head = &before[..before.len() - word.len()];
+    let h = head.trim_end().trim_end_matches('"').trim_end();
+    for (field, values) in [("status", &["added", "modified", "deleted", "renamed"][..]), ("language", &["rust", "python", "typescript", "javascript", "c", "cpp", "go", "java", "markdown", "toml", "json"][..])] {
+        for op in ["==", "!=", "="] {
+            if h.ends_with(&format!("{field} {op}")) || h.ends_with(&format!("{field}{op}")) {
+                let quoted = head.trim_end().ends_with('"');
+                let out: Vec<Suggestion> = values.iter().filter(|v| v.starts_with(&lower)).map(|v| Suggestion { label: v.to_string(), detail: "value", insert: if quoted { v.to_string() } else { format!("\"{v}\"") }, kind: "value" }).collect();
+                return (out, wl);
+            }
+        }
+    }
+    if word.is_empty() {
+        // at the start of an expression, offer the common fields
+        if before.trim().is_empty() { return (["additions", "name", "path", "status", "viewed", "noisy", "deletions", "language"].iter().map(|f| Suggestion { label: f.to_string(), detail: field_doc(f), insert: f.to_string(), kind: "field" }).collect(), 0); }
+        return (vec![], 0);
+    }
+    if word.chars().all(|c| c.is_ascii_digit()) { return (vec![], wl); }
+    let mut out: Vec<Suggestion> = vec![];
+    for f in FIELDS.iter().filter(|f| f.starts_with(&lower) && **f != lower) { out.push(Suggestion { label: f.to_string(), detail: field_doc(f), insert: f.to_string(), kind: "field" }); }
+    for f in FUNCS.iter().filter(|f| f.starts_with(&lower) && **f != lower) { out.push(Suggestion { label: format!("{f}()"), detail: func_doc(f), insert: format!("{f}("), kind: "function" }); }
+    if out.is_empty() { for f in FIELDS.iter().filter(|f| f.contains(&lower) && **f != lower) { out.push(Suggestion { label: f.to_string(), detail: field_doc(f), insert: f.to_string(), kind: "field" }); } }
+    out.truncate(8);
+    (out, wl)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn suggestions() {
+        let (s, n) = suggest("name ~ /x/ && add"); assert_eq!(n, 3); assert!(s.iter().any(|x| x.insert == "additions" && x.kind == "field"));
+        let (s, _) = suggest("av"); assert_eq!(s[0].insert, "avg(");
+        let (s, n) = suggest("status == \"ad"); assert_eq!((s[0].insert.as_str(), n), ("added", 2));
+        let (s, _) = suggest("status == "); assert!(s.iter().any(|x| x.insert == "\"deleted\""));
+        assert!(!suggest("").0.is_empty()); assert!(suggest("additions > ").0.is_empty()); assert!(suggest("additions > 5").0.is_empty());
+        assert!(suggest("zzz").0.is_empty()); let (s, _) = suggest("tions"); assert!(s.iter().any(|x| x.label == "additions"));
+    }
+    
     use perusal_diff::Status;
     fn files() -> Vec<FileStat> {
         let mut v = vec![

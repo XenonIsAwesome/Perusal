@@ -23,13 +23,16 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&d); d
 }
-pub fn tree_pref() -> bool { std::fs::read_to_string(data_dir().join("files_tree")).map(|s| s.trim() == "1").unwrap_or(false) }
-pub fn set_tree_pref(on: bool) { let _ = std::fs::write(data_dir().join("files_tree"), if on { "1" } else { "0" }); }
-pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
-pub fn token_store() -> FileStore {
-    let d = std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."));
-    FileStore { dir: d.join("tokens") }
+pub fn config_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
+pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
+pub fn load_settings() -> perusal_app::settings::Settings { std::fs::read_to_string(config_dir().join("settings.toml")).map(|s| perusal_app::settings::Settings::from_toml(&s)).unwrap_or_default() }
+pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::create_dir_all(config_dir()); let _ = std::fs::write(config_dir().join("settings.toml"), s.to_toml()); }
+/// Where the read-only code snapshot for agents lives, per review and head.
+pub fn snapshot_dir(review: i64, rev: &str) -> PathBuf { data_dir().join("snapshots").join(format!("{review}-{}", rev[..rev.len().min(12)].replace('/', "_"))) }
+pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
+pub fn token_store() -> FileStore { FileStore { dir: config_dir().join("tokens") } }
 pub fn token_for(host: &str) -> Option<String> { token_store().get(host).or_else(|| std::env::var("PERUSAL_TOKEN").ok().filter(|t| !t.is_empty())) }
 
 fn provider(r: &MrRef, token: String) -> Result<Box<dyn Provider>, String> {

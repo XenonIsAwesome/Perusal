@@ -41,6 +41,13 @@ impl TextField {
         self.cursor = to.min(self.len());
     }
 
+    /// Text before the caret.
+    pub fn before_caret(&self) -> &str { &self.text[..self.byte(self.cursor)] }
+    /// Replaces the `n` chars before the caret with `s` (autocomplete).
+    pub fn replace_before_caret(&mut self, n: usize, s: &str) {
+        self.anchor = None; let n = n.min(self.cursor); let (b0, b1) = (self.byte(self.cursor - n), self.byte(self.cursor));
+        self.text.replace_range(b0..b1, s); self.cursor = self.cursor - n + s.chars().count();
+    }
     /// Handles one key. `clip` is the clipboard text, which the caller reads only for paste keys (see `is_paste`).
     pub fn apply(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool, key_char: Option<&str>, clip: Option<&str>) -> Outcome {
         let chars: Vec<char> = self.text.chars().collect();
@@ -94,6 +101,10 @@ mod tests {
         let mut f = TextField::new("alpha beta gamma"); f.apply("left", true, false, false, None, None); assert_eq!(f.cursor, 11);
         f.apply("backspace", true, false, false, None, None); assert_eq!(f.text, "alpha gamma");
         assert!(!f.apply("enter", false, false, false, None, None).consumed); assert!(!f.apply("x", true, false, false, Some("x"), None).consumed || true);
+    }
+    #[test] fn autocomplete_replace() {
+        let mut f = TextField::new("x && add"); f.replace_before_caret(3, "additions"); assert_eq!(f.text, "x && additions"); assert_eq!(f.before_caret(), "x && additions");
+        f.apply("left", false, false, false, None, None); f.replace_before_caret(0, "!"); assert_eq!(f.text, "x && addition!s");
     }
     #[test] fn paste_keys() { assert!(is_paste("v", true, false)); assert!(is_paste("insert", false, true)); assert!(!is_paste("v", false, false)); }
 }

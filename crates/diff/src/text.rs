@@ -39,6 +39,20 @@ pub fn diff_lines(old: &str, new: &str, context: usize) -> Vec<Line> {
 /// Number of hunks in a diff (contiguous change groups).
 pub fn hunk_count(old: &str, new: &str) -> u32 { TextDiff::from_lines(old, new).grouped_ops(0).len() as u32 }
 
+/// Pairs lines for a side-by-side view: context on both sides, runs of removals next to runs of additions.
+/// Entries are indexes into `lines`: (left, right).
+pub fn split_pairs(lines: &[Line]) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut out = Vec::new(); let mut i = 0;
+    while i < lines.len() {
+        if lines[i].kind == Kind::Context { out.push((Some(i), Some(i))); i += 1; continue; }
+        let (mut rem, mut add) = (vec![], vec![]);
+        while i < lines.len() && lines[i].kind == Kind::Removed { rem.push(i); i += 1; }
+        while i < lines.len() && lines[i].kind == Kind::Added { add.push(i); i += 1; }
+        for k in 0..rem.len().max(add.len()) { out.push((rem.get(k).copied(), add.get(k).copied())); }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Class { Keyword, String, Comment, Number, Type, Function, Other }
 
@@ -82,6 +96,13 @@ mod tests {
         assert!(!rem.words.is_empty() && !add.words.is_empty());
         assert_eq!(&add.text[add.words[0].0..add.words[0].1], "there");
         assert_eq!(add.new_no, Some(2)); assert_eq!(rem.old_no, Some(2));
+    }
+    #[test] fn split_pairs_align_blocks() {
+        let l = diff_lines("a\nb\nc\nd\n", "a\nB\nX\nc\nd\ne\n", 3);
+        let p = split_pairs(&l);
+        let name = |i: Option<usize>| i.map(|i| l[i].text.clone()).unwrap_or_else(|| "-".into());
+        let got: Vec<(String, String)> = p.iter().map(|(a, b)| (name(*a), name(*b))).collect();
+        assert_eq!(got, vec![("a".into(), "a".into()), ("b".into(), "B".into()), ("-".into(), "X".into()), ("c".into(), "c".into()), ("d".into(), "d".into()), ("-".into(), "e".into())]);
     }
     #[test] fn hunks() { assert_eq!(hunk_count("1\n2\n3\n4\n5\n", "x\n2\n3\n4\ny\n"), 2); }
     #[test] fn rust_highlight() {

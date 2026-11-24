@@ -26,7 +26,7 @@ type Opened = Result<Model, OpenErr>;
 // field ids: 0 repo, 1 branch, 2 url, 3 browse, 4 token
 impl Root {
     fn new(initial: Initial, fonts: Fonts, cx: &mut Context<Self>) -> Self {
-        let theme = theme::builtin("dark").expect("built-in theme");
+        let theme = theme::load(&model::load_settings().theme, Some(&model::themes_dir()));
         let mut r = Root { pal: Pal::new(&theme), theme, fonts, focus: cx.focus_handle(), review: None, tab: Tab::Url, f_repo: Default::default(), f_branch: Default::default(), f_url: Default::default(),
             f_browse: Default::default(), f_token: Default::default(), active: 2, recent: vec![], mrs: vec![], msg: String::new(), note: Note::Info, busy: false, token_host: None, retry_url: None };
         r.refresh_recent();
@@ -48,9 +48,9 @@ impl Root {
         self.busy = false;
         match res {
             Ok(m) => {
-                let (theme, fonts) = (self.theme.clone(), self.fonts.clone());
-                let v = cx.new(|_| View::new(m, theme, fonts));
-                cx.subscribe(&v, |this, _, _: &Back, cx| { this.review = None; this.refresh_recent(); this.msg.clear(); cx.notify(); }).detach();
+                let fonts = self.fonts.clone();
+                let v = cx.new(|_| View::new(m, model::load_settings(), fonts));
+                cx.subscribe(&v, |this, _, _: &Back, cx| { this.theme = theme::load(&model::load_settings().theme, Some(&model::themes_dir())); this.pal = Pal::new(&this.theme); this.review = None; this.refresh_recent(); this.msg.clear(); cx.notify(); }).detach();
                 self.review = Some(v); self.msg.clear(); self.token_host = None;
             }
             Err(OpenErr::NeedsToken { host, why }) => { self.say(Note::Error, format!("{why}. Paste an access token for {host} below and press Enter.")); self.token_host = Some(host); self.active = 4; }
