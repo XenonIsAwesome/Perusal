@@ -20,7 +20,7 @@ Sort: any expressions, comma separated, each optionally `asc` or `desc`.
 
 ## Presets, keys, themes
 Presets are TOML (global and per project, keyed by normalized remote URL); a project default auto-applies.
-Keymap overrides go in `keymap.toml` under `[keys]`. Themes: see `crates/app/themes/agents.md`; check with `perusal theme check`.
+Keymap overrides go in `keymap.toml` under `[keys]`. Themes: see `crates/app/themes/AGENTS.md`; check with `perusal theme check`.
 
 ## Hosts and tokens
 GitHub/GitLab (cloud and self-hosted). Tokens are stored in a mode-0600 file outside the database (keychain support pending).
@@ -57,3 +57,20 @@ In the Files panel, Ctrl+click toggles files and Shift+click selects a range; **
 **Ask AI** (`a`) opens a chat in the right panel with the selected lines as context. Answers can be saved as AI-tagged drafts with **Add as draft**.
 **AI review** runs the review prompt in `skills/review.md` and adds its findings as AI-tagged drafts you can edit or remove. Nothing is posted to the host.
 Agents run headless in a read-only snapshot of the reviewed head, with a minimal environment: only PATH, HOME, LANG, TERM, TMPDIR and XDG_RUNTIME_DIR are passed, and any variable whose name looks like a credential (TOKEN, KEY, SECRET...) is dropped, including API keys such as `ANTHROPIC_API_KEY`. Agents that need such a variable must use their own stored login.
+
+## Layout and controls (v2)
+- **Floating bar** at the bottom of the diff: previous/next batch, a comment on the whole merge request, Unified/Split, Diff/Preview for Markdown, and **Finish review**.
+- **Finish review** (`f`) posts your drafts plus an optional summary and a verdict (Comment, Approve, Request changes; GitLab has no Request changes). You can finish before viewing every file. For a local review it copies your drafts as Markdown and saves a file.
+- **Sidebars** collapse with their chevron buttons and resize by dragging the divider; the right panel's Commits and Drafts sections collapse too. Layout is remembered.
+- **Commit scope:** click a commit to review only that commit. A chip above the file list shows it; click it again or the close button to show everything.
+- **Symlinks** are shown in italics with a link icon and a note about the old and new target.
+- **Markdown preview** supports commenting: click a block (Shift+click to extend) and press `c`. The comment anchors to the block's source lines.
+- **Filters:** `ai` lists files with AI drafts and `comments > 0` files with any draft.
+- **Text fields** support mouse selection: click to place the caret, drag to select, double-click for a word, triple-click for all.
+- **AI:** while an agent works you see a loading indicator, the elapsed time and what it is doing (for Claude Code: files read, searches, web lookups). **Stop** ends it immediately. Settings has the agent, model and effort/variant.
+
+## Grouping rules
+Settings has the built-in rules (C/C++ headers and sources, TS/JS tests, Python tests, Rust tests, Protobuf with generated files) with an on/off switch each, and lets you add your own: a regular expression with a named `(?P<stem>...)` group. Files matching the same rule with the same stem, even in different folders, are batched. The first matching rule wins and very generic names (main, lib, index...) are ignored.
+
+## Custom themes
+Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/` in your file manager and creates an `AGENTS.md` there that explains the format to an AI agent. Open your agent in that folder and ask, for example: "Read AGENTS.md, then create a warmer dark theme called warm.toml and validate it with `perusal theme check warm.toml`."

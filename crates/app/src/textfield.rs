@@ -41,6 +41,19 @@ impl TextField {
         self.cursor = to.min(self.len());
     }
 
+    /// Puts the caret at a char index (clamped), optionally extending the selection (mouse drag / shift-click).
+    pub fn set_cursor(&mut self, ci: usize, extend: bool) { self.move_to(ci, extend); }
+    pub fn select_all(&mut self) { self.anchor = Some(0); self.cursor = self.len(); }
+    /// Selects the word around a char index (double-click).
+    pub fn select_word(&mut self, ci: usize) {
+        let chars: Vec<char> = self.text.chars().collect(); let ci = ci.min(chars.len());
+        let is_w = |c: char| c.is_alphanumeric() || c == '_';
+        let (mut a, mut b) = (ci, ci);
+        while a > 0 && is_w(chars[a - 1]) { a -= 1; }
+        while b < chars.len() && is_w(chars[b]) { b += 1; }
+        if a == b { b = (ci + 1).min(chars.len()); a = ci.min(b); }
+        self.anchor = Some(a); self.cursor = b;
+    }
     /// Text before the caret.
     pub fn before_caret(&self) -> &str { &self.text[..self.byte(self.cursor)] }
     /// Replaces the `n` chars before the caret with `s` (autocomplete).
@@ -105,6 +118,13 @@ mod tests {
     #[test] fn autocomplete_replace() {
         let mut f = TextField::new("x && add"); f.replace_before_caret(3, "additions"); assert_eq!(f.text, "x && additions"); assert_eq!(f.before_caret(), "x && additions");
         f.apply("left", false, false, false, None, None); f.replace_before_caret(0, "!"); assert_eq!(f.text, "x && addition!s");
+    }
+    #[test] fn mouse_placement_and_selection() {
+        let mut f = TextField::new("alpha beta_x gamma");
+        f.set_cursor(3, false); assert_eq!((f.cursor, f.selection()), (3, None));
+        f.set_cursor(8, true); assert_eq!(f.selected_text().as_deref(), Some("ha be"));
+        f.select_word(8); assert_eq!(f.selected_text().as_deref(), Some("beta_x")); f.select_all(); assert_eq!(f.selected_text().as_deref(), Some("alpha beta_x gamma"));
+        f.select_word(5); assert_eq!(f.selected_text().as_deref(), Some("alpha")); f.set_cursor(999, false); assert_eq!(f.cursor, 18);
     }
     #[test] fn paste_keys() { assert!(is_paste("v", true, false)); assert!(is_paste("insert", false, true)); assert!(!is_paste("v", false, false)); }
 }

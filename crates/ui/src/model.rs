@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 pub struct Model {
     pub repo: PathBuf, pub base_sha: String, pub branch: String, pub store: Store, pub vm: ReviewVm, pub graph: GraphVm, pub title: String,
     pub remote: Option<String>,
+    /// Set for remote reviews: which host, project and number to post the review to.
+    pub mr: Option<MrRef>,
 }
 
 #[derive(Debug)]
@@ -57,7 +59,7 @@ impl Model {
         let review = store.open_review(key, &title, &rev, files.len() as u32).map_err(|e| e.to_string())?;
         let vm = ReviewVm::new(&store, review, files);
         let graph = GraphVm::load(&repo, &base_sha, &rev, 6)?;
-        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote })
+        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None })
     }
 
     pub fn open_local(repo: &Path, branch: &str, base: Option<&str>) -> Result<Self, OpenErr> {
@@ -85,7 +87,8 @@ impl Model {
         perusal_gitops::git(&dir, &["fetch", "--filter=blob:none", "origin", &format!("+refs/heads/{}:refs/perusal/base", info.base_ref)])?;
         let base_sha = perusal_gitops::merge_base(&dir, "refs/perusal/base", &head)?;
         let canon = canonical(&r);
-        Self::finish(dir, base_sha, head, &format!("remote:{canon}"), info.title, Some(canon))
+        let mut m = Self::finish(dir, base_sha, head, &format!("remote:{canon}"), info.title, Some(canon))?;
+        m.mr = Some(r); Ok(m)
     }
 
     /// Reopens a review from the recent list using its stored key.
@@ -113,6 +116,40 @@ pub fn list_remote(target: &str) -> Result<Vec<(u64, String, String)>, OpenErr> 
 pub fn normalize_url_input(s: &str) -> String {
     let t = s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>').trim();
     if t.contains("://") { t.to_string() } else if t.is_empty() { String::new() } else { format!("https://{t}") }
+}
+
+/// Posts a finished review to the host (all comments in one call where the host allows). Blocking.
+pub fn submit_review(mr: &MrRef, sub: &perusal_providers::Submission) -> Result<(), String> {
+    let token = token_for(&mr.host).ok_or_else(|| format!("No access token for {}. Open the review from Home to enter one.", mr.host))?;
+    let p = provider(mr, token)?;
+    rt()?.block_on(p.submit(mr, sub)).map_err(|e| match e {
+        perusal_providers::Error::Unauthorized => format!("{} rejected the token. Enter a new one from Home.", mr.host),
+        perusal_providers::Error::Unsupported(w) => format!("{} does not support: {w}. Choose another verdict.", mr.host),
+        other => other.to_string(),
+    })
+}
+
+/// Opens a folder in the platform file manager, creating it first.
+pub fn open_dir(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
+    let (prog, args): (&str, Vec<&std::ffi::OsStr>) = if cfg!(target_os = "macos") { ("open", vec![path.as_os_str()]) } else if cfg!(target_os = "windows") { ("explorer", vec![path.as_os_str()]) } else { ("xdg-open", vec![path.as_os_str()]) };
+    std::process::Command::new(prog).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("cannot start {prog}: {e}"))
+}
+
+/// Writes the AGENTS.md that explains the theme format to an AI agent, if the folder does not have one yet.
+pub fn ensure_theme_docs() -> PathBuf {
+    let d = themes_dir(); let _ = std::fs::create_dir_all(&d);
+    let f = d.join("AGENTS.md");
+    if !f.exists() { let _ = std::fs::write(&f, include_str!("../../app/themes/AGENTS.md")); }
+    d
+}
+
+/// Saves a Markdown export of a local review and returns its path.
+pub fn export_markdown_file(title: &str, md: &str) -> Result<PathBuf, String> {
+    let d = data_dir().join("exports"); std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let f = d.join(format!("{safe}-{stamp}.md")); std::fs::write(&f, md).map_err(|e| e.to_string())?; Ok(f)
 }
 
 #[cfg(test)]

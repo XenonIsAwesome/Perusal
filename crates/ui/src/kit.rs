@@ -1,5 +1,9 @@
 //! Small design kit: palette, fonts, buttons, badges, and the rendered text field.
-use gpui::{div, prelude::*, px, rgb, App, ClipboardItem, Div, FontWeight, Hsla, SharedString, Stateful, Keystroke};
+use crate::icons::Icon;
+use gpui::{canvas, div, prelude::*, px, rgb, Animation, AnimationExt, AnyView, App, ClipboardItem, Context, Div, FontWeight, Hsla, Pixels, Render, SharedString, Stateful, Keystroke, Window};
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::Duration;
 use perusal_app::textfield::{is_paste, TextField};
 use perusal_app::theme::Theme;
 use std::collections::BTreeMap;
@@ -60,6 +64,92 @@ pub fn field_key(f: &mut TextField, ks: &Keystroke, cx: &mut App) -> bool {
     o.consumed
 }
 
+/// Bounds of a rendered text field, recorded each paint so mouse positions can be mapped to characters.
+pub type FieldBounds = Rc<Cell<gpui::Bounds<Pixels>>>;
+pub fn new_bounds() -> FieldBounds { Rc::new(Cell::new(gpui::Bounds::default())) }
+
+/// Char index in `text` at window x position `x` (the text starts at the left edge of `bounds`).
+pub fn hit_char(window: &Window, text: &str, family: &SharedString, size: Pixels, bounds: &gpui::Bounds<Pixels>, x: Pixels) -> usize {
+    if text.is_empty() || x <= bounds.origin.x { return 0; }
+    let run = gpui::TextRun { len: text.len(), font: gpui::font(family.clone()), color: gpui::white(), background_color: None, underline: None, strikethrough: None };
+    let line = window.text_system().shape_line(text.to_string().into(), size, &[run], None);
+    let byte = line.index_for_x(x - bounds.origin.x).unwrap_or(text.len()).min(text.len());
+    let mut b = byte; while b > 0 && !text.is_char_boundary(b) { b -= 1; }
+    text[..b].chars().count()
+}
+
+/// Mouse down in a field: caret placement, Shift extends, double-click selects a word, triple-click everything.
+pub fn field_mouse_down(f: &mut TextField, window: &Window, bounds: &gpui::Bounds<Pixels>, family: &SharedString, size: Pixels, ev: &gpui::MouseDownEvent) {
+    let i = hit_char(window, &f.text, family, size, bounds, ev.position.x);
+    match ev.click_count { 2 => f.select_word(i), 3.. => f.select_all(), _ => f.set_cursor(i, ev.modifiers.shift) }
+}
+/// Mouse drag in a field: extends the selection from where it started.
+pub fn field_mouse_drag(f: &mut TextField, window: &Window, bounds: &gpui::Bounds<Pixels>, family: &SharedString, size: Pixels, x: Pixels) {
+    let i = hit_char(window, &f.text, family, size, bounds, x);
+    if f.anchor.is_none() { f.anchor = Some(f.cursor); }
+    f.cursor = i;
+}
+
+// ---- icons, tooltips, loading indicator
+pub fn icon(i: Icon, size: f32, color: Hsla) -> Div {
+    div().font_family("Material Icons").text_size(px(size)).line_height(px(size)).size(px(size)).flex().items_center().justify_center().flex_none().text_color(color).child(i.0.to_string())
+}
+
+pub struct TipView { text: SharedString, p: Pal }
+impl Render for TipView {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().px_2().py(px(4.0)).rounded_md().bg(self.p.fg).text_color(self.p.bg).text_xs().font_weight(FontWeight::MEDIUM).child(self.text.clone())
+    }
+}
+pub fn tip(el: Stateful<Div>, text: impl Into<SharedString>, p: &Pal) -> Stateful<Div> {
+    let (text, p) = (text.into(), *p);
+    el.tooltip(move |_w, cx| -> AnyView { cx.new(|_| TipView { text: text.clone(), p }).into() })
+}
+
+/// A compact icon-only button with a tooltip. Attach `.on_click(...)` to the result.
+pub fn icon_btn(id: impl Into<gpui::ElementId>, i: Icon, tooltip: &str, kind: Btn, p: &Pal) -> Stateful<Div> {
+    let (fg, bg, hv, border) = match kind {
+        Btn::Primary => (gpui::white(), { let mut g = p.success; if g.l > 0.4 { g.l *= 0.62; } g }, p.success, gpui::transparent_black()),
+        Btn::Secondary => (p.fg, p.surface, p.hover, p.border),
+        Btn::Ghost => (p.muted, gpui::transparent_black(), p.hover, gpui::transparent_black()),
+    };
+    let b = div().id(id).size(px(30.0)).flex().items_center().justify_center().flex_none().rounded_md().border_1().border_color(border).bg(bg).cursor_pointer().hover(move |s| s.bg(hv)).child(icon(i, 18.0, fg));
+    tip(b, tooltip.to_string(), p)
+}
+
+/// Icon plus text button.
+pub fn icon_text_btn(id: impl Into<gpui::ElementId>, i: Icon, label: impl Into<SharedString>, kind: Btn, p: &Pal) -> Stateful<Div> {
+    let (fg, bg, hv, border) = match kind {
+        Btn::Primary => (gpui::white(), { let mut g = p.success; if g.l > 0.4 { g.l *= 0.62; } g }, p.success, gpui::transparent_black()),
+        Btn::Secondary => (p.fg, p.surface, p.hover, p.border),
+        Btn::Ghost => (p.muted, gpui::transparent_black(), p.hover, gpui::transparent_black()),
+    };
+    div().id(id).flex().items_center().gap_2().px_3().h(px(30.0)).flex_none().rounded_md().border_1().border_color(border).bg(bg).text_color(fg).text_sm().font_weight(FontWeight::MEDIUM).cursor_pointer().hover(move |s| s.bg(hv))
+        .child(icon(i, 17.0, fg)).child(label.into())
+}
+
+/// Segmented control cell showing only an icon.
+pub fn seg_icon(id: impl Into<gpui::ElementId>, i: Icon, tooltip: &str, on: bool, p: &Pal) -> Stateful<Div> {
+    let (fg, hv) = (p.fg, p.hover);
+    let c = div().id(id).px_2().h(px(28.0)).flex().items_center().cursor_pointer().bg(if on { p.hover } else { gpui::transparent_black() }).hover(move |s| s.bg(hv)).child(icon(i, 17.0, if on { fg } else { p.muted }));
+    tip(c, tooltip.to_string(), p)
+}
+
+/// Three pulsing dots: an agent is working.
+pub fn loading_dots(p: &Pal) -> Div {
+    let c = p.accent;
+    div().flex().items_center().gap(px(4.0)).children((0..3usize).map(|i| {
+        div().size(px(7.0)).rounded_full().bg(c).with_animation(("dot", i), Animation::new(Duration::from_millis(1200)).repeat(), move |d, t| {
+            let phase = ((t * std::f32::consts::TAU) - i as f32 * 0.9).sin() * 0.5 + 0.5; d.opacity(0.2 + 0.8 * phase)
+        })
+    }).collect::<Vec<_>>())
+}
+
+/// Records the bounds of the element it is placed in (absolute, fills the parent).
+pub fn bounds_probe(b: &FieldBounds) -> impl IntoElement {
+    let b = b.clone(); canvas(move |bounds, _, _| b.set(bounds), |_, _, _, _| {}).absolute().size_full()
+}
+
 /// Renders a text field's text with selection and caret.
 pub fn field_text(f: &TextField, focused: bool, placeholder: &str, p: &Pal) -> Div {
     let (before, sel, after) = f.parts();
@@ -72,14 +162,6 @@ pub fn field_text(f: &TextField, focused: bool, placeholder: &str, p: &Pal) -> D
         .when(!sel.is_empty(), |d| d.child(div().bg(p.accent.opacity(0.35)).child(sel.clone())))
         .when(focused && sel.is_empty(), |d| d.child(caret()))
         .child(after)
-}
-
-/// A bordered input box wrapping `field_text`, with a focus ring.
-pub fn input_box(f: &TextField, focused: bool, placeholder: &str, p: &Pal, secret: bool) -> Div {
-    let shown;
-    let f = if secret { shown = { let mut t = f.clone(); t.text = "•".repeat(f.text.chars().count()); t }; &shown } else { f };
-    div().px_3().py(px(6.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).text_color(p.fg).min_h(px(32.0)).flex().items_center().cursor_text()
-        .child(field_text(f, focused, placeholder, p))
 }
 
 /// On/off switch visual (wrap in an element with an on_click).

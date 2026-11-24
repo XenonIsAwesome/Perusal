@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("viewed {v}/{t}");
             if group {
                 let sel: Vec<_> = idx.iter().map(|&i| files[i].clone()).collect();
-                for (n, g) in perusal_diff::group_files(&sel).iter().enumerate() {
+                for (n, g) in perusal_diff::group_files(&sel, &perusal_diff::rules::builtin_rules()).iter().enumerate() {
                     println!("batch {n}: {}", g.iter().map(|&i| sel[i].path.as_str()).collect::<Vec<_>>().join(", "));
                 }
             } else {
