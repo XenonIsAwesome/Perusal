@@ -63,7 +63,7 @@ pub fn language_for_ext(ext: &str) -> &'static str {
         "rs" => "rust", "py" | "pyi" => "python", "js" | "mjs" | "cjs" | "jsx" => "javascript", "ts" | "mts" | "cts" => "typescript", "tsx" => "tsx",
         "json" | "jsonc" => "json", "go" => "go", "c" | "h" => "c", "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => "cpp", "java" => "java",
         "sh" | "bash" | "zsh" => "bash", "css" | "scss" => "css", "html" | "htm" | "xml" | "svg" => "html",
-        "" => "", _ => "generic",
+        "" | "md" | "markdown" | "mdx" | "txt" | "text" | "lock" | "csv" | "log" => "", _ => "generic",
     }
 }
 

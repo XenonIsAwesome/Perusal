@@ -34,7 +34,7 @@ impl ReviewVm {
         let viewed = store.viewed(review).unwrap_or_default();
         for f in &mut files { f.viewed = viewed.contains(&f.path); }
         let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, rules: perusal_diff::rules::builtin_rules(), dir_order: false, exclude_noisy_from_progress: false,
-            commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: true, history: vec![], manual: vec![] };
+            commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: false, history: vec![], manual: vec![] };
         let _ = vm.refresh(); vm
     }
     /// Recomputes visible files and batches after any filter/sort/scope change.
@@ -57,6 +57,11 @@ impl ReviewVm {
             self.batches.retain(|b| !b.is_empty());
         }
         self.visible = idx; self.cursor = self.cursor.min(self.batches.len().saturating_sub(1)); Ok(())
+    }
+    /// Sets the sort expression, keeping the old one if the new one is invalid.
+    pub fn set_sort(&mut self, f: &str) -> Result<(), String> {
+        let old = std::mem::replace(&mut self.sort, f.into());
+        self.refresh().inspect_err(|_| { self.sort = old; })
     }
     pub fn set_filter(&mut self, f: &str) -> Result<(), String> {
         let old = std::mem::replace(&mut self.filter, f.into());
@@ -118,7 +123,7 @@ mod tests {
         let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h", 5).unwrap();
         let fs = vec![FileStat::new("a/foo.h", Status::Modified, 5, 1), FileStat::new("b/foo.cpp", Status::Modified, 50, 1), FileStat::new("c/bar.rs", Status::Added, 9, 0),
             FileStat::new("Cargo.lock", Status::Modified, 100, 100), FileStat::new("d/baz.rs", Status::Modified, 1, 1)];
-        let vm = ReviewVm::new(&s, r, fs); (s, vm)
+        let mut vm = ReviewVm::new(&s, r, fs); vm.mark_on_next = true; (s, vm)
     }
     #[test] fn batch_flow_marks_and_goes_back() {
         let (s, mut vm) = setup();
@@ -153,6 +158,12 @@ mod tests {
         vm.sync_review_state(&s);
         vm.set_filter("ai").unwrap(); assert_eq!(vm.visible.iter().map(|&i| vm.files[i].path.as_str()).collect::<Vec<_>>(), vec!["c/bar.rs"]);
         vm.set_filter("comments > 0").unwrap(); assert_eq!(vm.visible.len(), 2);
+    }
+    #[test] fn sort_expression_and_next_does_not_mark_viewed() {
+        let (s, mut vm) = setup(); vm.mark_on_next = false;
+        vm.set_sort("additions desc").unwrap(); assert_eq!(vm.files[vm.visible[0]].path, "Cargo.lock");
+        assert!(vm.set_sort("nope >").is_err()); assert_eq!(vm.sort, "additions desc");
+        assert!(vm.next(&s)); assert_eq!(vm.progress().0, 0); // moving on is not the same as having viewed it
     }
     #[test] fn dir_order_follows_tree() {
         let (_s, mut vm) = setup(); vm.dir_order = true; vm.refresh().unwrap();

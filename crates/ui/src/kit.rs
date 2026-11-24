@@ -1,6 +1,6 @@
 //! Small design kit: palette, fonts, buttons, badges, and the rendered text field.
 use crate::icons::Icon;
-use gpui::{canvas, div, prelude::*, px, rgb, Animation, AnimationExt, AnyView, App, ClipboardItem, Context, Div, FontWeight, Hsla, Pixels, Render, SharedString, Stateful, Keystroke, Window};
+use gpui::{canvas, div, MouseButton, prelude::*, px, rgb, Animation, AnimationExt, AnyView, App, ClipboardItem, Context, Div, FontWeight, Hsla, Pixels, Render, SharedString, Stateful, Keystroke, Window};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -189,6 +189,9 @@ pub fn markdown_view(blocks: &[perusal_app::markdown::Block], p: &Pal, mono: &Sh
                 div().pt_2().pb_1().when(*l <= 2, |d| d.border_b_1().border_color(p.border)).text_size(px(size)).font_weight(FontWeight::BOLD).child(inline(spans, p, mono))
             }
             Block::Para(spans) => div().text_color(p.fg).line_height(px(22.0)).child(inline(spans, p, mono)),
+            Block::Code { lang, text } if lang.trim() == "suggestion" => div().flex().flex_col().rounded_md().border_1().border_color(p.success).overflow_hidden()
+                .child(div().flex().items_center().gap_2().px_3().py(px(4.0)).bg(p.success.opacity(0.16)).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.success).child(icon(crate::icons::LIGHTBULB, 15.0, p.success)).child("Suggested change"))
+                .child(div().flex().flex_col().px_3().py_2().bg(p.added).font_family(mono.clone()).text_size(px(13.0)).children(text.lines().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() })).collect::<Vec<_>>())),
             Block::Code { text, .. } => div().flex().flex_col().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface).font_family(mono.clone()).text_size(px(13.0)).overflow_hidden()
                 .children(text.lines().map(|l| div().whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() })).collect::<Vec<_>>()),
             Block::List { ordered, start, items } => div().flex().flex_col().gap_1().pl_4().children(items.iter().enumerate().map(|(i, it)| {
@@ -217,4 +220,109 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, _mono: &SharedString) 
         if any && text.len() > start { runs.push((start..text.len(), st)); }
     }
     gpui::StyledText::new(text).with_highlights(runs)
+}
+
+// ---- multi-line field
+pub const LINE_H: f32 = 20.0;
+
+/// Renders a multi-line field: one row per line, with selection and caret.
+pub fn field_multi(f: &TextField, focused: bool, placeholder: &str, p: &Pal, min_lines: usize) -> Div {
+    let lh = px(LINE_H);
+    if f.is_empty() {
+        return div().flex().flex_col().min_h(px(LINE_H * min_lines as f32)).child(div().h(lh).flex().items_center().when(focused, |d| d.child(div().w(px(1.5)).h(px(15.0)).bg(p.accent).flex_none())).child(div().text_color(p.muted).child(placeholder.to_string())));
+    }
+    let sel = f.selection(); let mut start = 0usize;
+    let mut rows = Vec::new();
+    for l in f.text.split('\n') {
+        let n = l.chars().count(); let end = start + n;
+        let cut = |a: usize, b: usize| -> String { l.chars().skip(a).take(b.saturating_sub(a)).collect() };
+        let (s0, s1) = match sel { Some((a, b)) if b > start && a < end + 1 => (a.max(start) - start, b.min(end) - start), _ => (0, 0) };
+        let caret_here = focused && sel.is_none() && f.cursor >= start && f.cursor <= end;
+        let caret_at = f.cursor.saturating_sub(start).min(n);
+        let row = if s1 > s0 {
+            div().flex().items_center().h(lh).whitespace_nowrap().child(cut(0, s0)).child(div().bg(p.accent.opacity(0.35)).child(cut(s0, s1))).child(cut(s1, n))
+        } else if caret_here {
+            div().flex().items_center().h(lh).whitespace_nowrap().child(cut(0, caret_at)).child(div().w(px(1.5)).h(px(15.0)).bg(p.accent).flex_none()).child(cut(caret_at, n))
+        } else { div().flex().items_center().h(lh).whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() }) };
+        rows.push(row); start = end + 1;
+    }
+    div().flex().flex_col().min_h(px(LINE_H * min_lines as f32)).children(rows)
+}
+
+/// Char index in a multi-line field at a window position.
+pub fn hit_multi(window: &Window, f: &TextField, family: &SharedString, size: Pixels, bounds: &gpui::Bounds<Pixels>, pos: gpui::Point<Pixels>) -> usize {
+    let lines = f.lines(); let rel: f32 = (pos.y - bounds.origin.y).into();
+    let li = ((rel / LINE_H).floor().max(0.0) as usize).min(lines.len().saturating_sub(1));
+    let col = hit_char(window, lines[li], family, size, bounds, pos.x);
+    f.index_of(li, col)
+}
+
+// ---- small visuals
+/// Five small squares showing the ratio of added (green) to removed (red) lines, like GitHub and GitLab.
+pub fn diff_squares(adds: u32, dels: u32, p: &Pal, size: f32) -> Div {
+    let total = (adds + dels).max(1) as f32; let green = ((adds as f32 / total) * 5.0).round() as usize;
+    div().flex().gap(px(2.0)).flex_none().children((0..5usize).map(|i| div().size(px(size)).rounded_sm().bg(if adds + dels == 0 { p.border } else if i < green { p.success } else { p.danger })).collect::<Vec<_>>())
+}
+
+/// Dropdown trigger: current value with a chevron. Attach `.on_click(...)`.
+pub fn dd_button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, open: bool, p: &Pal) -> Stateful<Div> {
+    let hv = p.hover;
+    div().id(id).flex().items_center().justify_between().gap_2().min_w(px(180.0)).px_3().h(px(32.0)).rounded_md().border_1().border_color(if open { p.accent } else { p.border }).bg(p.bg).cursor_pointer().hover(move |s| s.bg(hv))
+        .text_sm().child(label.into()).child(icon(if open { crate::icons::EXPAND_LESS } else { crate::icons::EXPAND_MORE }, 18.0, p.muted))
+}
+
+/// CI status badge for the header. `state` is one of running, pending, passed, failed, canceled; `None` hides it.
+pub fn ci_badge(state: &str, p: &Pal) -> Option<Stateful<Div>> {
+    let (i, color, label, pulse) = match state {
+        "running" => (crate::icons::SYNC, p.warn, "Checks are running", true), "pending" => (crate::icons::SCHEDULE, p.muted, "Checks are queued", true),
+        "passed" => (crate::icons::CHECK_CIRCLE, p.success, "Checks passed", false), "failed" => (crate::icons::CANCEL, p.danger, "Checks failed", false),
+        "canceled" => (crate::icons::BLOCK, p.muted, "Checks were canceled", false), _ => return None,
+    };
+    let b = div().id("ci").flex().items_center().justify_center().size(px(30.0)).rounded_md().cursor_pointer().hover(move |s| s.bg(p.hover));
+    let ic = icon(i, 20.0, color);
+    let b = if pulse { b.child(ic.with_animation("ci-pulse", Animation::new(Duration::from_millis(if state == "running" { 2000 } else { 3500 })).repeat(), |d, t| d.opacity(0.35 + 0.65 * ((t * std::f32::consts::TAU).sin() * 0.5 + 0.5)))) } else { b.child(ic) };
+    Some(tip(b, format!("{label}. Click to open the checks page."), p))
+}
+
+// ---- reusable input
+/// A text input: state, rendered bounds (for mouse hit-testing) and drag state in one place.
+pub struct Input { pub f: TextField, pub b: FieldBounds, pub dragging: bool }
+impl Input {
+    pub fn new(text: &str) -> Self { Input { f: TextField::new(text), b: new_bounds(), dragging: false } }
+    pub fn multi(text: &str) -> Self { Input { f: TextField::multi(text), b: new_bounds(), dragging: false } }
+}
+
+/// Renders an input's text with caret and selection, ready to place inside a styled box.
+pub fn input_text(i: &Input, focused: bool, placeholder: &str, p: &Pal, secret: bool, min_lines: usize) -> Div {
+    let inner = if i.f.multiline { field_multi(&i.f, focused, placeholder, p, min_lines) } else if secret {
+        let mut m = i.f.clone(); m.text = "•".repeat(i.f.text.chars().count()); field_text(&m, focused, placeholder, p)
+    } else { field_text(&i.f, focused, placeholder, p) };
+    div().relative().flex_1().min_w_0().cursor_text().text_size(px(14.0)).child(bounds_probe(&i.b)).child(inner)
+}
+
+/// Adds mouse caret placement, drag selection, double/triple click and the text cursor to an input's container.
+/// `on_focus` runs on mouse down so the owner can mark the input as the active one.
+pub fn wire_input<T: 'static>(el: Stateful<Div>, cx: &mut Context<T>, get: fn(&mut T) -> &mut Input, on_focus: fn(&mut T, &mut Context<T>), family: SharedString, secret: bool) -> Stateful<Div> {
+    let fam2 = family.clone();
+    el.cursor_text()
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &gpui::MouseDownEvent, w, cx| {
+            on_focus(this, cx); let i = get(this); i.dragging = true; let b = i.b.get();
+            if i.f.multiline {
+                let idx = hit_multi(w, &i.f, &family, px(14.0), &b, ev.position);
+                match ev.click_count { 2 => i.f.select_word(idx), 3.. => i.f.select_all(), _ => i.f.set_cursor(idx, ev.modifiers.shift) }
+            } else if secret {
+                let mut m = i.f.clone(); m.text = "•".repeat(i.f.text.chars().count()); field_mouse_down(&mut m, w, &b, &family, px(14.0), ev); i.f.cursor = m.cursor; i.f.anchor = m.anchor;
+            } else { field_mouse_down(&mut i.f, w, &b, &family, px(14.0), ev); }
+            cx.stop_propagation(); cx.notify();
+        }))
+        .on_mouse_move(cx.listener(move |this, ev: &gpui::MouseMoveEvent, w, cx| {
+            let i = get(this);
+            if ev.pressed_button != Some(MouseButton::Left) { i.dragging = false; return; }
+            if !i.dragging { return; }
+            let b = i.b.get();
+            if i.f.multiline { let idx = hit_multi(w, &i.f, &fam2, px(14.0), &b, ev.position); if i.f.anchor.is_none() { i.f.anchor = Some(i.f.cursor); } i.f.cursor = idx; }
+            else if secret { let mut m = i.f.clone(); m.text = "•".repeat(i.f.text.chars().count()); field_mouse_drag(&mut m, w, &b, &fam2, px(14.0), ev.position.x); i.f.cursor = m.cursor; i.f.anchor = m.anchor; }
+            else { field_mouse_drag(&mut i.f, w, &b, &fam2, px(14.0), ev.position.x); }
+            cx.notify();
+        }))
 }

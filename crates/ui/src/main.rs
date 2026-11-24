@@ -2,6 +2,7 @@
 mod icons;
 mod kit;
 mod model;
+mod settings_view;
 mod root;
 mod view;
 

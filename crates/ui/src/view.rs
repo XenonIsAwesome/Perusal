@@ -1,106 +1,152 @@
 use crate::icons as ic;
-use crate::kit::{self, badge, bounds_probe, col, field_key, field_text, icon, icon_btn, icon_text_btn, kbd, loading_dots, markdown_view, new_bounds, pill, seg_box, seg_cell, seg_icon, switch, tip, Btn, FieldBounds, Fonts, Pal};
+use crate::kit::{self, badge, ci_badge, col, diff_squares, field_key, icon, icon_btn, icon_text_btn, input_text, kbd, loading_dots, markdown_view, new_bounds, pill, seg_box, seg_icon, tip, wire_input, Btn, FieldBounds, Fonts, Input, Pal};
 use crate::model::{self, Model};
-use gpui::{deferred, div, prelude::*, px, relative, uniform_list, ClickEvent, Context, FontWeight, HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText};
+use gpui::{deferred, div, list, point, prelude::*, px, relative, uniform_list, AnyElement, ClickEvent, Context, FontWeight, HighlightStyle, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText};
 use perusal_agents::run::{agent_env, run_streaming, AgentEvent, RunError};
-use perusal_agents::{chat_prompt, launch_with, model_suggestions, on_path, parse_review, review_prompt, supports_effort, Options, Selection, REVIEW_SKILL};
+use perusal_agents::{chat_prompt, launch_with, on_path, parse_review, review_prompt, supports_effort, Options, Selection, REVIEW_SKILL};
+use perusal_app::events::{self, Snapshot};
 use perusal_app::markdown::{self, Located};
-use perusal_app::settings::{DiffMode, MdMode, Settings, AGENTS};
-use perusal_app::textfield::TextField;
+use perusal_app::notify::Kind as NKind;
+use perusal_app::settings::{DiffMode, MdMode, Settings};
 use perusal_app::theme::{self, Theme};
 use perusal_app::tree::{self, TreeRow};
-use perusal_diff::text::{diff_lines, highlight, split_pairs, Class, Kind, Line};
-use perusal_diff::{GroupRule, Status};
+use perusal_core::presets::{Preset, Presets};
+use perusal_diff::text::{diff_lines, highlight, language_for_ext, split_pairs, Class, Kind, Line};
+use perusal_diff::Status;
 use perusal_filter::Suggestion;
-use perusal_providers::{InlineComment, Submission, Verdict};
-use std::collections::{BTreeSet, HashSet};
+use perusal_providers::{InlineComment, Submission, Thread, Verdict};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Fid { Filter, Comment, Ask, Cmd, Model, Summary, RuleLabel, RulePat }
-#[derive(PartialEq, Clone, Copy)]
-enum Mode { Normal, Filter, Comment, Ask, Settings, SettingsEdit(Fid), Finish }
+enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename }
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab { Review, Ai }
 #[derive(PartialEq, Clone, Copy)]
 enum Side { Left, Right }
 #[derive(Clone, Copy)]
 enum Job { Chat, Review }
+struct Comp { editing: Option<i64>, global: bool, preview: bool }
 
 #[derive(Clone)]
 struct RLine { line: Line, runs: Vec<(Range<usize>, HighlightStyle)> }
 #[derive(Clone)]
-enum RowKind { FileHeader, Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>) }
-struct Row { fi: usize, kind: RowKind }
+struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai: bool, resolved: bool, outdated: bool, replies: Vec<(String, String)> }
+#[derive(Clone)]
+enum RowKind { FileHeader, Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
+#[derive(Clone)]
+struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
+    ord: Option<usize>, new_line: Option<u32> }
 
-pub struct Back;
-impl gpui::EventEmitter<Back> for View {}
+pub enum ViewEvent { Home, OpenSettings, Notice(NKind, String, bool), Renamed(String), Ci(String) }
+impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
-    m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts, mode: Mode,
-    filter_f: TextField, comment_f: TextField, ask_f: TextField, cmd_f: TextField, model_f: TextField, summary_f: TextField, label_f: TextField, pat_f: TextField,
-    b_filter: FieldBounds, b_comment: FieldBounds, b_ask: FieldBounds, b_cmd: FieldBounds, b_model: FieldBounds, b_summary: FieldBounds, b_label: FieldBounds, b_pat: FieldBounds,
-    drag_field: Option<Fid>, rule_err: Option<String>,
-    error: Option<String>, zoom: f32, comment_global: bool,
-    shown: Option<Vec<usize>>, nav_changed: bool, rows: Vec<Row>, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, status: String,
+    pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
+    focus: Option<Fid>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
+    b_body: FieldBounds, b_composer: FieldBounds,
+    error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
+    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, list: ListState, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
+    collapsed_c: HashSet<String>, raw_c: HashSet<String>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
-    sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>,
+    sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool,
     tab: RightTab, chat: Vec<(String, String)>, ai_ctx: Option<Selection>, ai_notice: Option<String>,
     ai_job: Option<Job>, ai_events: Arc<Mutex<Vec<AgentEvent>>>, ai_cancel: Arc<AtomicBool>, ai_started: Option<Instant>, ai_activity: Vec<String>, ai_partial: String,
-    verdict: Verdict, submit_busy: bool, submit_msg: Option<(bool, String)>, banner: Option<String>,
+    verdict: Verdict, submit_busy: bool, submit_msg: Option<(bool, String)>,
+    threads: Vec<Thread>, ci: String, snap: Snapshot, local_mr: Option<String>, notices: Vec<(NKind, String, bool)>, presets: Presets, project: String,
 }
 
 fn status_style(s: Status, p: &Pal) -> (&'static str, gpui::Hsla) {
     match s { Status::Added => ("A", p.success), Status::Modified => ("M", p.warn), Status::Deleted => ("D", p.danger), Status::Renamed => ("R", p.accent) }
 }
 
-fn runs_for(lang: &str, line: &Line, th: &Theme, p: &Pal) -> Vec<(Range<usize>, HighlightStyle)> {
-    let ok = |a: usize, b: usize| a < b && b <= line.text.len() && line.text.is_char_boundary(a) && line.text.is_char_boundary(b);
-    let mut runs: Vec<(Range<usize>, HighlightStyle)> = highlight(lang, &line.text).into_iter().filter(|(a, b, _)| ok(*a, *b)).map(|(a, b, c)| {
+/// Highlight spans for the lines of `text` (parsed as a whole file, so multi-line comments and strings work): per line, byte ranges within that line.
+fn line_spans(lang: &str, text: &str, th: &Theme) -> Vec<Vec<(Range<usize>, HighlightStyle)>> {
+    let mut starts = vec![0usize]; for (i, b) in text.bytes().enumerate() { if b == b'\n' { starts.push(i + 1); } }
+    let n = starts.len(); let mut out: Vec<Vec<(Range<usize>, HighlightStyle)>> = vec![vec![]; n];
+    if lang.is_empty() { return out; }
+    let mut spans = highlight(lang, text); spans.sort_by_key(|s| s.0);
+    let mut last_end = 0usize;
+    for (a, b, c) in spans {
+        if a < last_end { continue; } last_end = b;
         let key = match c { Class::Keyword => "keyword", Class::String => "string", Class::Comment => "comment", Class::Number => "number", Class::Type => "type", Class::Function => "function", Class::Other => "keyword" };
-        (a..b, HighlightStyle { color: Some(col(&th.syntax, key)), ..Default::default() })
-    }).collect();
-    runs.sort_by_key(|r| r.0.start);
-    let mut end = 0; runs.retain(|r| { if r.0.start >= end { end = r.0.end; true } else { false } });
+        let st = HighlightStyle { color: Some(col(&th.syntax, key)), ..Default::default() };
+        let first = starts.partition_point(|s| *s <= a).saturating_sub(1);
+        let mut li = first;
+        while li < n && starts[li] < b {
+            let ls = starts[li]; let le = if li + 1 < n { starts[li + 1] - 1 } else { text.len() };
+            let (sa, sb) = (a.max(ls), b.min(le));
+            if sa < sb && text.is_char_boundary(sa) && text.is_char_boundary(sb) { out[li].push((sa - ls..sb - ls, st)); }
+            li += 1;
+        }
+    }
+    out
+}
+
+fn merge_words(mut runs: Vec<(Range<usize>, HighlightStyle)>, line: &Line, p: &Pal) -> Vec<(Range<usize>, HighlightStyle)> {
     for w in &line.words {
-        if ok(w.0, w.1) {
+        if w.0 < w.1 && w.1 <= line.text.len() && line.text.is_char_boundary(w.0) && line.text.is_char_boundary(w.1) {
             runs.retain(|r| r.0.end <= w.0 || r.0.start >= w.1);
             runs.push((w.0..w.1, HighlightStyle { background_color: Some(if line.kind == Kind::Added { p.added_word } else { p.removed_word }), color: Some(p.fg), ..Default::default() }));
             runs.sort_by_key(|r| r.0.start);
         }
     }
+    runs.retain(|r| r.0.end <= line.text.len() && line.text.is_char_boundary(r.0.start) && line.text.is_char_boundary(r.0.end));
     runs
+}
+
+/// Resolves a symlink target relative to the link's directory, collapsing `.` and `..`.
+pub fn resolve_link(link_path: &str, target: &str) -> String {
+    let mut parts: Vec<&str> = if target.starts_with('/') { vec![] } else { link_path.rsplit_once('/').map(|x| x.0.split('/').collect()).unwrap_or_default() };
+    for t in target.trim().split('/') { match t { "" | "." => {} ".." => { parts.pop(); } o => parts.push(o) } }
+    parts.join("/")
 }
 
 impl View {
     pub fn new(mut m: Model, settings: Settings, fonts: Fonts) -> Self {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
-        let filter = TextField::new(&m.vm.filter);
-        m.vm.dir_order = settings.files_tree; m.vm.grouping = settings.group_related; m.vm.rules = settings.group_rules.clone();
+        m.vm.dir_order = settings.files_tree; m.vm.grouping = settings.group_related; m.vm.rules = settings.group_rules.clone(); m.vm.mark_on_next = false;
+        let presets = model::load_presets(); let project = model::project_of(&m);
+        let (mut f0, mut s0) = (String::new(), String::new());
+        if let Some(d) = presets.effective_default(&project) { f0 = d.filter.clone(); s0 = d.sort.clone(); let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
-        View { pal: Pal::new(&theme), theme, fonts, mode: Mode::Normal, filter_f: filter, comment_f: TextField::default(), ask_f: TextField::default(), cmd_f: TextField::new(&settings.agent_command), model_f: TextField::new(&settings.model),
-            summary_f: TextField::default(), label_f: TextField::default(), pat_f: TextField::default(),
-            b_filter: new_bounds(), b_comment: new_bounds(), b_ask: new_bounds(), b_cmd: new_bounds(), b_model: new_bounds(), b_summary: new_bounds(), b_label: new_bounds(), b_pat: new_bounds(),
-            drag_field: None, rule_err: None, error: None, zoom: 1.0, comment_global: false,
-            shown: None, nav_changed: true, rows: vec![], md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode,
-            sel: None, anchor: None, dragging: false, status: String::new(),
-            tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None,
+        let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
+        View { pal: Pal::new(&theme), theme, fonts, focus: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+            b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
+            shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
+            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
+            tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true,
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
-            verdict: Verdict::Comment, submit_busy: false, submit_msg: None, banner: None, settings, m }
+            verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
     }
+    pub fn title(&self) -> String { self.m.store.review_title(self.m.vm.review).unwrap_or_else(|_| self.m.title.clone()) }
+    pub fn key_id(&self) -> String { self.m.remote.clone().map(|u| format!("remote:{u}")).unwrap_or_else(|| format!("local:{}#{}", self.m.repo.display(), self.m.branch)) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
     fn save_settings(&self) { model::save_settings(&self.settings); }
-    fn apply_theme(&mut self) { self.theme = theme::load(&self.settings.theme, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme); self.shown = None; }
-    fn resync(&mut self) { self.m.vm.sync_review_state(&self.m.store); let _ = self.m.vm.refresh(); }
+    fn note(&mut self, kind: NKind, t: impl Into<String>, desktop: bool) { self.notices.push((kind, t.into(), desktop)); }
+    fn flush(&mut self, cx: &mut Context<Self>) { for (k, t, d) in std::mem::take(&mut self.notices) { cx.emit(ViewEvent::Notice(k, t, d)); } }
+    fn resync(&mut self) { self.m.vm.sync_review_state(&self.m.store); let _ = self.m.vm.refresh(); self.rebuild_rows(); }
+
+    /// Applies new settings from the Settings panel to this review.
+    pub fn apply_settings(&mut self, s: Settings) {
+        let regroup = s.group_related != self.settings.group_related || s.group_rules != self.settings.group_rules || s.files_tree != self.settings.files_tree;
+        let diff_changed = s.diff_mode != self.settings.diff_mode;
+        self.theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme);
+        self.tree = s.files_tree; self.m.vm.dir_order = s.files_tree; self.m.vm.grouping = s.group_related; self.m.vm.rules = s.group_rules.clone();
+        if diff_changed { self.diff_mode = s.diff_mode; }
+        self.settings.left_width = self.left_w; self.settings.right_width = self.right_w;
+        self.settings = s; self.shown = None;
+        if regroup { let keep = self.current_file(); let _ = self.m.vm.refresh(); if let Some(fi) = keep { self.m.vm.select_file(fi); } }
+    }
     fn reload(&mut self) {
-        self.shown = None; self.nav_changed = true; self.sel = None; self.anchor = None; self.md_sel = None;
+        self.shown = None; self.nav_changed = true; self.clear_selection();
         if self.tree { for fi in self.m.vm.current_batch().to_vec() { tree::expand_to(&mut self.collapsed, &self.m.vm.files[fi].path); } }
     }
     fn display_order(&self) -> Vec<usize> {
@@ -114,64 +160,43 @@ impl View {
     }
     fn toggle_dir(&mut self, path: &str) { if !self.collapsed.remove(path) { self.collapsed.insert(path.to_string()); } }
     fn busy(&self) -> bool { self.ai_job.is_some() }
-
-    // ---------- text fields
-    fn fld(&mut self, id: Fid) -> &mut TextField {
-        match id { Fid::Filter => &mut self.filter_f, Fid::Comment => &mut self.comment_f, Fid::Ask => &mut self.ask_f, Fid::Cmd => &mut self.cmd_f, Fid::Model => &mut self.model_f, Fid::Summary => &mut self.summary_f, Fid::RuleLabel => &mut self.label_f, Fid::RulePat => &mut self.pat_f }
-    }
-    fn fbounds(&self, id: Fid) -> FieldBounds {
-        match id { Fid::Filter => &self.b_filter, Fid::Comment => &self.b_comment, Fid::Ask => &self.b_ask, Fid::Cmd => &self.b_cmd, Fid::Model => &self.b_model, Fid::Summary => &self.b_summary, Fid::RuleLabel => &self.b_label, Fid::RulePat => &self.b_pat }.clone()
-    }
-    fn ffamily(&self, id: Fid) -> SharedString { if matches!(id, Fid::Filter | Fid::RulePat) { self.fonts.mono.clone() } else { self.fonts.ui.clone() } }
-    fn field_down(&mut self, id: Fid, ev: &MouseDownEvent, window: &gpui::Window) {
-        self.mode = match id { Fid::Filter => { self.update_suggestions(); Mode::Filter } Fid::Comment => Mode::Comment, Fid::Ask => { if self.ai_ctx.is_none() { self.ai_ctx = self.selection(); } Mode::Ask } Fid::Summary => Mode::Finish, other => Mode::SettingsEdit(other) };
-        let (b, fam) = (self.fbounds(id).get(), self.ffamily(id));
-        kit::field_mouse_down(self.fld(id), window, &b, &fam, px(14.0), ev); self.drag_field = Some(id);
-        if id == Fid::Filter { self.update_suggestions(); }
-    }
-    fn field_drag(&mut self, id: Fid, x: gpui::Pixels, window: &gpui::Window) {
-        let (b, fam) = (self.fbounds(id).get(), self.ffamily(id)); kit::field_mouse_drag(self.fld(id), window, &b, &fam, px(14.0), x);
-    }
-    /// A text field container wired for mouse caret placement and drag selection.
-    fn wire(&self, id: Fid, el: gpui::Stateful<gpui::Div>, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        el.cursor_text()
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, w, cx| { this.field_down(id, ev, w); cx.stop_propagation(); cx.notify(); }))
-            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, w, cx| { if ev.pressed_button == Some(MouseButton::Left) && this.drag_field == Some(id) { this.field_drag(id, ev.position.x, w); cx.notify(); } }))
-    }
-    fn text_of(&self, id: Fid, focused: bool, placeholder: &str) -> gpui::Div {
-        let f = match id { Fid::Filter => &self.filter_f, Fid::Comment => &self.comment_f, Fid::Ask => &self.ask_f, Fid::Cmd => &self.cmd_f, Fid::Model => &self.model_f, Fid::Summary => &self.summary_f, Fid::RuleLabel => &self.label_f, Fid::RulePat => &self.pat_f };
-        div().relative().flex_1().min_w_0().cursor_text().text_size(px(14.0)).child(bounds_probe(&self.fbounds(id))).child(field_text(f, focused, placeholder, &self.pal))
-    }
+    fn inp(&mut self, f: Fid) -> &mut Input { match f { Fid::Filter => &mut self.filter, Fid::Sort => &mut self.sort, Fid::Comment => &mut self.comment, Fid::Ask => &mut self.ask, Fid::Summary => &mut self.summary, Fid::Preset => &mut self.preset_name, Fid::Rename => &mut self.rename } }
 
     // ---------- diff rows
     fn load_diff(&mut self) {
         let batch = self.m.vm.current_batch().to_vec();
-        if batch.is_empty() { self.rows.clear(); self.md = None; self.shown = None; return; }
+        if batch.is_empty() { self.base.clear(); self.rows.clear(); self.md = None; self.shown = None; self.list.reset(0); return; }
         if self.shown.as_ref() == Some(&batch) { return; }
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.len() == 1 && markdown::is_markdown(&self.m.vm.files[batch[0]].path); self.nav_changed = false; }
-        self.shown = Some(batch.clone()); self.status.clear(); self.md = None;
+        self.shown = Some(batch.clone()); self.md = None; self.sym_target = None;
         let (th, p) = (self.theme.clone(), self.pal);
-        let mut rows = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
+        let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None };
         for &fi in &batch {
             let f = self.m.vm.files[fi].clone();
             let old = perusal_gitops::show(&self.m.repo, &self.m.base_sha, &f.path).unwrap_or_default();
             let new = perusal_gitops::show(&self.m.repo, &self.m.branch, &f.path).unwrap_or_default();
             if batch.len() == 1 && self.md_rendered && !f.symlink {
-                let src = if new.is_empty() { old } else { new }; self.md = Some(markdown::parse_located(&src)); self.md_src = src; return;
+                let src = if new.is_empty() { old } else { new }; self.md = Some(markdown::parse_located(&src)); self.md_src = src; self.base.clear(); self.rows.clear(); return;
             }
-            if batch.len() > 1 { rows.push(Row { fi, kind: RowKind::FileHeader }); }
+            if batch.len() > 1 { rows.push(mk(fi, RowKind::FileHeader)); }
             if f.symlink {
                 let t = |s: &str| s.trim().to_string();
-                rows.push(Row { fi, kind: RowKind::Note(match (old.is_empty(), new.is_empty()) { (true, false) => format!("Symbolic link to {}", t(&new)), (false, true) => format!("Symbolic link to {} was removed", t(&old)), _ => format!("Symbolic link retargeted: {} → {}", t(&old), t(&new)) }) });
+                rows.push(mk(fi, RowKind::Note(match (old.is_empty(), new.is_empty()) { (true, false) => format!("Symbolic link to {}", t(&new)), (false, true) => format!("Symbolic link to {} was removed", t(&old)), _ => format!("Symbolic link retargeted: {} → {}", t(&old), t(&new)) })));
+                if batch.len() == 1 { let tgt = resolve_link(&f.path, if new.is_empty() { &old } else { &new }); self.sym_target = self.m.vm.files.iter().position(|x| x.path == tgt && !x.symlink); }
             }
-            if f.noisy() && !f.symlink { self.status = format!("{} is collapsed because it is generated, binary or very large.", f.path); continue; }
-            let lang = match f.ext() { "rs" => "rust", "py" => "python", _ => "" };
+            if f.noisy() && !f.symlink { rows.push(mk(fi, RowKind::Note(format!("{} is collapsed because it is generated, binary or very large.", f.path)))); continue; }
+            let lang = language_for_ext(f.ext());
+            let (old_sp, new_sp) = (line_spans(lang, &old, &th), line_spans(lang, &new, &th));
             let lines = diff_lines(&old, &new, 3);
-            let mk = |l: &Line| RLine { line: l.clone(), runs: runs_for(lang, l, &th, &p) };
+            let rl = |l: &Line| -> RLine {
+                let spans = if l.kind == Kind::Removed { l.old_no.and_then(|n| old_sp.get(n as usize - 1)) } else { l.new_no.and_then(|n| new_sp.get(n as usize - 1)) }.cloned().unwrap_or_default();
+                RLine { line: l.clone(), runs: merge_words(spans, l, &p) }
+            };
             let (mut last_old, mut last_new, mut first) = (0u32, 0u32, true);
             let mut hunk = |rows: &mut Vec<Row>, o: u32, n: u32| {
                 let jump = (o > 0 && o > last_old + 1) || (n > 0 && n > last_new + 1) || (first && (o > 1 || n > 1));
-                if jump { rows.push(Row { fi, kind: RowKind::Hunk(format!("@@ -{} +{} @@", o.max(1), n.max(1))) }); }
+                if jump { rows.push(Row { fi, kind: RowKind::Hunk(format!("@@ -{} +{} @@", o.max(1), n.max(1))), ord: None, new_line: None }); }
                 first = false;
                 if o > 0 { last_old = o; }
                 if n > 0 { last_new = n; }
@@ -179,18 +204,71 @@ impl View {
             // added or deleted files have nothing on one side, so they always use a single column
             let split = self.diff_mode == DiffMode::Split && !matches!(f.status, Status::Added | Status::Deleted);
             if !split {
-                for l in &lines { hunk(&mut rows, l.old_no.unwrap_or(0), l.new_no.unwrap_or(0)); rows.push(Row { fi, kind: RowKind::Uni(mk(l)) }); }
+                for l in &lines { hunk(&mut rows, l.old_no.unwrap_or(0), l.new_no.unwrap_or(0)); rows.push(Row { fi, kind: RowKind::Uni(rl(l)), ord: None, new_line: l.new_no }); }
             } else {
                 for (a, b) in split_pairs(&lines) {
                     hunk(&mut rows, a.and_then(|i| lines[i].old_no).unwrap_or(0), b.and_then(|i| lines[i].new_no).unwrap_or(0));
-                    rows.push(Row { fi, kind: RowKind::Split(a.map(|i| mk(&lines[i])), b.map(|i| mk(&lines[i]))) });
+                    rows.push(Row { fi, kind: RowKind::Split(a.map(|i| rl(&lines[i])), b.map(|i| rl(&lines[i]))), ord: None, new_line: b.and_then(|i| lines[i].new_no).or_else(|| a.and_then(|i| lines[i].new_no)) });
                 }
             }
         }
-        self.rows = rows;
+        let mut ord = 0; for r in &mut rows { if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..)) { r.ord = Some(ord); ord += 1; } }
+        self.base = rows; self.rebuild_rows();
     }
 
-    /// Selected lines (diff rows or rendered markdown blocks) as a code selection in one file.
+    /// Comments for a file: (end line it belongs to, card). Remote threads (anyone's) and your own drafts.
+    fn comments_for(&self, fi: usize) -> Vec<(Option<u32>, CItem)> {
+        let path = &self.m.vm.files[fi].path; let mut out = vec![];
+        for t in self.threads.iter().filter(|t| t.path.as_deref() == Some(path.as_str())) {
+            let (author, body) = t.comments.first().cloned().unwrap_or_default();
+            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect() }));
+        }
+        for d in self.m.store.drafts(self.m.vm.review).unwrap_or_default().into_iter().filter(|d| d.file.as_deref() == Some(path.as_str())) {
+            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![] }));
+        }
+        out
+    }
+    /// Inserts comment cards into the diff rows next to the lines they belong to.
+    fn rebuild_rows(&mut self) {
+        let top = self.list.logical_scroll_top();
+        let mut out: Vec<Row> = Vec::with_capacity(self.base.len() + 8);
+        let files: Vec<usize> = { let mut f: Vec<usize> = vec![]; for r in &self.base { if !f.contains(&r.fi) { f.push(r.fi); } } f };
+        for fi in files {
+            let mut pending = self.comments_for(fi);
+            let group: Vec<&Row> = self.base.iter().filter(|r| r.fi == fi).collect();
+            let mut placed_top = false;
+            let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None };
+            for r in group {
+                out.push(r.clone());
+                let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_));
+                if !placed_top && !header_like { placed_top = true; }
+                if header_like && !placed_top {
+                    // file-level comments (no line) sit right under the file header
+                    let (file_level, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| l.is_none()); pending = rest;
+                    for (_, c) in file_level { out.push(card(c)); }
+                }
+                if let (Some(n), true) = (r.new_line, matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))) {
+                    let (here, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| *l == Some(n)); pending = rest;
+                    for (_, c) in here { out.push(card(c)); }
+                }
+            }
+            for (l, mut c) in pending { c.outdated = l.is_some(); out.push(card(c)); }
+        }
+        self.rows = out; self.list.reset(self.rows.len()); self.list.scroll_to(top);
+    }
+    fn toggle_comment(&mut self, key: &str) { if !self.collapsed_c.remove(key) { self.collapsed_c.insert(key.to_string()); } self.rebuild_rows(); }
+    /// Collapse (or expand) every comment on the current file(s).
+    fn collapse_all_comments(&mut self) {
+        let keys: Vec<String> = self.rows.iter().filter_map(|r| if let RowKind::Comment(c) = &r.kind { Some(c.key.clone()) } else { None }).collect();
+        if keys.is_empty() { return; }
+        let all = keys.iter().all(|k| self.collapsed_c.contains(k));
+        for k in keys { if all { self.collapsed_c.remove(&k); } else { self.collapsed_c.insert(k); } }
+        self.rebuild_rows();
+    }
+    fn comment_count(&self) -> usize { self.rows.iter().filter(|r| matches!(r.kind, RowKind::Comment(_))).count() }
+
+    // ---------- selection
+    fn in_sel(&self, ord: usize) -> bool { self.sel.map(|(a, b)| ord >= a && ord <= b).unwrap_or(false) }
     fn selection(&self) -> Option<Selection> {
         if let (Some(blocks), Some((a, b))) = (&self.md, self.md_sel) {
             let fi = self.current_file()?; let (lo, hi) = (a.min(b), a.max(b));
@@ -198,10 +276,9 @@ impl View {
             let snippet: String = self.md_src.lines().skip(first.saturating_sub(1) as usize).take((last + 1 - first) as usize).collect::<Vec<_>>().join("\n");
             return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: first, end: last, snippet });
         }
-        let (a, b) = self.sel?; let fi = self.rows.get(a)?.fi;
+        let (a, b) = self.sel?; let fi = self.rows.iter().find(|r| r.ord == Some(a))?.fi;
         let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
-        for r in &self.rows[a..=b.min(self.rows.len() - 1)] {
-            if r.fi != fi { continue; }
+        for r in self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)) {
             let lines: Vec<&Line> = match &r.kind { RowKind::Uni(l) => vec![&l.line], RowKind::Split(l, rr) => l.iter().chain(rr.iter()).map(|x| &x.line).collect(), _ => vec![] };
             for l in lines {
                 if let Some(n) = l.new_no.or(l.old_no) { lo = lo.min(n); hi = hi.max(n); }
@@ -210,28 +287,68 @@ impl View {
         }
         (hi > 0).then(|| Selection { file: self.m.vm.files[fi].path.clone(), start: lo, end: hi, snippet })
     }
-    fn row_hit(&mut self, i: usize, shift: bool) {
-        if shift { if let Some(a) = self.anchor { self.sel = Some((a.min(i), a.max(i))); return; } }
-        self.anchor = Some(i); self.sel = Some((i, i)); self.dragging = true;
+    /// The selected lines as they will look after the change (for suggested edits).
+    fn selection_new_text(&self) -> Option<String> {
+        let s = self.selection()?;
+        let t: Vec<String> = s.snippet.lines().filter(|l| !l.starts_with('-')).map(|l| l.chars().skip(1).collect()).collect();
+        (!t.is_empty()).then(|| t.join("\n"))
     }
-    fn clear_selection(&mut self) { self.sel = None; self.anchor = None; self.md_sel = None; }
+    fn row_hit(&mut self, ord: usize, shift: bool) {
+        if shift { if let Some(a) = self.anchor { self.sel = Some((a.min(ord), a.max(ord))); return; } }
+        self.anchor = Some(ord); self.sel = Some((ord, ord)); self.dragging = true; self.row_y.clear();
+    }
+    fn clear_selection(&mut self) { self.sel = None; self.anchor = None; self.md_sel = None; self.row_y.clear(); }
     fn has_selection(&self) -> bool { self.sel.is_some() || self.md_sel.is_some() }
 
-    // ---------- actions
+    // ---------- filter, sort, presets
     fn apply_filter(&mut self) {
-        match self.m.vm.set_filter(self.filter_f.text.trim()) { Ok(()) => { self.error = None; self.mode = Mode::Normal; self.sug.clear(); self.reload(); } Err(e) => self.error = Some(e) }
+        match self.m.vm.set_filter(self.filter.f.text.trim()) { Ok(()) => { self.error = None; self.sug.clear(); self.reload(); } Err(e) => self.error = Some(format!("Filter: {e}")) }
     }
-    fn update_suggestions(&mut self) { let (s, n) = perusal_filter::suggest(self.filter_f.before_caret()); self.sug = s; self.sug_replace = n; self.sug_idx = None; }
-    fn accept_suggestion(&mut self, i: usize) { if let Some(s) = self.sug.get(i).cloned() { self.filter_f.replace_before_caret(self.sug_replace, &s.insert); self.update_suggestions(); } }
-    fn add_comment(&mut self) {
-        let text = self.comment_f.text.trim().to_string(); if text.is_empty() { return; }
-        let sel = if self.comment_global { None } else { self.selection() };
-        match (sel, self.current_file(), self.comment_global) {
-            (Some(s), _, _) => { let _ = self.m.store.add_draft(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false); self.status = format!("Draft added on {}:{}-{}", s.file, s.start, s.end); }
-            (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); let _ = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false); self.status = format!("Draft added on {path}"); }
-            _ => { let _ = self.m.store.add_draft(self.m.vm.review, None, None, &text, false); self.status = "Draft added on the merge request".into(); }
+    fn apply_sort(&mut self) {
+        match self.m.vm.set_sort(self.sort.f.text.trim()) { Ok(()) => { self.error = None; self.sug.clear(); self.reload(); } Err(e) => self.error = Some(format!("Sort: {e}")) }
+    }
+    fn update_suggestions(&mut self) {
+        let (s, n) = if self.sug_for == Fid::Sort { perusal_filter::suggest_sort(self.sort.f.before_caret()) } else { perusal_filter::suggest(self.filter.f.before_caret()) };
+        self.sug = s; self.sug_replace = n; self.sug_idx = None;
+    }
+    fn accept_suggestion(&mut self, i: usize) {
+        if let Some(s) = self.sug.get(i).cloned() {
+            let f = if self.sug_for == Fid::Sort { &mut self.sort.f } else { &mut self.filter.f };
+            f.replace_before_caret(self.sug_replace, &s.insert); self.update_suggestions();
         }
-        self.comment_f.clear(); self.mode = Mode::Normal; self.comment_global = false; self.resync();
+    }
+    fn apply_preset(&mut self, p: &Preset) {
+        self.filter.f.set(&p.filter); self.sort.f.set(&p.sort);
+        let (a, b) = (self.m.vm.set_filter(&p.filter), self.m.vm.set_sort(&p.sort));
+        self.error = a.err().or(b.err()); self.reload();
+    }
+    fn save_preset(&mut self, project_scope: bool) {
+        let name = self.preset_name.f.text.trim().to_string(); if name.is_empty() { return; }
+        let pr = Preset { filter: self.filter.f.text.trim().into(), sort: self.sort.f.text.trim().into() };
+        self.presets.save(if project_scope { Some(&self.project) } else { None }, &name, pr);
+        model::save_presets(&self.presets); self.preset_name.f.clear();
+        self.note(NKind::Success, format!("Saved the preset \"{name}\"."), false);
+    }
+
+    // ---------- actions
+    fn open_composer(&mut self, global: bool, editing: Option<i64>) {
+        let text = editing.and_then(|id| self.m.store.drafts(self.m.vm.review).ok().and_then(|d| d.into_iter().find(|x| x.id == id)).map(|d| d.body)).unwrap_or_default();
+        self.comment.f.set(&text); self.comment.f.multiline = true;
+        self.composer = Some(Comp { editing, global, preview: false }); self.focus = Some(Fid::Comment);
+    }
+    fn save_composer(&mut self) {
+        let text = self.comment.f.text.trim().to_string(); if text.is_empty() { return; }
+        let Some(c) = self.composer.take() else { return };
+        if let Some(id) = c.editing { let _ = self.m.store.edit_draft(id, &text); self.note(NKind::Success, "Comment updated.", false); }
+        else {
+            let sel = if c.global { None } else { self.selection() };
+            match (sel, self.current_file(), c.global) {
+                (Some(s), _, _) => { let _ = self.m.store.add_draft(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false); self.note(NKind::Success, format!("Draft added on {}:{}-{}", s.file, s.start, s.end), false); }
+                (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); let _ = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false); self.note(NKind::Success, format!("Draft added on {path}"), false); }
+                _ => { let _ = self.m.store.add_draft(self.m.vm.review, None, None, &text, false); self.note(NKind::Success, "Draft added on the merge request.", false); }
+            }
+        }
+        self.comment.f.clear(); self.focus = None; self.clear_selection(); self.resync();
     }
     fn toggle_viewed(&mut self) { if let Some(fi) = self.current_file() { let v = !self.m.vm.files[fi].viewed; for i in self.m.vm.current_batch().to_vec() { self.m.vm.set_viewed(&self.m.store, i, v); } } }
     fn next(&mut self) { self.m.vm.next(&self.m.store); self.reload(); }
@@ -242,7 +359,7 @@ impl View {
         if self.m.graph.selection == Some((i, i)) { self.clear_scope(); return; }
         self.m.graph.click(i); self.m.vm.commit_scope = self.m.graph.scope(&self.m.repo).ok().flatten(); let _ = self.m.vm.refresh(); self.reload();
     }
-    fn set_diff_mode(&mut self, m: DiffMode) { if self.diff_mode != m { self.diff_mode = m; self.shown = None; self.sel = None; } }
+    fn set_diff_mode(&mut self, m: DiffMode) { if self.diff_mode != m { self.diff_mode = m; self.shown = None; self.clear_selection(); } }
     fn click_file(&mut self, fi: usize, mods: gpui::Modifiers) {
         if mods.control || mods.platform {
             if !self.multi.remove(&fi) { if self.multi.is_empty() { if let Some(c) = self.current_file() { if c != fi { self.multi.insert(c); } } } self.multi.insert(fi); }
@@ -256,16 +373,61 @@ impl View {
         let order = self.display_order(); let mut members: Vec<usize> = order.into_iter().filter(|i| self.multi.contains(i)).collect();
         if members.len() < 2 { return; }
         members.dedup(); self.m.vm.group_files_manually(members); self.multi.clear(); self.reload();
-        self.status = "Grouped into one batch. Viewing it shows every file together.".into();
+        self.note(NKind::Info, "Grouped into one batch. Viewing it shows every file together.", false);
     }
-    fn set_rules(&mut self) { self.m.vm.rules = self.settings.group_rules.clone(); let _ = self.m.vm.refresh(); self.reload(); self.save_settings(); }
-    fn add_rule(&mut self) {
-        let pat = self.pat_f.text.trim().to_string(); let label = self.label_f.text.trim().to_string();
-        if let Err(e) = perusal_diff::rules::validate_pattern(&pat) { self.rule_err = Some(e); return; }
-        let id = format!("custom-{}", self.settings.group_rules.iter().filter(|r| !r.builtin).count() + 1);
-        self.settings.group_rules.push(GroupRule { id, label: if label.is_empty() { pat.clone() } else { label }, pattern: pat, enabled: true, builtin: false });
-        self.label_f.clear(); self.pat_f.clear(); self.rule_err = None; self.set_rules();
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let t = self.rename.f.text.trim().to_string();
+        if !t.is_empty() { let _ = self.m.store.rename_review(self.m.vm.review, &t); self.m.title = t.clone(); cx.emit(ViewEvent::Renamed(t)); }
     }
+    /// Clicking away from every field: unfocus, close dropdowns and menus, discard unapplied filter text.
+    fn blur(&mut self, cx: &mut Context<Self>) {
+        match self.focus {
+            Some(Fid::Filter) => { let t = self.m.vm.filter.clone(); self.filter.f.set(&t); }
+            Some(Fid::Sort) => { let t = self.m.vm.sort.clone(); self.sort.f.set(&t); }
+            Some(Fid::Rename) => { self.commit_rename(cx); }
+            _ => {}
+        }
+        self.focus = None; self.sug.clear(); self.presets_open = false; self.error = None;
+    }
+    fn goto_symlink_target(&mut self) { if let Some(t) = self.sym_target { self.m.vm.select_file(t); self.reload(); } }
+
+    // ---------- live updates: threads, CI, MR state
+    pub fn start_polling(&mut self, cx: &mut Context<Self>) {
+        let mr = self.m.mr.clone(); let (repo, branch, hosts) = (self.m.repo.clone(), self.m.branch.clone(), self.settings.hosts.clone());
+        cx.spawn(async move |this, cx| {
+            let mut delay = 1u64; let fixed: Option<u64> = std::env::var("PERUSAL_POLL_SECS").ok().and_then(|v| v.parse().ok());
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(delay)).await;
+                if let Some(mr) = mr.clone() {
+                    let r = cx.background_executor().spawn(async move { model::fetch_remote_state(&mr) }).await;
+                    let alive = this.update(cx, |t, cx| { if let Ok(s) = r { t.apply_remote(s, cx); } t.flush(cx); cx.notify(); t.ci == "running" }).ok();
+                    let Some(running) = alive else { break }; delay = fixed.unwrap_or(if running { 15 } else { 60 });
+                } else {
+                    let (rp, br, hs) = (repo.clone(), branch.clone(), hosts.clone());
+                    let r = cx.background_executor().spawn(async move { model::find_mr_for_branch(&rp, &br, &hs) }).await;
+                    let alive = this.update(cx, |t, cx| { if let Some((_, web)) = r { if t.local_mr.is_none() { t.note(NKind::Info, "A pull request or merge request is now open for this branch.", true); t.local_mr = Some(web); } } t.flush(cx); cx.notify(); t.local_mr.is_some() }).ok();
+                    let Some(found) = alive else { break }; delay = if found { 600 } else { 90 };
+                }
+            }
+        }).detach();
+    }
+    fn apply_remote(&mut self, s: model::RemoteState, cx: &mut Context<Self>) {
+        let now = Snapshot { state: model::norm_state(&s.info.state), head: s.info.head_sha.clone(), ci: Some(model::ci_label(&s.ci).to_string()).filter(|c| c != "none") };
+        let title = self.m.title.clone();
+        // the pinned head is the one this review was opened on; a different host head means new commits
+        let mut prev = self.snap.clone(); if prev.head.is_empty() { prev.head = self.m.branch.clone(); }
+        for e in events::diff(&prev, &now, &title, &|_, _| true) {
+            let kind = match e.level { events::Level::Info => NKind::Info, events::Level::Success => NKind::Success, events::Level::Warning => NKind::Warning, events::Level::Error => NKind::Error };
+            self.note(kind, e.body.clone(), e.important);
+        }
+        if now.head != self.m.branch && prev.head == self.m.branch { /* surfaced once as a notice above; the review stays pinned */ }
+        self.m.mr_state = now.state.clone(); let _ = self.m.store.set_mr_state(self.m.vm.review, &now.state);
+        let ci = now.ci.clone().unwrap_or_default();
+        if ci != self.ci { self.ci = ci.clone(); cx.emit(ViewEvent::Ci(ci)); }
+        self.snap = now;
+        if s.threads.len() != self.threads.len() || s.threads.iter().zip(&self.threads).any(|(a, b)| a.comments.len() != b.comments.len() || a.resolved != b.resolved) { self.threads = s.threads; self.rebuild_rows(); } else { self.threads = s.threads; }
+    }
+    fn ci_url(&self) -> Option<String> { let w = self.m.web_url.clone()?; Some(perusal_providers::ci_page(&self.m.mr.as_ref()?.kind, &w)) }
 
     // ---------- AI
     fn ai_options(&self) -> Options { Options { model: self.settings.model.clone(), effort: self.settings.effort.clone() } }
@@ -296,7 +458,6 @@ impl View {
             run_streaming(&l, &dest, &agent_env(), std::time::Duration::from_secs(900), &cancel, push)
         });
         cx.spawn(async move |this, cx| { let r: Result<String, RunError> = task.await; let _ = this.update(cx, |t, cx| t.finish_ai(job, r, cx)); }).detach();
-        // poll for live events and the elapsed clock while the agent works
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
@@ -327,17 +488,18 @@ impl View {
                     for c in &cs { let _ = self.m.store.add_draft(review, Some(&c.file), Some((c.start_line, c.end_line)), &perusal_agents::draft_body(c), true); }
                     let msg = if cs.is_empty() { "AI review finished with nothing to flag.".to_string() } else { format!("AI review added {} draft comment{}, tagged AI. Review, edit or remove them in Drafts.", cs.len(), if cs.len() == 1 { "" } else { "s" }) };
                     self.chat.push(("agent".into(), msg.clone())); let _ = self.m.store.add_message(review, "agent", &msg); self.tab = RightTab::Review; self.resync();
+                    self.note(NKind::Success, msg, true);
                 }
                 Err(e) => self.ai_notice = Some(format!("The agent's answer was not a usable review ({e}). First 300 characters: {}", text.chars().take(300).collect::<String>())),
             },
-            (_, Err(RunError::Cancelled)) => self.ai_notice = Some("Stopped. Nothing was added.".into()),
+            (_, Err(RunError::Cancelled)) => self.note(NKind::Info, "Stopped. Nothing was added.", false),
             (_, Err(e)) => self.ai_notice = Some(e.to_string()),
         }
-        cx.notify();
+        self.flush(cx); cx.notify();
     }
     fn draft_from_answer(&mut self, text: &str) {
         let (f, l) = match &self.ai_ctx { Some(s) => (Some(s.file.clone()), Some((s.start, s.end))), None => (self.current_file().map(|i| self.m.vm.files[i].path.clone()), None) };
-        let _ = self.m.store.add_draft(self.m.vm.review, f.as_deref(), l, text, true); self.status = "Answer saved as an AI draft.".into(); self.resync();
+        let _ = self.m.store.add_draft(self.m.vm.review, f.as_deref(), l, text, true); self.note(NKind::Success, "Saved the answer as an AI draft.", false); self.resync();
     }
 
     // ---------- finishing the review
@@ -348,7 +510,7 @@ impl View {
     }
     fn build_submission(&self) -> Submission {
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
-        let mut summary = self.summary_f.text.trim().to_string(); let mut comments = vec![];
+        let mut summary = self.summary.f.text.trim().to_string(); let mut comments = vec![];
         for d in drafts {
             match (&d.file, d.start_line, d.end_line) {
                 (Some(f), Some(a), Some(b)) => comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body }),
@@ -374,11 +536,11 @@ impl View {
             Ok(()) => {
                 for d in self.m.store.drafts(self.m.vm.review).unwrap_or_default() { let _ = self.m.store.delete_draft(d.id); }
                 let _ = self.m.store.set_state(self.m.vm.review, "submitted"); self.resync();
-                self.summary_f.clear(); self.mode = Mode::Normal; self.banner = Some("Review posted to the host. Your drafts were cleared.".into());
+                self.summary.f.clear(); self.finish_open = false; self.focus = None; self.note(NKind::Success, "Review posted to the host. Your drafts were cleared.", true);
             }
             Err(e) => self.submit_msg = Some((false, e)),
         }
-        cx.notify();
+        self.flush(cx); cx.notify();
     }
     fn export_local(&mut self, cx: &mut Context<Self>) {
         match self.m.store.export_markdown(self.m.vm.review).map_err(|e| e.to_string()).and_then(|md| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(md.clone())); model::export_markdown_file(&self.m.title, &md) }) {
@@ -391,52 +553,36 @@ impl View {
     pub fn key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &ev.keystroke; let key = ks.key.as_str();
         let ctrl = ks.modifiers.control || ks.modifiers.platform;
-        match self.mode {
-            Mode::Settings => { if key == "escape" { self.mode = Mode::Normal; cx.notify(); } return; }
-            Mode::SettingsEdit(id) => {
-                if key == "escape" { self.mode = Mode::Settings; }
-                else if key == "enter" {
-                    match id { Fid::Cmd => { self.settings.agent_command = self.cmd_f.text.trim().to_string(); self.save_settings(); self.mode = Mode::Settings; }
-                        Fid::Model => { self.settings.model = self.model_f.text.trim().to_string(); self.save_settings(); self.mode = Mode::Settings; }
-                        _ => self.add_rule() }
-                } else { field_key(self.fld(id), ks, cx); if id == Fid::RulePat { self.rule_err = None; } }
-                cx.notify(); return;
-            }
-            Mode::Finish => {
-                if key == "escape" { self.mode = Mode::Normal; } else if key == "enter" && ctrl { self.start_submit(cx); } else { field_key(&mut self.summary_f, ks, cx); }
-                cx.notify(); return;
-            }
-            Mode::Filter => {
-                match key {
-                    "escape" => { if self.sug.is_empty() { self.mode = Mode::Normal; self.error = None; let applied = self.m.vm.filter.clone(); self.filter_f.set(&applied); } else { self.sug.clear(); } }
-                    "enter" => { if let Some(i) = self.sug_idx { self.accept_suggestion(i); } else { self.apply_filter(); } }
-                    "tab" => { if !self.sug.is_empty() { self.accept_suggestion(self.sug_idx.unwrap_or(0)); } }
-                    "down" => { if !self.sug.is_empty() { self.sug_idx = Some(self.sug_idx.map(|i| (i + 1) % self.sug.len()).unwrap_or(0)); } }
-                    "up" => { if !self.sug.is_empty() { self.sug_idx = Some(self.sug_idx.map(|i| (i + self.sug.len() - 1) % self.sug.len()).unwrap_or(self.sug.len() - 1)); } }
-                    _ => { if field_key(&mut self.filter_f, ks, cx) { self.update_suggestions(); } }
+        if self.finish_open && self.focus != Some(Fid::Summary) { if key == "escape" { self.finish_open = false; cx.notify(); } return; }
+        if let Some(f) = self.focus {
+            match f {
+                Fid::Filter | Fid::Sort => {
+                    let is_sort = f == Fid::Sort; self.sug_for = f;
+                    match key {
+                        "escape" => { if self.sug.is_empty() { self.blur(cx); } else { self.sug.clear(); } }
+                        "enter" => { if let Some(i) = self.sug_idx { self.accept_suggestion(i); } else if is_sort { self.apply_sort(); } else { self.apply_filter(); } }
+                        "tab" => { if !self.sug.is_empty() { self.accept_suggestion(self.sug_idx.unwrap_or(0)); } else { self.focus = Some(if is_sort { Fid::Filter } else { Fid::Sort }); self.sug_for = self.focus.unwrap(); self.update_suggestions(); } }
+                        "down" => { if !self.sug.is_empty() { self.sug_idx = Some(self.sug_idx.map(|i| (i + 1) % self.sug.len()).unwrap_or(0)); } }
+                        "up" => { if !self.sug.is_empty() { self.sug_idx = Some(self.sug_idx.map(|i| (i + self.sug.len() - 1) % self.sug.len()).unwrap_or(self.sug.len() - 1)); } }
+                        _ => { let i = if is_sort { &mut self.sort } else { &mut self.filter }; if field_key(&mut i.f, ks, cx) { self.update_suggestions(); } }
+                    }
                 }
-                cx.notify(); return;
+                Fid::Comment => { if key == "escape" { self.composer = None; self.focus = None; } else if key == "enter" && ctrl { self.save_composer(); } else { field_key(&mut self.comment.f, ks, cx); } }
+                Fid::Ask => { if key == "escape" { self.focus = None; } else if key == "enter" { let q = self.ask.f.text.trim().to_string(); if !q.is_empty() { self.ask.f.clear(); self.start_ai(Job::Chat, q, cx); } } else { field_key(&mut self.ask.f, ks, cx); } }
+                Fid::Summary => { if key == "escape" { self.finish_open = false; self.focus = None; } else if key == "enter" && ctrl { self.start_submit(cx); } else { field_key(&mut self.summary.f, ks, cx); } }
+                Fid::Preset => { if key == "escape" { self.presets_open = false; self.focus = None; } else if key == "enter" { self.save_preset(true); } else { field_key(&mut self.preset_name.f, ks, cx); } }
+                Fid::Rename => { if key == "escape" { let t = self.m.title.clone(); self.rename.f.set(&t); self.focus = None; } else if key == "enter" { self.commit_rename(cx); self.focus = None; } else { field_key(&mut self.rename.f, ks, cx); } }
             }
-            Mode::Comment => {
-                if key == "escape" { self.mode = Mode::Normal; self.comment_global = false; } else if key == "enter" { self.add_comment(); } else { field_key(&mut self.comment_f, ks, cx); }
-                cx.notify(); return;
-            }
-            Mode::Ask => {
-                if key == "escape" { self.mode = Mode::Normal; }
-                else if key == "enter" { let q = self.ask_f.text.trim().to_string(); if !q.is_empty() { self.ask_f.clear(); self.start_ai(Job::Chat, q, cx); } }
-                else { field_key(&mut self.ask_f, ks, cx); }
-                cx.notify(); return;
-            }
-            Mode::Normal => {}
+            self.flush(cx); cx.notify(); return;
         }
         if ctrl { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), "0" => self.zoom = theme::zoom(self.zoom, 0), _ => {} } cx.notify(); return; }
         match key {
-            "escape" => { if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.busy() { self.stop_ai(); } else { cx.emit(Back); return; } }
-            "/" => { self.mode = Mode::Filter; self.update_suggestions(); }
-            "c" => { self.comment_global = false; self.mode = Mode::Comment; }
-            "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.mode = Mode::Ask; }
-            "s" => self.mode = Mode::Settings,
-            "f" => { self.mode = Mode::Finish; self.submit_msg = None; }
+            "escape" => { if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; } }
+            "/" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
+            "c" => { self.open_composer(false, None); }
+            "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
+            "s" => { cx.emit(ViewEvent::OpenSettings); }
+            "f" => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
             "m" => { if let Some(fi) = self.current_file() { if markdown::is_markdown(&self.m.vm.files[fi].path) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } } }
             "u" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
             "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
@@ -444,7 +590,7 @@ impl View {
             "g" => { self.settings.group_related = !self.settings.group_related; self.save_settings(); self.m.vm.grouping = self.settings.group_related; let _ = self.m.vm.refresh(); self.reload(); }
             _ => {}
         }
-        cx.notify();
+        self.flush(cx); cx.notify();
     }
 }
 
@@ -455,11 +601,12 @@ impl Render for View {
         if self.settings.follow_os {
             let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
             let want = self.settings.effective_theme(dark).to_string();
-            if self.theme.name != theme::load(&want, Some(&model::themes_dir())).name { let s = self.settings.theme.clone(); self.settings.theme = want; self.apply_theme(); self.settings.theme = s; }
+            if self.theme.name != theme::load(&want, Some(&model::themes_dir())).name { self.theme = theme::load(&want, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme); self.shown = None; }
         }
+        self.flush(cx);
         self.load_diff();
         if self.tree { self.trows = tree::build_rows(&self.m.vm.files, &self.m.vm.visible, &self.collapsed); }
-        let p = self.pal; let z = self.zoom; let mono = self.fonts.mono.clone();
+        let p = self.pal; let z = self.zoom;
         let (viewed, total) = self.m.vm.progress();
         let frac = if total == 0 { 0.0 } else { viewed as f32 / total as f32 };
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
@@ -471,21 +618,18 @@ impl Render for View {
             .child(div().flex_1().h(px(8.0)).rounded_full().bg(p.border).child(div().h_full().rounded_full().bg(p.success).w(relative(frac))))
             .child(div().text_sm().text_color(p.muted).flex_none().child(format!("{}%", (frac * 100.0).round() as u32)))
             .child(div().text_sm().text_color(p.muted).flex_none().child(format!("Batch {} of {}", self.m.vm.cursor + 1, self.m.vm.batch_count().max(1))));
-        let banner = self.banner.clone().map(|b| div().flex().items_center().gap_2().px_4().py(px(6.0)).bg(p.success.opacity(0.14)).border_b_1().border_color(p.success).text_sm().text_color(p.success)
-            .child(icon(ic::CHECK_CIRCLE, 17.0, p.success)).child(div().flex_1().child(b)).child(tip(div().id("bn-x").cursor_pointer().child(icon(ic::CLOSE, 16.0, p.success)).on_click(cx.listener(|this, _, _, cx| { this.banner = None; cx.notify(); })), "Dismiss", &p)));
         let filter = self.filter_row(cx);
-
         let left = if self.left_open { self.files_panel(cx).into_any_element() } else { self.rail(Side::Left, cx).into_any_element() };
-        let center = self.center(cx, &mono);
-        let right = if self.right_open { self.right_panel(cx, &drafts, &mono).into_any_element() } else { self.rail(Side::Right, cx).into_any_element() };
+        let center = self.center(cx);
+        let right = if self.right_open { self.right_panel(cx, &drafts).into_any_element() } else { self.rail(Side::Right, cx).into_any_element() };
         let (lw, rw) = (self.left_w * z, self.right_w * z);
 
         let footer = div().flex().items_center().gap_4().px_4().py(px(5.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
             .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("s", "settings"), ("Esc", "home")]
                 .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l)));
-        let overlay = match self.mode { Mode::Settings | Mode::SettingsEdit(_) => Some(self.settings_overlay(cx).into_any_element()), Mode::Finish => Some(self.finish_overlay(cx).into_any_element()), _ => None };
+        let overlay = self.finish_open.then(|| self.finish_overlay(cx));
 
-        let side = |w: f32, open: bool, s: Side, cx: &mut Context<Self>, el: gpui::AnyElement| {
+        let side = |w: f32, open: bool, s: Side, cx: &mut Context<Self>, el: AnyElement| {
             let col = div().h_full().flex().flex_col().flex_none().bg(p.surface).overflow_hidden().child(el);
             let col = if open { col.w(px(w)) } else { col.w(px(38.0)) };
             let handle = open.then(|| div().id(if s == Side::Left { "rz-l" } else { "rz-r" }).w(px(5.0)).h_full().flex_none().cursor_col_resize().bg(p.border).hover(move |x| x.bg(p.accent.opacity(0.6)))
@@ -496,17 +640,24 @@ impl Render for View {
         let (rcol, rhandle) = side(rw, self.right_open, Side::Right, cx, right);
 
         div().relative().size_full().flex().flex_col().bg(p.bg).text_color(p.fg).text_size(px(14.0 * z))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.blur(cx); cx.notify(); }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.dragging = false; this.drag_field = None;
+                this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename] { i.dragging = false; }
+                if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
                 cx.notify();
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, w, cx| {
                 if ev.pressed_button != Some(MouseButton::Left) { return; }
-                let zoom = this.zoom; let vw: f32 = w.viewport_size().width.into(); let x: f32 = ev.position.x.into();
+                let zoom = this.zoom; let vw: f32 = w.viewport_size().width.into(); let x: f32 = ev.position.x.into(); let y: f32 = ev.position.y.into();
                 match this.resizing { Some(Side::Left) => { this.left_w = (x / zoom).clamp(200.0, 700.0); cx.notify(); } Some(Side::Right) => { this.right_w = ((vw - x) / zoom).clamp(220.0, 700.0); cx.notify(); } None => {} }
+                if let Some(grab) = this.sb_drag {
+                    let vp = this.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let oy: f32 = vp.origin.y.into(); let max: f32 = this.list.max_offset_for_scrollbar().y.into();
+                    let thumb = (vh * vh / (vh + max)).max(28.0); let travel = (vh - thumb).max(1.0);
+                    let frac = ((y - oy - grab) / travel).clamp(0.0, 1.0); this.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.notify();
+                }
             }))
-            .child(top).child(progress).children(banner).child(filter)
+            .child(top).child(progress).child(filter)
             .child(div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol))
             .child(footer)
             .children(overlay)
@@ -514,6 +665,19 @@ impl Render for View {
 }
 
 impl View {
+    fn winp(&self, id: Fid, el: gpui::Stateful<gpui::Div>, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let (ui, mono) = (self.fonts.ui.clone(), self.fonts.mono.clone());
+        match id {
+            Fid::Filter => wire_input(el, cx, |t| &mut t.filter, |t, _| { t.focus = Some(Fid::Filter); t.sug_for = Fid::Filter; t.update_suggestions(); }, mono, false),
+            Fid::Sort => wire_input(el, cx, |t| &mut t.sort, |t, _| { t.focus = Some(Fid::Sort); t.sug_for = Fid::Sort; t.update_suggestions(); }, mono, false),
+            Fid::Comment => wire_input(el, cx, |t| &mut t.comment, |t, _| { t.focus = Some(Fid::Comment); }, ui, false),
+            Fid::Ask => wire_input(el, cx, |t| &mut t.ask, |t, _| { if t.ai_ctx.is_none() { t.ai_ctx = t.selection(); } t.focus = Some(Fid::Ask); }, ui, false),
+            Fid::Summary => wire_input(el, cx, |t| &mut t.summary, |t, _| { t.focus = Some(Fid::Summary); }, ui, false),
+            Fid::Preset => wire_input(el, cx, |t| &mut t.preset_name, |t, _| { t.focus = Some(Fid::Preset); }, ui, false),
+            Fid::Rename => wire_input(el, cx, |t| &mut t.rename, |t, _| { t.focus = Some(Fid::Rename); }, ui, false),
+        }
+    }
+    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename } }
     fn rail(&mut self, s: Side, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
         let (i, t) = if s == Side::Left { (ic::CHEVRON_RIGHT, "Show the files panel") } else { (ic::CHEVRON_LEFT, "Show the review panel") };
@@ -524,44 +688,94 @@ impl View {
     fn top_bar(&mut self, cx: &mut Context<Self>, ndrafts: usize) -> impl IntoElement {
         let p = self.pal;
         let reviewing = matches!(self.ai_job, Some(Job::Review));
+        let renaming = self.focus == Some(Fid::Rename);
+        let title: AnyElement = if renaming {
+            self.winp(Fid::Rename, div().id("rename-box").flex().items_center().px_3().py(px(4.0)).w(px(360.0)).rounded_md().border_1().border_color(p.accent).bg(p.bg).child(input_text(&self.rename, true, "Name this review", &p, false, 1)), cx).into_any_element()
+        } else {
+            div().flex().items_center().gap_1().min_w_0().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().child(SharedString::from(self.m.title.clone())))
+                .child(icon_btn("rename", ic::EDIT, "Rename this review", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); }))).into_any_element()
+        };
+        let ci = ci_badge(&self.ci, &p).map(|b| b.on_click(cx.listener(|this, _, _, _| { if let Some(u) = this.ci_url() { let _ = model::open_url(&u); } })));
+        let local_mr = self.local_mr.clone().map(|u| icon_text_btn("open-mr", ic::OPEN_IN_NEW, "Open the PR", Btn::Secondary, &p).on_click(cx.listener(move |_, _, _, _| { let _ = model::open_url(&u); })));
         div().flex().items_center().gap_3().px_4().h(px(52.0)).bg(p.surface).border_b_1().border_color(p.border)
-            .child(icon_btn("home", ic::HOME, "Back to Home (Esc)", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(Back))))
-            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().child(SharedString::from(self.m.title.clone())))
+            .child(icon_btn("home", ic::HOME, "Back to Home (Esc)", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::Home))))
+            .child(title)
             .children(self.m.remote.clone().map(|u| pill(u.trim_start_matches("https://").to_string(), &p)))
+            .children(Some(self.m.mr_state.clone()).filter(|s| !s.is_empty()).map(|s| { let (c, l) = match s.as_str() { "merged" => (p.ai, "Merged"), "closed" => (p.danger, "Closed"), _ => (p.success, "Open") }; badge(l, c, c.opacity(0.15)) }))
+            .children(ci).children(local_mr)
             .child(div().flex_1())
             .when(ndrafts > 0, |d| d.child(badge(format!("{ndrafts} draft{}", if ndrafts == 1 { "" } else { "s" }), p.accent, p.accent.opacity(0.15))))
-            .child(if reviewing {
-                icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element()
-            } else {
-                icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element()
-            })
-            .child(icon_btn("settings", ic::SETTINGS, "Settings (s)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.mode = Mode::Settings; cx.notify(); })))
+            .child(if reviewing { icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element() }
+                else { icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element() })
+            .child(icon_btn("settings", ic::SETTINGS, "Settings (s)", Btn::Secondary, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings))))
     }
 
     fn filter_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = self.pal; let mono = self.fonts.mono.clone();
-        let focused = self.mode == Mode::Filter;
-        let status_text: SharedString = self.error.clone().map(|e| format!("Filter error: {e}")).unwrap_or_else(|| self.status.clone()).into();
-        let bad = self.error.is_some();
-        let dropdown = (focused && !self.sug.is_empty()).then(|| {
+        let p = self.pal;
+        let on_filter = self.focus == Some(Fid::Filter); let on_sort = self.focus == Some(Fid::Sort);
+        let mkbox = |this: &Self, id: Fid, icon_i: ic::Icon, ph: &str, focused: bool, tipt: &str, cx: &mut Context<Self>| {
+            let inp = this.input_of(id); let bad = this.error.as_deref().map(|e| (id == Fid::Filter) == e.starts_with("Filter")).unwrap_or(false);
+            let el = div().id(if id == Fid::Filter { "filter" } else { "sort" }).flex().items_center().gap_2().px_3().py(px(6.0)).flex_1().min_w_0().rounded_md().border_1().border_color(if focused { p.accent } else if bad { p.danger } else { p.border }).bg(p.surface)
+                .child(tip(div().id(if id == Fid::Filter { "fi" } else { "si" }).child(icon(icon_i, 18.0, p.muted)), tipt.to_string(), &p))
+                .child(input_text(inp, focused, ph, &p, false, 1).font_family(this.fonts.mono.clone()))
+                .when(!inp.f.is_empty(), |d| d.child(tip(div().id(if id == Fid::Filter { "clr-f" } else { "clr-s" }).cursor_pointer().child(icon(ic::CLOSE, 16.0, p.muted)).on_click(cx.listener(move |this, _, _, cx| {
+                    if id == Fid::Filter { this.filter.f.clear(); this.apply_filter(); } else { this.sort.f.clear(); this.apply_sort(); } cx.stop_propagation(); cx.notify(); })), "Clear", &p)));
+            this.winp(id, el, cx)
+        };
+        let fbox = mkbox(self, Fid::Filter, ic::SEARCH, "Filter: additions > 50 && !viewed  ·  ai, comments > 0, status == \"added\"", on_filter, "Filter files with an expression", cx);
+        let sbox = mkbox(self, Fid::Sort, ic::FILTER_LIST, "Sort: additions + deletions desc, name asc", on_sort, "Sort files with an expression", cx);
+        let dropdown = ((on_filter || on_sort) && !self.sug.is_empty()).then(|| {
             let items: Vec<_> = self.sug.iter().enumerate().map(|(i, s)| {
                 let on = self.sug_idx == Some(i);
                 div().id(("sug", i)).flex().items_center().gap_3().px_3().py(px(5.0)).cursor_pointer().when(on, |d| d.bg(p.accent.opacity(0.18))).hover(move |x| x.bg(p.hover))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
                     .on_click(cx.listener(move |this, _, _, cx| { this.accept_suggestion(i); cx.notify(); }))
-                    .child(div().font_family(mono.clone()).text_sm().font_weight(FontWeight::MEDIUM).child(s.label.clone()))
+                    .child(div().font_family(self.fonts.mono.clone()).text_sm().font_weight(FontWeight::MEDIUM).child(s.label.clone()))
                     .child(div().flex_1().text_xs().text_color(p.muted).truncate().child(s.detail))
                     .child(badge(s.kind, p.muted, p.hover))
             }).collect();
-            deferred(div().absolute().top(px(42.0)).left_0().w_full().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(items)
-                .child(div().px_3().py_1().text_xs().text_color(p.muted).child("Up/Down to choose, Tab to accept, Enter to run the filter"))).with_priority(10)
+            let left = if on_sort { relative(0.5) } else { relative(0.0) };
+            deferred(div().absolute().top(px(42.0)).left(left).w(relative(0.5)).min_w(px(380.0)).rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(items)
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .child(div().px_3().py_1().text_xs().text_color(p.muted).child("Up/Down to choose, Tab to accept, Enter to apply"))).with_priority(10)
         });
-        let boxed = div().id("filter").flex().items_center().gap_2().px_3().py(px(6.0)).w_full().rounded_md().border_1().border_color(if focused { p.accent } else if bad { p.danger } else { p.border }).bg(p.surface)
-            .child(icon(ic::SEARCH, 18.0, p.muted)).child(self.text_of(Fid::Filter, focused, "Filter files: additions > 50 && !viewed   ·   try ai, comments > 0, status == \"added\"").font_family(mono.clone()))
-            .when(!self.filter_f.is_empty(), |d| d.child(tip(div().id("clr").cursor_pointer().child(icon(ic::CLOSE, 16.0, p.muted)).on_click(cx.listener(|this, _, _, cx| { this.filter_f.clear(); this.apply_filter(); cx.stop_propagation(); cx.notify(); })), "Clear filter", &p)));
-        let boxed = self.wire(Fid::Filter, boxed, cx);
+        // presets menu
+        let presets_menu = self.presets_open.then(|| {
+            let mut items: Vec<AnyElement> = vec![];
+            let add = |scope_label: &'static str, project: bool, map: Option<&perusal_core::presets::Scope>, items: &mut Vec<AnyElement>, cx: &mut Context<Self>| {
+                let Some(sc) = map else { return };
+                for (name, pr) in sc.presets.iter() {
+                    let (n1, n2, n3) = (name.clone(), name.clone(), name.clone()); let pr2 = pr.clone(); let is_def = sc.default.as_deref() == Some(name.as_str());
+                    items.push(div().id(SharedString::from(format!("pr-{scope_label}-{name}"))).flex().items_center().gap_2().px_3().py(px(6.0)).cursor_pointer().hover(move |x| x.bg(p.hover))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                        .on_click(cx.listener(move |this, _, _, cx| { this.apply_preset(&pr2); this.presets_open = false; cx.notify(); }))
+                        .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(format!("{name}  ·  {scope_label}"))).child(div().text_xs().text_color(p.muted).truncate().child(format!("{}{}", if pr.filter.is_empty() { "no filter".to_string() } else { pr.filter.clone() }, if pr.sort.is_empty() { String::new() } else { format!("  |  sort {}", pr.sort) }))))
+                        .child(icon_btn(SharedString::from(format!("prd-{scope_label}-{n1}")), if is_def { ic::STAR } else { ic::STAR_BORDER }, if is_def { "Default for new reviews (click to clear)" } else { "Make this the default" }, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| {
+                            let proj = if project { Some(this.project.clone()) } else { None }; let cur_default = if project { this.presets.projects.get(&perusal_core::presets::normalize_remote(&this.project)).and_then(|s| s.default.clone()) } else { this.presets.global.default.clone() };
+                            this.presets.set_default(proj.as_deref(), if cur_default.as_deref() == Some(n1.as_str()) { None } else { Some(n1.as_str()) }); model::save_presets(&this.presets); cx.stop_propagation(); cx.notify(); })))
+                        .child(icon_btn(SharedString::from(format!("prx-{scope_label}-{n2}")), ic::DELETE, "Delete this preset", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| {
+                            let sc = if project { this.presets.projects.get_mut(&perusal_core::presets::normalize_remote(&this.project)) } else { Some(&mut this.presets.global) };
+                            if let Some(sc) = sc { sc.presets.remove(&n2); if sc.default.as_deref() == Some(n3.as_str()) { sc.default = None; } } model::save_presets(&this.presets); cx.stop_propagation(); cx.notify(); }))).into_any_element());
+                }
+            };
+            add("project", true, self.presets.projects.get(&perusal_core::presets::normalize_remote(&self.project)), &mut items, cx);
+            add("global", false, Some(&self.presets.global), &mut items, cx);
+            let empty = items.is_empty();
+            deferred(div().absolute().top(px(42.0)).right_0().w(px(420.0)).rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_hidden()
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .child(div().px_3().py_2().border_b_1().border_color(p.border).text_sm().font_weight(FontWeight::SEMIBOLD).child("Filter and sort presets"))
+                .child(div().max_h(px(280.0)).overflow_hidden().flex().flex_col().when(empty, |d| d.child(div().px_3().py_3().text_sm().text_color(p.muted).child("No presets yet. Save the current filter and sort below."))).children(items))
+                .child(div().flex().flex_col().gap_2().p_3().border_t_1().border_color(p.border)
+                    .child(self.winp(Fid::Preset, div().id("pr-name").flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if self.focus == Some(Fid::Preset) { p.accent } else { p.border }).bg(p.bg).child(input_text(&self.preset_name, self.focus == Some(Fid::Preset), "Name this preset", &p, false, 1)), cx))
+                    .child(div().flex().gap_2().child(icon_text_btn("pr-save-proj", ic::BOOKMARK, "Save for this project", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_preset(true); cx.stop_propagation(); cx.notify(); })))
+                        .child(icon_text_btn("pr-save-glob", ic::BOOKMARK_BORDER, "Save globally", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_preset(false); cx.stop_propagation(); cx.notify(); })))))).with_priority(15)
+        });
+        let err = self.error.clone();
         div().flex().flex_col().w_full().px_4().py_2().bg(p.bg).border_b_1().border_color(p.border).gap_1()
-            .child(div().relative().w_full().child(boxed).children(dropdown))
-            .when(bad || !self.status.is_empty(), |d| d.child(div().text_xs().text_color(if bad { p.danger } else { p.muted }).truncate().child(status_text)))
+            .child(div().relative().w_full().flex().items_center().gap_2().child(fbox).child(sbox)
+                .child(icon_btn("presets", ic::BOOKMARK, "Filter and sort presets", if self.presets_open { Btn::Secondary } else { Btn::Ghost }, &p).on_click(cx.listener(|this, _, _, cx| { this.presets_open = !this.presets_open; this.sug.clear(); cx.stop_propagation(); cx.notify(); })))
+                .children(dropdown).children(presets_menu))
+            .children(err.map(|e| div().text_xs().text_color(p.danger).truncate().child(e)))
     }
 
     fn files_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -579,7 +793,7 @@ impl View {
                             .child(icon(if collapsed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 16.0, p.muted))
                             .child(icon(if collapsed { ic::FOLDER } else { ic::FOLDER_OPEN }, 16.0, p.warn))
                             .child(div().min_w_0().flex_1().truncate().font_weight(FontWeight::SEMIBOLD).child(name))
-                            .child(div().text_xs().flex_none().flex().gap_1().child(div().text_color(p.success).child(format!("+{additions}"))).child(div().text_color(p.danger).child(format!("−{deletions}"))))
+                            .child(div().text_xs().flex_none().flex().items_center().gap_1().child(div().text_color(p.success).child(format!("+{additions}"))).child(div().text_color(p.danger).child(format!("−{deletions}"))).child(diff_squares(additions, deletions, &p, 6.0)))
                             .child(div().flex_none().px_2().rounded_full().text_xs().font_weight(FontWeight::MEDIUM).text_color(if done { p.success } else { p.muted }).bg(if done { p.success.opacity(0.15) } else { p.hover }).child(format!("{viewed}/{total}")));
                     }
                 }
@@ -600,7 +814,7 @@ impl View {
                     .when(ai_flag, |d| d.child(icon(ic::AUTO_AWESOME, 14.0, p.ai)))
                     .when(comments > 0, |d| d.child(div().flex().items_center().gap_1().text_xs().text_color(p.muted).child(icon(ic::COMMENT, 13.0, p.muted)).child(format!("{comments}"))))
                     .when(f.noisy() && !symlink, |d| d.child(div().text_xs().text_color(p.muted).child("collapsed")))
-                    .child(div().text_xs().flex_none().flex().gap_1().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
+                    .child(div().text_xs().flex_none().flex().items_center().gap_1().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))).child(diff_squares(f.additions, f.deletions, &p, 6.0)))
                     .child(div().size(px(16.0)).flex_none().flex().items_center().justify_center().when(f.viewed, |d| d.rounded_full().bg(p.success).child(icon(ic::CHECK, 12.0, gpui::white()))))
             }).collect()
         })).flex_1().min_h_0().w_full();
@@ -625,8 +839,95 @@ impl View {
         div().flex().flex_col().size_full().child(header).children(scope).children(bar).children(hint).child(list)
     }
 
-    fn center(&mut self, cx: &mut Context<Self>, mono: &SharedString) -> impl IntoElement {
+    /// One row of the diff list (a code line, a hunk marker, a note or a comment card).
+    fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(r) = self.rows.get(ix).cloned() else { return div().into_any_element() };
+        let p = self.pal; let h = px(20.0 * self.zoom); let fsz = px(13.0 * self.zoom); let mono = self.fonts.mono.clone();
+        let fi = r.fi; let st = self.m.vm.files[fi].status;
+        let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
+        let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).text_size(fsz).text_color(p.fg);
+        let cell = |side: Option<&RLine>, left: bool| -> gpui::Div {
+            let Some(rl) = side else { return div().flex_1().h_full().bg(if selected { p.accent.opacity(0.22) } else { p.hover.opacity(0.4) }) };
+            let l = &rl.line;
+            let (bg, sign, gut) = match l.kind { Kind::Added => (p.added, "+", p.added_word.opacity(0.55)), Kind::Removed => (p.removed, "−", p.removed_word.opacity(0.55)), Kind::Context => (gpui::transparent_black(), " ", gpui::transparent_black()) };
+            let no = if left { l.old_no } else { l.new_no };
+            div().flex().items_center().h_full().flex_1().min_w_0().overflow_hidden().bg(if selected { p.accent.opacity(0.28) } else { bg })
+                .child(div().w(px(46.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(no.map(|n| n.to_string()).unwrap_or_default()))
+                .child(div().w(px(20.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().child(StyledText::new(SharedString::from(l.text.clone())).with_highlights(rl.runs.clone())))
+        };
+        let inner = match &r.kind {
+            RowKind::FileHeader => return base.bg(p.surface).border_t_1().border_color(p.border).px_3().gap_2().font_weight(FontWeight::SEMIBOLD).child(self.m.vm.files[fi].path.clone()).into_any_element(),
+            RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
+            RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()).into_any_element(),
+            RowKind::Comment(c) => return self.comment_card(&c.clone(), cx).into_any_element(),
+            RowKind::Uni(rl) => {
+                let l = &rl.line;
+                let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
+                let gut = match l.kind { Kind::Added => p.added_word.opacity(0.55), Kind::Removed => p.removed_word.opacity(0.55), Kind::Context => gpui::transparent_black() };
+                let (show_old, show_new) = (st != Status::Added, st != Status::Deleted);
+                base.bg(if selected { p.accent.opacity(0.28) } else { bg })
+                    .when(show_old, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
+                    .when(show_new, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))
+                    .child(div().w(px(22.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(match l.kind { Kind::Added => "+", Kind::Removed => "−", _ => " " }))
+                    .child(div().flex_1().min_w_0().whitespace_nowrap().child(StyledText::new(SharedString::from(l.text.clone())).with_highlights(rl.runs.clone())))
+            }
+            RowKind::Split(a, b) => base.child(cell(a.as_ref(), true)).child(div().w(px(1.0)).h_full().bg(p.border)).child(cell(b.as_ref(), false)),
+        };
+        let ord = r.ord.unwrap_or(0);
+        inner.when(selected, |d| d.border_l_2().border_color(p.accent)).cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| { this.row_hit(ord, ev.modifiers.shift); let y: f32 = ev.position.y.into(); this.row_y.insert(ord, y); this.sel_x = ev.position.x.into(); cx.stop_propagation(); cx.notify(); }))
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                if this.dragging && ev.pressed_button == Some(MouseButton::Left) { if let Some(a) = this.anchor { let y: f32 = ev.position.y.into(); this.row_y.insert(ord, y); let s = Some((a.min(ord), a.max(ord))); if s != this.sel { this.sel = s; } cx.notify(); } }
+            })).into_any_element()
+    }
+
+    /// A comment on the diff, GitLab style: collapsible, rich or raw, with edit and delete for your own drafts.
+    fn comment_card(&mut self, c: &CItem, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal; let mono = self.fonts.mono.clone();
+        let collapsed = self.collapsed_c.contains(&c.key); let raw = self.raw_c.contains(&c.key);
+        let (k1, k2) = (c.key.clone(), c.key.clone()); let id = SharedString::from(c.key.clone());
+        let first_line: String = c.body.lines().next().unwrap_or("").chars().take(120).collect();
+        let draft = c.draft;
+        let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { markdown_view(&markdown::parse(text), &p, &mono).text_sm().into_any_element() } };
+        let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
+        div().flex().w_full().pl(px(110.0)).pr_3().py(px(4.0)).child(
+            div().id(SharedString::from(format!("card-{}", c.key))).flex().flex_col().flex_1().min_w_0().rounded_md().border_1().border_color(p.border).border_l_4().border_color(accent).bg(p.surface).overflow_hidden()
+                .child(div().flex().items_center().gap_2().px_3().py(px(5.0)).bg(p.hover.opacity(0.5))
+                    .child(div().id(SharedString::from(format!("cc-{}", c.key))).flex().items_center().gap_1().cursor_pointer().on_click(cx.listener(move |this, _, _, cx| { this.toggle_comment(&k1); cx.notify(); }))
+                        .child(icon(if collapsed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted)).child(icon(ic::COMMENT, 15.0, accent)))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(c.author.clone()))
+                    .when(c.draft.is_some(), |d| d.child(badge("Draft", p.warn, p.warn.opacity(0.15)))).when(c.ai, |d| d.child(badge("AI", p.ai, p.ai.opacity(0.15))))
+                    .when(c.resolved, |d| d.child(badge("Resolved", p.success, p.success.opacity(0.15)))).when(c.outdated, |d| d.child(badge("Outdated", p.muted, p.hover)))
+                    .when(!c.replies.is_empty(), |d| d.child(div().text_xs().text_color(p.muted).child(format!("{} repl{}", c.replies.len(), if c.replies.len() == 1 { "y" } else { "ies" }))))
+                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(p.muted).when(collapsed, |d| d.child(first_line)))
+                    .child(icon_btn(SharedString::from(format!("raw-{}", c.key)), if raw { ic::PREVIEW } else { ic::CODE }, if raw { "Show the rendered comment" } else { "Show the raw Markdown" }, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { if !this.raw_c.remove(&k2) { this.raw_c.insert(k2.clone()); } this.rebuild_rows(); cx.notify(); })))
+                    .children(draft.map(|d| icon_btn(SharedString::from(format!("ed-{d}")), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(d)); cx.stop_propagation(); cx.notify(); }))))
+                    .children(draft.map(|d| icon_btn(SharedString::from(format!("rm-{d}")), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(d); this.resync(); cx.stop_propagation(); cx.notify(); })))))
+                .when(!collapsed, |d| d.child(div().flex().flex_col().gap_2().px_3().py_2().child(body(&c.body))
+                    .children(c.replies.iter().map(|(a, t)| div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(p.border).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(a.clone())).child(body(t))).collect::<Vec<_>>())))
+        ).id(id)
+    }
+
+    fn scrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.pal;
+        let vp = self.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let max: f32 = self.list.max_offset_for_scrollbar().y.into();
+        if max <= 1.0 || vh <= 1.0 { return None; }
+        let off: f32 = (-self.list.scroll_px_offset_for_scrollbar().y).into();
+        let thumb = (vh * vh / (vh + max)).max(28.0); let travel = (vh - thumb).max(1.0); let top = (off / max).clamp(0.0, 1.0) * travel;
+        let oy: f32 = vp.origin.y.into(); let dragging = self.sb_drag.is_some();
+        Some(div().id("sb-track").absolute().top_0().right_0().w(px(12.0)).h(px(vh)).cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                let y: f32 = ev.position.y.into(); let rel = y - oy;
+                let grab = if rel >= top && rel <= top + thumb { rel - top } else { thumb / 2.0 };
+                this.sb_drag = Some(grab); this.list.scrollbar_drag_started();
+                let frac = ((rel - grab) / travel).clamp(0.0, 1.0); this.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.stop_propagation(); cx.notify();
+            }))
+            .child(div().absolute().top(px(top)).right(px(2.0)).w(px(8.0)).h(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
+    }
+
+    fn center(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal; let mono = self.fonts.mono.clone();
         let batch = self.m.vm.current_batch().to_vec();
         let first = batch.first().map(|&i| self.m.vm.files[i].clone());
         let is_md = first.as_ref().map(|f| batch.len() == 1 && markdown::is_markdown(&f.path) && !f.symlink).unwrap_or(false);
@@ -634,130 +935,127 @@ impl View {
         let manual = batch.first().map(|&i| self.m.vm.is_manually_grouped(i)).unwrap_or(false);
         let (adds, dels): (u32, u32) = batch.iter().fold((0, 0), |a, &i| (a.0 + self.m.vm.files[i].additions, a.1 + self.m.vm.files[i].deletions));
         let md_on = self.md_rendered; let mode = self.diff_mode;
+        let one_sided = !batch.is_empty() && batch.iter().all(|&i| matches!(self.m.vm.files[i].status, Status::Added | Status::Deleted) || self.m.vm.files[i].symlink);
+        let ncomments = self.comment_count();
 
         let title = if batch.len() > 1 { div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Batch of {} files", batch.len()))).child(div().text_xs().text_color(p.muted).child(if manual { "grouped by you" } else { "related files" })) }
             else if let Some(f) = &first { let (dir, name) = match f.path.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n.to_string()), None => (String::new(), f.path.clone()) };
                 div().flex().items_center().gap_2().min_w_0().truncate().when(f.symlink, |d| d.child(icon(ic::LINK, 17.0, p.accent))).child(div().flex().font_family(mono.clone()).text_sm().child(div().text_color(p.muted).child(dir)).child(div().font_weight(FontWeight::SEMIBOLD).child(name))) } else { div().child("No files match") };
+        let sym = self.sym_target.map(|t| { let path = self.m.vm.files[t].path.clone(); icon_text_btn("sym-go", ic::ARROW_FORWARD, "Go to the original", Btn::Secondary, &p).on_click(cx.listener(move |this, _, _, cx| { this.goto_symlink_target(); cx.notify(); })).tooltip_text(format!("Open {path}"), &p) });
         let header = (!batch.is_empty()).then(|| {
-            let mut h = div().flex().items_center().gap_3().px_4().py_2().border_b_1().border_color(p.border).bg(p.surface)
-                .child(div().flex_1().min_w_0().child(title))
-                .child(div().flex().items_center().gap_2().text_xs().font_family(mono.clone()).child(div().text_color(p.success).child(format!("+{adds}"))).child(div().text_color(p.danger).child(format!("−{dels}"))));
+            let mut h = div().flex().items_center().gap_3().px_4().py_2().border_b_1().border_color(p.border).bg(p.surface).child(div().flex_1().min_w_0().child(title))
+                .child(div().flex().items_center().gap_2().text_xs().font_family(mono.clone()).child(div().text_color(p.success).child(format!("+{adds}"))).child(div().text_color(p.danger).child(format!("−{dels}"))).child(diff_squares(adds, dels, &p, 10.0)));
+            if let Some(s) = sym { h = h.child(s); }
+            if ncomments > 0 { h = h.child(icon_btn("collapse-c", ic::UNFOLD_LESS, "Collapse or expand all comments in this file", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.collapse_all_comments(); cx.notify(); }))); }
             if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.reload(); } cx.notify(); }))); }
-            h.child(icon_btn("comment", ic::COMMENT, "Comment on the selection (c)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.comment_global = false; this.mode = Mode::Comment; cx.notify(); })))
-                .child(div().id("viewed").flex().items_center().gap_2().px_3().h(px(30.0)).rounded_md().border_1().border_color(if viewed_all { p.success } else { p.border }).cursor_pointer().hover(move |s| s.bg(p.hover)).text_sm().font_weight(FontWeight::MEDIUM)
-                    .on_click(cx.listener(|this, _, _, cx| { this.toggle_viewed(); cx.notify(); }))
-                    .child(div().size(px(16.0)).rounded_sm().border_1().border_color(if viewed_all { p.success } else { p.muted }).flex().items_center().justify_center().when(viewed_all, |d| d.bg(p.success).child(icon(ic::CHECK, 12.0, gpui::white()))))
-                    .child("Viewed"))
+            h
         });
 
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
-        let body = if let Some(blocks) = &self.md {
+        let body: AnyElement = if let Some(blocks) = &self.md {
             let cur_path = first.as_ref().map(|f| f.path.clone()).unwrap_or_default();
             let items: Vec<_> = blocks.iter().enumerate().map(|(i, b)| {
                 let on = self.md_sel.map(|(a, c)| i >= a.min(c) && i <= a.max(c)).unwrap_or(false);
                 let n = drafts.iter().filter(|d| d.file.as_deref() == Some(cur_path.as_str()) && d.start_line.map(|s| s <= b.last_line && d.end_line.unwrap_or(s) >= b.first_line).unwrap_or(false)).count();
                 div().id(("mdb", i)).relative().px_3().py(px(2.0)).rounded_md().cursor_pointer().border_l_2().border_color(if on { p.accent } else { gpui::transparent_black() }).when(on, |d| d.bg(p.accent.opacity(0.12))).hover(move |s| s.bg(p.hover.opacity(0.6)))
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                        this.md_sel = match (ev.modifiers().shift, this.md_sel) { (true, Some((a, _))) => Some((a, i)), _ => Some((i, i)) }; cx.notify();
+                        this.md_sel = match (ev.modifiers().shift, this.md_sel) { (true, Some((a, _))) => Some((a, i)), _ => Some((i, i)) };
+                        if let Some(pos) = ev.mouse_position() { let y: f32 = pos.y.into(); this.row_y.insert(i, y); this.sel_x = pos.x.into(); } cx.notify();
                     }))
-                    .child(markdown_view(std::slice::from_ref(&b.block), &p, mono))
+                    .child(markdown_view(std::slice::from_ref(&b.block), &p, &mono))
                     .when(n > 0, |d| d.child(div().absolute().top(px(2.0)).right(px(4.0)).flex().items_center().gap_1().text_xs().text_color(p.accent).child(icon(ic::COMMENT, 14.0, p.accent)).child(format!("{n}"))))
             }).collect();
             div().id("md").flex_1().min_h_0().overflow_y_scroll().p_6().pb(px(90.0)).child(div().max_w(px(880.0)).flex().flex_col().gap_2()
                 .child(div().text_xs().text_color(p.muted).pb_2().child("Rendered preview. Click a block to comment on it; Shift+click extends the selection.")).children(items)).into_any_element()
         } else if self.rows.is_empty() {
-            div().flex_1().flex().items_center().justify_center().text_color(p.muted).child(if self.status.is_empty() { "Nothing to show for this selection.".to_string() } else { self.status.clone() }).into_any_element()
+            div().flex_1().flex().items_center().justify_center().text_color(p.muted).child("Nothing to show for this selection.").into_any_element()
         } else {
-            let mono = mono.clone();
-            uniform_list("diff", self.rows.len(), cx.processor(move |this, range: Range<usize>, _w, cx| {
-                let p = this.pal; let h = px(20.0 * this.zoom); let fsz = px(13.0 * this.zoom);
-                range.map(|i| {
-                    let r = &this.rows[i]; let fi = r.fi; let st = this.m.vm.files[fi].status;
-                    let selected = this.sel.map(|(a, b)| i >= a && i <= b).unwrap_or(false) && this.rows.get(this.sel.unwrap().0).map(|x| x.fi) == Some(fi);
-                    let base = div().id(i).flex().items_center().h(h).w_full().font_family(mono.clone()).text_size(fsz).text_color(p.fg);
-                    let cell = |side: Option<&RLine>, left: bool| -> gpui::Div {
-                        let Some(rl) = side else { return div().flex_1().h_full().bg(if selected { p.accent.opacity(0.22) } else { p.hover.opacity(0.4) }) };
-                        let l = &rl.line;
-                        let (bg, sign, gut) = match l.kind { Kind::Added => (p.added, "+", p.added_word.opacity(0.55)), Kind::Removed => (p.removed, "−", p.removed_word.opacity(0.55)), Kind::Context => (gpui::transparent_black(), " ", gpui::transparent_black()) };
-                        let no = if left { l.old_no } else { l.new_no };
-                        div().flex().items_center().h_full().flex_1().min_w_0().overflow_hidden().bg(if selected { p.accent.opacity(0.28) } else { bg })
-                            .child(div().w(px(46.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(no.map(|n| n.to_string()).unwrap_or_default()))
-                            .child(div().w(px(20.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
-                            .child(div().flex_1().min_w_0().whitespace_nowrap().child(StyledText::new(SharedString::from(l.text.clone())).with_highlights(rl.runs.clone())))
-                    };
-                    let inner = match &r.kind {
-                        RowKind::FileHeader => base.bg(p.surface).border_t_1().border_color(p.border).px_3().gap_2().font_weight(FontWeight::SEMIBOLD).child(this.m.vm.files[fi].path.clone()),
-                        RowKind::Note(t) => base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()),
-                        RowKind::Hunk(t) => base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()),
-                        RowKind::Uni(rl) => {
-                            let l = &rl.line;
-                            let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
-                            let gut = match l.kind { Kind::Added => p.added_word.opacity(0.55), Kind::Removed => p.removed_word.opacity(0.55), Kind::Context => gpui::transparent_black() };
-                            let (show_old, show_new) = (st != Status::Added, st != Status::Deleted);
-                            base.bg(if selected { p.accent.opacity(0.28) } else { bg })
-                                .when(show_old, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
-                                .when(show_new, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))
-                                .child(div().w(px(22.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(match l.kind { Kind::Added => "+", Kind::Removed => "−", _ => " " }))
-                                .child(div().flex_1().min_w_0().whitespace_nowrap().child(StyledText::new(SharedString::from(l.text.clone())).with_highlights(rl.runs.clone())))
-                        }
-                        RowKind::Split(a, b) => base.child(cell(a.as_ref(), true)).child(div().w(px(1.0)).h_full().bg(p.border)).child(cell(b.as_ref(), false)),
-                    };
-                    let selectable = !matches!(r.kind, RowKind::FileHeader | RowKind::Hunk(_) | RowKind::Note(_));
-                    inner.when(selected, |d| d.border_l_2().border_color(p.accent)).when(selectable, |d| d.cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| { this.row_hit(i, ev.modifiers.shift); cx.notify(); }))
-                        .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                            if this.dragging && ev.pressed_button == Some(MouseButton::Left) { if let Some(a) = this.anchor { let s = Some((a.min(i), a.max(i))); if s != this.sel { this.sel = s; cx.notify(); } } }
-                        })))
-                }).collect()
-            })).flex_1().min_h_0().w_full().pb(px(70.0)).into_any_element()
+            list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| this.render_row(ix, cx))).flex_1().min_h_0().w_full().pb(px(70.0)).into_any_element()
         };
+        let scrollbar = if self.md.is_none() { self.scrollbar(cx) } else { None };
 
+        // toolbar that floats above the selected lines
         let sel = self.selection();
-        let sel_bar = sel.clone().filter(|_| self.mode == Mode::Normal).map(|s| div().flex().items_center().gap_2().px_4().py(px(6.0)).bg(p.accent.opacity(0.12)).border_t_1().border_color(p.accent)
-            .child(div().text_sm().flex_1().truncate().child(format!("{}  lines {}–{}", s.file, s.start, s.end)))
-            .child(icon_text_btn("sel-comment", ic::ADD_COMMENT, "Comment", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.comment_global = false; this.mode = Mode::Comment; cx.notify(); })))
-            .child(icon_text_btn("sel-ai", ic::AUTO_AWESOME, "Ask AI", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_ctx = this.selection(); this.tab = RightTab::Ai; this.right_open = true; this.mode = Mode::Ask; cx.notify(); })))
-            .child(icon_btn("sel-clear", ic::CLOSE, "Clear selection (Esc)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.clear_selection(); cx.notify(); }))));
-        let target: SharedString = if self.comment_global { "Comment on the whole merge request".into() } else { match (&sel, first.as_ref()) { (Some(s), _) => format!("Comment on {}:{}–{}", s.file, s.start, s.end), (None, Some(f)) => format!("Comment on {} (select lines first to anchor it)", f.path), _ => "General comment".into() }.into() };
-        let composing = self.mode == Mode::Comment;
-        let composer = composing.then(|| div().flex().flex_col().gap_2().p_3().border_t_1().border_color(p.accent).bg(p.surface)
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(target))
-            .child(self.wire(Fid::Comment, div().id("cbox").flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(p.accent).bg(p.bg).child(self.text_of(Fid::Comment, true, "Write a comment. Enter saves a draft, Esc cancels.")), cx))
-            .child(div().flex().gap_2().child(icon_text_btn("save-c", ic::CHECK, "Add draft", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.add_comment(); cx.notify(); }))).child(icon_text_btn("cancel-c", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.mode = Mode::Normal; this.comment_global = false; cx.notify(); })))));
+        let toolbar = sel.clone().filter(|_| self.composer.is_none()).and_then(|s| {
+            let range = if self.md.is_some() { self.md_sel.map(|(a, b)| (a.min(b), a.max(b))) } else { self.sel };
+            let (lo, hi) = range?; let miny = self.row_y.iter().filter(|(o, _)| **o >= lo && **o <= hi).map(|(_, y)| *y).fold(f32::MAX, f32::min);
+            if miny == f32::MAX { return None; }
+            let b = self.b_body.get(); let (ox, oy): (f32, f32) = (b.origin.x.into(), b.origin.y.into()); let w: f32 = b.size.width.into();
+            let top = (miny - oy - 50.0).max(4.0); let left = (self.sel_x - ox - 30.0).clamp(8.0, (w - 330.0).max(8.0));
+            let has_new = self.selection_new_text().is_some();
+            Some(div().absolute().top(px(top)).left(px(left)).flex().items_center().gap_1().px_2().py_1().rounded_lg().bg(p.surface).border_1().border_color(p.accent).shadow_lg().occlude()
+                .child(div().text_xs().text_color(p.muted).px_1().child(format!("{}:{}–{}", s.file.rsplit('/').next().unwrap_or(&s.file), s.start, s.end)))
+                .child(icon_text_btn("sel-comment", ic::ADD_COMMENT, "Comment", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(false, None); cx.stop_propagation(); cx.notify(); })))
+                .when(has_new, |d| d.child(icon_btn("sel-suggest", ic::LIGHTBULB, "Suggest a change to these lines", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
+                    this.open_composer(false, None); if let Some(t) = this.selection_new_text() { this.comment.f.insert_block(&format!("```suggestion\n{t}\n```")); } cx.stop_propagation(); cx.notify(); }))))
+                .child(icon_text_btn("sel-ai", ic::AUTO_AWESOME, "Ask AI", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_ctx = this.selection(); this.tab = RightTab::Ai; this.right_open = true; this.focus = Some(Fid::Ask); cx.stop_propagation(); cx.notify(); })))
+                .child(icon_btn("sel-clear", ic::CLOSE, "Clear the selection (Esc)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.clear_selection(); cx.stop_propagation(); cx.notify(); }))))
+        });
 
         // floating action bar
         let sep = || div().w(px(1.0)).h(px(22.0)).bg(p.border).flex_none();
-        let has_sel_bar = sel_bar.is_some();
-        let bar = div().absolute().bottom(px(if composing { 230.0 } else if has_sel_bar { 66.0 } else { 18.0 })).left_0().right_0().flex().justify_center().child(
+        let bar = div().absolute().bottom(px(16.0)).left_0().right_0().flex().justify_center().child(
             div().flex().items_center().gap_2().px_3().py_2().rounded_lg().bg(p.surface).border_1().border_color(p.border).shadow_lg()
                 .child(icon_btn("prev", ic::CHEVRON_LEFT, "Previous batch (Backspace)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.back(); cx.notify(); })))
-                .child(icon_btn("next", ic::CHEVRON_RIGHT, "Mark viewed and go to the next batch (Enter)", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.next(); cx.notify(); })))
-                .child(sep())
-                .child(icon_btn("gcomment", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.comment_global = true; this.mode = Mode::Comment; cx.notify(); })))
-                .child(sep())
-                .when(!md_on, |d| d.child(seg_box(&p).child(seg_icon("df-uni", ic::VIEW_AGENDA, "Unified diff (u)", mode == DiffMode::Unified, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Unified); cx.notify(); })))
+                .child(icon_btn("next", ic::CHEVRON_RIGHT, "Next batch (Enter)", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.next(); cx.notify(); })))
+                .child(tip(div().id("viewed-box").size(px(30.0)).flex().items_center().justify_center().flex_none().rounded_md().border_1().border_color(if viewed_all { p.success } else { p.border }).bg(if viewed_all { p.success } else { p.surface }).cursor_pointer().hover(move |s| s.bg(if viewed_all { p.success } else { p.hover }))
+                    .on_click(cx.listener(|this, _, _, cx| { this.toggle_viewed(); cx.notify(); })).child(icon(if viewed_all { ic::VISIBILITY } else { ic::VISIBILITY_OFF }, 18.0, if viewed_all { gpui::white() } else { p.muted })), if viewed_all { "Viewed. Click to mark as not viewed (v)" } else { "Mark this file as viewed (v)" }, &p))
+                .child(icon_btn("gcomment", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))
+                .when(!md_on && !one_sided, |d| d.child(sep()).child(seg_box(&p).child(seg_icon("df-uni", ic::VIEW_AGENDA, "Unified diff (u)", mode == DiffMode::Unified, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Unified); cx.notify(); })))
                     .child(seg_icon("df-split", ic::VERTICAL_SPLIT, "Side-by-side diff (u)", mode == DiffMode::Split, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Split); cx.notify(); })))))
-                .when(is_md, |d| d.child(seg_box(&p).child(seg_icon("md-diff", ic::CODE, "Show the markdown source diff (m)", !md_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.md_rendered { this.md_rendered = false; this.shown = None; this.clear_selection(); } cx.notify(); })))
+                .when(is_md, |d| d.child(sep()).child(seg_box(&p).child(seg_icon("md-diff", ic::CODE, "Show the markdown source diff (m)", !md_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.md_rendered { this.md_rendered = false; this.shown = None; this.clear_selection(); } cx.notify(); })))
                     .child(seg_icon("md-prev", ic::VISIBILITY, "Show the rendered markdown (m)", md_on, &p).on_click(cx.listener(|this, _, _, cx| { if !this.md_rendered { this.md_rendered = true; this.shown = None; this.clear_selection(); } cx.notify(); })))))
                 .child(sep())
-                .child(icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.mode = Mode::Finish; this.submit_msg = None; cx.notify(); }))));
+                .child(icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); }))));
 
-        div().relative().flex().flex_col().flex_1().min_w_0().h_full().children(header).child(body).children(sel_bar).children(composer).child(bar)
+        let composer = self.composer.is_some().then(|| self.composer_panel(cx));
+        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(toolbar).child(bar);
+        div().relative().flex().flex_col().flex_1().min_w_0().h_full().children(header).child(wrap).children(composer)
     }
 
-    fn section_header(&self, id: &'static str, title: &'static str, count: Option<usize>, open: bool, cx: &mut Context<Self>, toggle: fn(&mut View)) -> gpui::Stateful<gpui::Div> {
-        let p = self.pal;
-        div().id(id).flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(p.border).bg(p.surface).cursor_pointer().hover(move |s| s.bg(p.hover))
-            .child(icon(if open { ic::EXPAND_MORE } else { ic::CHEVRON_RIGHT }, 18.0, p.muted)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).flex_1().child(title)).children(count.map(|c| badge(format!("{c}"), p.muted, p.hover)))
-            .on_click(cx.listener(move |this, _, _, cx| { toggle(this); cx.notify(); }))
+    /// The rich comment editor: Markdown toolbar, Write and Preview tabs, suggestions.
+    fn composer_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal; let mono = self.fonts.mono.clone();
+        let c = self.composer.as_ref().map(|c| (c.editing, c.global, c.preview)).unwrap_or((None, false, false));
+        let (editing, global, preview) = c;
+        let sel = if global || editing.is_some() { None } else { self.selection() };
+        let target: SharedString = if editing.is_some() { "Edit comment".into() } else if global { "Comment on the whole merge request".into() } else { match (&sel, self.current_file()) { (Some(s), _) => format!("Comment on {}:{}–{}", s.file, s.start, s.end), (None, Some(fi)) => format!("Comment on {} (select lines first to anchor it)", self.m.vm.files[fi].path), _ => "General comment".into() }.into() };
+        let has_new = sel.is_some() && self.selection_new_text().is_some();
+        let focused = self.focus == Some(Fid::Comment);
+        let tb = |id: &'static str, i: ic::Icon, t: &'static str, cx: &mut Context<Self>, f: fn(&mut TextField2)| icon_btn(id, i, t, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.focus = Some(Fid::Comment); f(&mut this.comment.f); cx.stop_propagation(); cx.notify(); }));
+        let editor: AnyElement = if preview {
+            div().min_h(px(110.0)).max_h(px(260.0)).overflow_hidden().px_3().py_2().child(if self.comment.f.text.trim().is_empty() { div().text_sm().text_color(p.muted).child("Nothing to preview yet.").into_any_element() } else { markdown_view(&markdown::parse(&self.comment.f.text), &p, &mono).text_sm().into_any_element() }).into_any_element()
+        } else {
+            self.winp(Fid::Comment, div().id("cbox").flex().px_3().py(px(6.0)).min_h(px(110.0)).max_h(px(260.0)).overflow_hidden().font_family(self.fonts.ui.clone()).child(input_text(&self.comment, focused, "Write a comment. Markdown is supported: **bold**, `code`, lists, links, and suggestions.", &p, false, 5)), cx).into_any_element()
+        };
+        let tab = |id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>, set: bool| div().id(id).px_3().py(px(5.0)).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).child(label)
+            .on_click(cx.listener(move |this, _, _, cx| { if let Some(c) = this.composer.as_mut() { c.preview = set; } cx.stop_propagation(); cx.notify(); }));
+        let probe = kit::bounds_probe(&self.b_composer);
+        div().relative().flex().flex_col().border_t_1().border_color(p.accent).bg(p.surface).child(div().absolute().size_full().child(probe))
+            .child(div().flex().items_center().gap_2().px_3().pt_2().child(icon(ic::COMMENT, 17.0, p.accent)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).flex_1().truncate().child(target))
+                .child(icon_btn("cmp-close", ic::CLOSE, "Close (Esc)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.composer = None; this.focus = None; cx.stop_propagation(); cx.notify(); }))))
+            .child(div().flex().items_center().gap_1().px_3().child(tab("cmp-write", "Write", !preview, cx, false)).child(tab("cmp-prev", "Preview", preview, cx, true)).child(div().flex_1())
+                .when(!preview, |d| d.child(tb("tb-b", ic::FORMAT_BOLD, "Bold", cx, |f| f.wrap_selection("**", "**", "bold")))
+                    .child(tb("tb-i", ic::FORMAT_ITALIC, "Italic", cx, |f| f.wrap_selection("_", "_", "italic")))
+                    .child(tb("tb-c", ic::CODE, "Inline code", cx, |f| f.wrap_selection("`", "`", "code")))
+                    .child(tb("tb-cb", ic::DATA_OBJECT, "Code block", cx, |f| f.insert_block("```\ncode\n```")))
+                    .child(tb("tb-q", ic::FORMAT_QUOTE, "Quote", cx, |f| f.prefix_lines("> ")))
+                    .child(tb("tb-l", ic::FORMAT_LIST_BULLETED, "Bulleted list", cx, |f| f.prefix_lines("- ")))
+                    .child(tb("tb-k", ic::LINK, "Link", cx, |f| f.wrap_selection("[", "](https://)", "text")))
+                    .when(has_new, |d| d.child(icon_btn("tb-s", ic::LIGHTBULB, "Insert a suggested change with the selected lines", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(t) = this.selection_new_text() { this.comment.f.insert_block(&format!("```suggestion\n{t}\n```")); } this.focus = Some(Fid::Comment); cx.stop_propagation(); cx.notify(); }))))))
+            .child(div().mx_3().rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).child(editor))
+            .child(div().flex().items_center().gap_2().px_3().py_2().child(div().flex_1().text_xs().text_color(p.muted).child("Ctrl+Enter saves. Markdown and ```suggestion blocks are supported."))
+                .child(icon_text_btn("cmp-cancel", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.composer = None; this.focus = None; cx.stop_propagation(); cx.notify(); })))
+                .child(icon_text_btn("cmp-save", ic::CHECK, if editing.is_some() { "Save changes" } else { "Add draft" }, Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer(); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
     }
 
-    fn right_panel(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft], mono: &SharedString) -> impl IntoElement {
+    fn right_panel(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft]) -> impl IntoElement {
         let p = self.pal;
         let tabs = div().flex().items_center().border_b_1().border_color(p.border).px_2()
             .child(self.tab_btn("tab-review", "Review", ic::COMMIT, RightTab::Review, cx)).child(self.tab_btn("tab-ai", "Ask AI", ic::AUTO_AWESOME, RightTab::Ai, cx)).child(div().flex_1())
             .child(icon_btn("close-r", ic::CHEVRON_RIGHT, "Hide this panel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.right_open = false; this.settings.right_open = false; this.save_settings(); cx.notify(); })));
-        let body = if self.tab == RightTab::Review { self.review_tab(cx, drafts, mono).into_any_element() } else { self.ai_tab(cx).into_any_element() };
+        let body = if self.tab == RightTab::Review { self.review_tab(cx, drafts).into_any_element() } else { self.ai_tab(cx).into_any_element() };
         div().flex().flex_col().size_full().child(tabs).child(body)
     }
     fn tab_btn(&self, id: &'static str, label: &'static str, i: ic::Icon, t: RightTab, cx: &mut Context<Self>) -> impl IntoElement {
@@ -765,9 +1063,14 @@ impl View {
         div().id(id).flex().items_center().gap_1().px_3().py_2().cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() })
             .child(icon(i, 16.0, if on { p.accent } else { p.muted })).child(label).on_click(cx.listener(move |this, _, _, cx| { this.tab = t; cx.notify(); }))
     }
-
-    fn review_tab(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft], mono: &SharedString) -> impl IntoElement {
+    fn section_header(&self, id: &'static str, title: &'static str, count: Option<usize>, open: bool, cx: &mut Context<Self>, toggle: fn(&mut View)) -> gpui::Stateful<gpui::Div> {
         let p = self.pal;
+        div().id(id).flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(p.border).bg(p.surface).cursor_pointer().hover(move |s| s.bg(p.hover))
+            .child(icon(if open { ic::EXPAND_MORE } else { ic::CHEVRON_RIGHT }, 18.0, p.muted)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).flex_1().child(title)).children(count.map(|c| badge(format!("{c}"), p.muted, p.hover)))
+            .on_click(cx.listener(move |this, _, _, cx| { toggle(this); cx.notify(); }))
+    }
+    fn review_tab(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft]) -> impl IntoElement {
+        let p = self.pal; let mono = self.fonts.mono.clone();
         let commit_rows: Vec<_> = self.m.graph.rows.iter().enumerate().map(|(i, r)| {
             let sel = self.m.graph.selection.map(|(a, b)| i >= a && i <= b).unwrap_or(false) && self.m.vm.commit_scope.is_some(); let last = i + 1 == self.m.graph.rows.len();
             div().id(("c", i)).flex().gap_2().px_3().cursor_pointer().when(sel, |d| d.bg(p.accent.opacity(0.14))).hover(move |s| s.bg(p.hover))
@@ -785,7 +1088,8 @@ impl View {
             let loc = match (&d.file, d.start_line, d.end_line) { (Some(f), Some(a), Some(b)) if a != b => format!("{}:{a}–{b}", f.rsplit('/').next().unwrap_or(f)), (Some(f), Some(a), _) => format!("{}:{a}", f.rsplit('/').next().unwrap_or(f)), (Some(f), None, _) => f.rsplit('/').next().unwrap_or(f).to_string(), _ => "Merge request".into() };
             div().id(("d", i)).flex().flex_col().gap_1().px_3().py_2().border_b_1().border_color(p.border)
                 .child(div().flex().items_center().justify_between().child(div().flex().items_center().gap_2().child(div().text_xs().font_family(mono.clone()).text_color(p.muted).child(loc)).when(d.ai, |x| x.child(badge("AI", p.ai, p.ai.opacity(0.15)))))
-                    .child(icon_btn(("dd", i), ic::DELETE, "Remove this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); }))))
+                    .child(div().flex().child(icon_btn(("de", i), ic::EDIT, "Edit this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
+                        .child(icon_btn(("dd", i), ic::DELETE, "Remove this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))))
                 .child(div().text_sm().child(d.body.clone()))
         }).collect();
         let n = drafts.len();
@@ -795,21 +1099,25 @@ impl View {
             .when(co, |d| d.child(div().id("commits").max_h(px(260.0)).overflow_y_scroll().children(commit_rows)))
             .child(self.section_header("sec-drafts", "Drafts", Some(n), dro, cx, |v| v.drafts_open = !v.drafts_open))
             .when(dro, |d| d.child(div().id("drafts").flex_1().min_h_0().overflow_y_scroll()
-                .when(n == 0, |d| d.child(div().p_4().text_sm().text_color(p.muted).child("No drafts yet. Select lines (click, drag, or Shift+click) and press c.")))
+                .when(n == 0, |d| d.child(div().p_4().text_sm().text_color(p.muted).child("No drafts yet. Select lines (click, drag, or Shift+click) and use the Comment button.")))
                 .children(draft_rows)))
     }
 
     fn ai_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
         let ctx: Option<SharedString> = self.ai_ctx.as_ref().map(|s| format!("{}:{}–{}", s.file, s.start, s.end).into());
-        let msgs: Vec<_> = self.chat.iter().enumerate().map(|(i, (role, text))| {
+        let bubbles: Vec<_> = self.chat.iter().enumerate().map(|(i, (role, text))| {
             let user = role == "user"; let t = text.clone();
-            div().flex().flex_col().gap_1().px_3().py_2().border_b_1().border_color(p.border).when(user, |d| d.bg(p.hover.opacity(0.5)))
-                .child(div().flex().items_center().justify_between().child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(if user { p.muted } else { p.ai }).child(if user { "You" } else { "Agent" }))
-                    .when(!user, |d| d.child(icon_btn(("todraft", i), ic::ADD_COMMENT, "Save this answer as an AI draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.draft_from_answer(&t); cx.notify(); })))))
-                .child(div().text_sm().child(text.clone()))
+            if user {
+                div().flex().justify_end().px_3().py(px(6.0)).child(div().max_w(relative(0.86)).px_3().py_2().rounded_lg().bg(p.accent).text_color(gpui::white()).text_sm().child(text.clone()))
+            } else {
+                div().flex().items_start().gap_2().px_3().py(px(6.0))
+                    .child(div().size(px(26.0)).flex_none().rounded_full().bg(p.ai.opacity(0.18)).flex().items_center().justify_center().child(icon(ic::AUTO_AWESOME, 15.0, p.ai)))
+                    .child(div().flex().flex_col().gap_1().max_w(relative(0.86)).child(div().px_3().py_2().rounded_lg().bg(p.hover).text_sm().child(markdown_view(&markdown::parse(text), &p, &self.fonts.mono).text_sm()))
+                        .child(div().flex().child(icon_btn(("todraft", i), ic::ADD_COMMENT, "Save this answer as an AI draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.draft_from_answer(&t); this.flush(cx); cx.notify(); })))))
+            }
         }).collect();
-        let focused = self.mode == Mode::Ask; let busy = self.busy();
+        let focused = self.focus == Some(Fid::Ask); let busy = self.busy();
         let agent = self.settings.agent_label();
         let mut cfg = vec![agent.to_string()];
         if !self.settings.model.is_empty() { cfg.push(self.settings.model.clone()); }
@@ -817,7 +1125,7 @@ impl View {
         let working = self.ai_job.map(|j| {
             let label = match j { Job::Review => "Reviewing the merge request", Job::Chat => "Thinking" };
             let el = self.ai_started.map(ago).unwrap_or_default();
-            let acts: Vec<_> = self.ai_activity.iter().rev().take(6).rev().enumerate().map(|(i, a)| div().flex().items_center().gap_2().text_xs().text_color(if i == 5 || i + 1 == self.ai_activity.len().min(6) { p.fg } else { p.muted }).child(icon(ic::CHEVRON_RIGHT, 13.0, p.muted)).child(div().truncate().child(a.clone()))).collect();
+            let acts: Vec<_> = self.ai_activity.iter().rev().take(6).rev().enumerate().map(|(i, a)| div().flex().items_center().gap_2().text_xs().text_color(if i + 1 == self.ai_activity.len().min(6) { p.fg } else { p.muted }).child(icon(ic::CHEVRON_RIGHT, 13.0, p.muted)).child(div().truncate().child(a.clone()))).collect();
             div().flex().flex_col().gap_2().px_3().py_3().bg(p.accent.opacity(0.08)).border_b_1().border_color(p.accent)
                 .child(div().flex().items_center().gap_3().child(loading_dots(&p)).child(div().flex_1().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.accent).child(format!("{label}… {el}")))
                     .child(icon_btn("ai-stop", ic::STOP, "Stop the agent (Esc)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); }))))
@@ -825,104 +1133,26 @@ impl View {
                 .when(!self.ai_partial.trim().is_empty(), |d| d.child(div().text_sm().text_color(p.fg).max_h(px(160.0)).overflow_hidden().child(self.ai_partial.trim().to_string())))
         });
         div().flex().flex_col().flex_1().min_h_0()
-            .child(div().flex().items_center().justify_between().px_3().py_2().border_b_1().border_color(p.border).bg(p.surface)
-                .child(div().flex().flex_col().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Ask {agent}"))).child(div().text_xs().text_color(p.muted).truncate().child(cfg.join(" · "))))
-                .child(icon_btn("ai-settings", ic::TUNE, "Agent, model and effort settings", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.mode = Mode::Settings; cx.notify(); }))))
-            .children(self.ai_notice.clone().map(|n| div().flex().items_start().gap_2().px_3().py_2().text_sm().text_color(p.danger).bg(p.danger.opacity(0.1)).border_b_1().border_color(p.danger).child(icon(ic::ERROR_OUTLINE, 17.0, p.danger)).child(div().flex_1().min_w_0().child(n))))
+            .child(div().flex().items_center().gap_1().px_3().py_2().border_b_1().border_color(p.border).bg(p.surface)
+                .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Ask {agent}"))).child(div().text_xs().text_color(p.muted).truncate().child(cfg.join(" · "))))
+                .child(icon_btn("new-chat", ic::EDIT_NOTE, "Start a new chat", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let _ = this.m.store.new_chat(this.m.vm.review); this.chat.clear(); this.ai_ctx = None; this.ai_notice = None; cx.notify(); })))
+                .child(icon_btn("ai-settings", ic::TUNE, "Agent, model and effort settings", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings)))))
+            .children(self.ai_notice.clone().map(|n| div().flex().items_start().gap_2().px_3().py_2().text_sm().text_color(p.danger).bg(p.danger.opacity(0.1)).border_b_1().border_color(p.danger).child(icon(ic::ERROR_OUTLINE, 17.0, p.danger)).child(div().flex_1().min_w_0().child(n))
+                .child(icon_btn("ai-notice-x", ic::CLOSE, "Dismiss", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_notice = None; cx.notify(); })))))
             .children(working)
-            .child(div().id("chat").flex_1().min_h_0().overflow_y_scroll()
+            .child(div().id("chat").flex_1().min_h_0().overflow_y_scroll().py_2()
                 .when(self.chat.is_empty() && !busy, |d| d.child(div().p_4().flex().flex_col().gap_2().text_sm().text_color(p.muted)
-                    .child("Select lines in the diff and press a to ask about them, or ask a general question about this merge request.")
+                    .child("Select lines in the diff and use Ask AI, or ask a general question about this merge request.")
                     .child("Answers stay private to you. Nothing is posted to the host. Save one as a draft to keep it.")))
-                .children(msgs))
+                .children(bubbles))
             .child(div().flex().flex_col().gap_2().p_3().border_t_1().border_color(p.border).bg(p.surface)
-                .children(ctx.map(|c| div().flex().items_center().gap_2().child(badge("context", p.accent, p.accent.opacity(0.15))).child(div().text_xs().font_family(self.fonts.mono.clone()).text_color(p.muted).truncate().child(c))))
+                .children(ctx.map(|c| div().flex().items_center().gap_2().px_2().py(px(3.0)).rounded_md().bg(p.accent.opacity(0.1)).child(icon(ic::CODE, 15.0, p.accent)).child(div().flex_1().min_w_0().truncate().text_xs().font_family(self.fonts.mono.clone()).child(c))
+                    .child(icon_btn("ctx-x", ic::CLOSE, "Remove this context", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_ctx = None; cx.stop_propagation(); cx.notify(); })))))
                 .child(div().flex().items_center().gap_2()
-                    .child(self.wire(Fid::Ask, div().id("ask-box").flex_1().min_w_0().flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).min_h(px(32.0)).child(self.text_of(Fid::Ask, focused, "Ask about the selection…")), cx))
+                    .child(self.winp(Fid::Ask, div().id("ask-box").flex_1().min_w_0().flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).min_h(px(32.0)).child(input_text(&self.ask, focused, "Ask about the selection…", &p, false, 1)), cx))
                     .child(if busy { icon_btn("ask-send", ic::STOP, "Stop the agent", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })) }
-                        else { icon_btn("ask-send", ic::SEND, "Send (Enter)", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { let q = this.ask_f.text.trim().to_string(); if !q.is_empty() { this.ask_f.clear(); this.start_ai(Job::Chat, q, cx); } cx.notify(); })) }))
+                        else { icon_btn("ask-send", ic::SEND, "Send (Enter)", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { let q = this.ask.f.text.trim().to_string(); if !q.is_empty() { this.ask.f.clear(); this.start_ai(Job::Chat, q, cx); } cx.notify(); })) }))
                 .child(div().id("ask-ctx").text_xs().text_color(p.accent).cursor_pointer().child("Use the current selection as context").on_click(cx.listener(|this, _, _, cx| { this.ai_ctx = this.selection(); cx.notify(); }))))
-    }
-
-    fn settings_overlay(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = self.pal;
-        let row = |label: &'static str, hint: &'static str, ctl: gpui::AnyElement| div().flex().items_center().justify_between().gap_4().py_2()
-            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label)).child(div().text_xs().text_color(p.muted).child(hint))).child(ctl);
-        let section = |t: &'static str| div().pt_4().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).border_b_1().border_color(p.border).child(t.to_uppercase());
-        let s = self.settings.clone();
-        let themes = theme::available(Some(&model::themes_dir()));
-        let chip = |id: (&'static str, usize), label: String, on: bool| div().id(id).px_3().py(px(4.0)).rounded_md().border_1().border_color(if on { p.accent } else { p.border }).bg(if on { p.accent.opacity(0.12) } else { gpui::transparent_black() }).cursor_pointer().text_sm().hover(move |x| x.bg(p.hover)).child(label);
-        let theme_chips: Vec<_> = themes.iter().enumerate().map(|(i, n)| { let nn = n.clone(); chip(("th", i), n.clone(), &s.theme == n).on_click(cx.listener(move |this, _, _, cx| { this.settings.theme = nn.clone(); this.save_settings(); this.apply_theme(); cx.notify(); })) }).collect();
-        let agent_chips: Vec<_> = AGENTS.iter().enumerate().map(|(i, (k, l))| { let kk = k.to_string(); chip(("ag", i), l.to_string(), s.agent == *k).on_click(cx.listener(move |this, _, _, cx| { this.settings.agent = kk.clone(); this.save_settings(); this.ai_notice = None; cx.notify(); })) }).collect();
-        let mut model_opts: Vec<String> = vec![String::new()]; model_opts.extend(model_suggestions(&s.agent).iter().map(|m| m.to_string()));
-        let model_chips: Vec<_> = model_opts.iter().enumerate().map(|(i, m)| { let mm = m.clone(); chip(("md", i), if m.is_empty() { "Default".into() } else { m.clone() }, s.model == *m).on_click(cx.listener(move |this, _, _, cx| { this.settings.model = mm.clone(); this.model_f.set(&mm); this.save_settings(); cx.notify(); })) }).collect();
-        let effort_ok = supports_effort(&s.agent);
-        let effort_chips: Vec<_> = [("", "Default"), ("low", "Low"), ("medium", "Medium"), ("high", "High")].iter().enumerate().map(|(i, (v, l))| { let vv = v.to_string(); chip(("ef", i), l.to_string(), s.effort == *v).on_click(cx.listener(move |this, _, _, cx| { this.settings.effort = vv.clone(); this.save_settings(); cx.notify(); })) }).collect();
-        let pick = |id: &'static str, cur: &str, options: &[String], cx: &mut Context<Self>, set: fn(&mut Settings, String)| -> gpui::AnyElement {
-            seg_box(&p).children(options.iter().enumerate().map(|(i, o)| { let on = cur == o; let oo = o.clone(); seg_cell((id, i), o.clone(), on, &p).on_click(cx.listener(move |this, _, _, cx| { set(&mut this.settings, oo.clone()); this.save_settings(); this.apply_theme(); cx.notify(); })) }).collect::<Vec<_>>()).into_any_element()
-        };
-        let editing = |id: Fid| self.mode == Mode::SettingsEdit(id);
-        let ibox = |this: &Self, id: Fid, ph: &str, cx: &mut Context<Self>| this.wire(id, div().id(match id { Fid::Cmd => "i-cmd", Fid::Model => "i-model", Fid::RuleLabel => "i-label", _ => "i-pat" }).flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if editing(id) { p.accent } else { p.border }).bg(p.bg).child(this.text_of(id, editing(id), ph)), cx);
-        let rules: Vec<_> = s.group_rules.iter().enumerate().map(|(i, r)| {
-            let id = r.id.clone(); let id2 = r.id.clone();
-            div().flex().items_center().gap_3().py(px(6.0)).border_b_1().border_color(p.border)
-                .child(div().id(("rule-sw", i)).cursor_pointer().child(switch(r.enabled, &p)).on_click(cx.listener(move |this, _, _, cx| { if let Some(r) = this.settings.group_rules.iter_mut().find(|r| r.id == id) { r.enabled = !r.enabled; } this.set_rules(); cx.notify(); })))
-                .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().child(r.label.clone())).child(div().text_xs().font_family(self.fonts.mono.clone()).text_color(p.muted).truncate().child(r.pattern.clone())))
-                .when(!r.builtin, |d| d.child(icon_btn(("rule-del", i), ic::DELETE, "Delete this rule", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.settings.group_rules.retain(|r| r.id != id2); this.set_rules(); cx.notify(); }))))
-        }).collect();
-        let themes_dir = model::themes_dir();
-        let example = "Read AGENTS.md in this folder, then create a warmer dark theme called warm.toml and validate it with `perusal theme check warm.toml`.";
-
-        let scroll = div().id("settings-scroll").flex_1().min_h_0().overflow_y_scroll().px_5().pb_4().flex().flex_col()
-            .child(section("Appearance"))
-            .child(row("Theme", "Built-in themes plus valid files in your themes folder", div().flex().flex_wrap().gap_2().max_w(px(380.0)).justify_end().children(theme_chips).into_any_element()))
-            .child(row("Follow system appearance", "Switch between a light and a dark theme with the OS", div().id("sw-os").cursor_pointer().child(switch(s.follow_os, &p)).on_click(cx.listener(|this, _, _, cx| { this.settings.follow_os = !this.settings.follow_os; this.save_settings(); cx.notify(); })).into_any_element()))
-            .when(s.follow_os, |d| d
-                .child(row("Light theme", "Used when the OS is light", pick("pl", &s.theme_light, &themes, cx, |st, v| st.theme_light = v)))
-                .child(row("Dark theme", "Used when the OS is dark", pick("pd", &s.theme_dark, &themes, cx, |st, v| st.theme_dark = v))))
-            .child(div().flex().flex_col().gap_2().p_3().mt_2().rounded_md().border_1().border_color(p.border).bg(p.bg)
-                .child(div().flex().items_center().gap_2().child(icon(ic::PALETTE, 18.0, p.accent)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).flex_1().child("Custom themes"))
-                    .child(icon_text_btn("open-themes", ic::FOLDER_OPEN, "Open themes folder", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let d = model::ensure_theme_docs(); if let Err(e) = model::open_dir(&d) { this.ai_notice = Some(e); } cx.notify(); }))))
-                .child(div().text_xs().font_family(self.fonts.mono.clone()).text_color(p.muted).child(themes_dir.display().to_string()))
-                .child(div().text_sm().text_color(p.muted).child("Ask your AI agent to make one. Open an agent in the themes folder (for example run `claude` there). The folder already contains an AGENTS.md that explains the theme format, the colour rules and how to validate a file. Then ask, for example:"))
-                .child(div().flex().items_center().gap_2().px_3().py_2().rounded_md().border_1().border_color(p.border).bg(p.surface)
-                    .child(div().flex_1().min_w_0().text_sm().child(format!("\"{example}\"")))
-                    .child(icon_btn("copy-prompt", ic::CONTENT_COPY, "Copy this prompt", Btn::Ghost, &p).on_click(cx.listener(move |_, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(example.to_string())); }))))
-                .child(div().text_xs().text_color(p.muted).child("New valid theme files appear in the list above the next time you open Settings.")))
-            .child(section("Review"))
-            .child(row("Group related files", "Batch files that belong together using the rules below", div().id("sw-grp").cursor_pointer().child(switch(s.group_related, &p)).on_click(cx.listener(|this, _, _, cx| { this.settings.group_related = !this.settings.group_related; this.save_settings(); this.m.vm.grouping = this.settings.group_related; let _ = this.m.vm.refresh(); this.reload(); cx.notify(); })).into_any_element()))
-            .child(div().flex().flex_col().p_3().rounded_md().border_1().border_color(p.border).bg(p.bg)
-                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Grouping rules"))
-                .child(div().text_xs().text_color(p.muted).pb_2().child("Files that match the same rule with the same name (across folders) are reviewed together. The first matching rule wins; names like main, lib, index are ignored."))
-                .children(rules)
-                .child(div().flex().flex_col().gap_2().pt_3()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Add a rule"))
-                    .child(ibox(self, Fid::RuleLabel, "Name, for example Docs with images", cx))
-                    .child(ibox(self, Fid::RulePat, r"Pattern with a stem group, e.g. ^docs/(?P<stem>[^/.]+)\.(?:md|png)$", cx))
-                    .children(self.rule_err.clone().map(|e| div().text_xs().text_color(p.danger).child(e)))
-                    .child(div().flex().child(icon_text_btn("add-rule", ic::ADD, "Add rule", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.add_rule(); cx.notify(); }))))))
-            .child(row("Files panel", "Flat list or a collapsible directory tree", seg_box(&p).child(seg_icon("fp-list", ic::VIEW_LIST, "Flat list", !s.files_tree, &p).on_click(cx.listener(|this, _, _, cx| { if this.tree { this.toggle_tree(); } cx.notify(); })))
-                .child(seg_icon("fp-tree", ic::ACCOUNT_TREE, "Directory tree", s.files_tree, &p).on_click(cx.listener(|this, _, _, cx| { if !this.tree { this.toggle_tree(); } cx.notify(); }))).into_any_element()))
-            .child(section("Diff"))
-            .child(row("Default diff view", "How diffs open; switch per file with the floating bar", seg_box(&p).child(seg_icon("dm-uni", ic::VIEW_AGENDA, "Unified", s.diff_mode == DiffMode::Unified, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.diff_mode = DiffMode::Unified; this.save_settings(); this.set_diff_mode(DiffMode::Unified); cx.notify(); })))
-                .child(seg_icon("dm-split", ic::VERTICAL_SPLIT, "Side by side", s.diff_mode == DiffMode::Split, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.diff_mode = DiffMode::Split; this.save_settings(); this.set_diff_mode(DiffMode::Split); cx.notify(); }))).into_any_element()))
-            .child(row("Markdown files", "Open .md files as a source diff or as rendered text", seg_box(&p).child(seg_icon("md-src", ic::CODE, "Source diff", s.markdown == MdMode::Source, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.markdown = MdMode::Source; this.save_settings(); cx.notify(); })))
-                .child(seg_icon("md-rnd", ic::VISIBILITY, "Rendered", s.markdown == MdMode::Rendered, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.markdown = MdMode::Rendered; this.save_settings(); cx.notify(); }))).into_any_element()))
-            .child(section("AI"))
-            .child(row("Agent", "Runs the CLI you already have installed; no accounts or keys are stored here", div().flex().flex_wrap().gap_2().max_w(px(380.0)).justify_end().children(agent_chips).into_any_element()))
-            .child(row("Model", "One-click choices, or type any model name the agent accepts", div().flex().flex_col().items_end().gap_2().max_w(px(380.0)).child(div().flex().flex_wrap().gap_2().justify_end().children(model_chips)).child(div().w(px(260.0)).child(ibox(self, Fid::Model, "Custom model, then Enter", cx))).into_any_element()))
-            .child(row("Effort / variant", if effort_ok { "How hard the model thinks (Claude: thinking budget, Codex: reasoning effort, opencode: variant)" } else { "Not supported by this agent" }, div().flex().gap_2().when(!effort_ok, |d| d.opacity(0.4)).children(effort_chips).into_any_element()))
-            .child(row("Custom command", "Optional. Program and arguments; the prompt is added as the last argument", div().w(px(300.0)).child(ibox(self, Fid::Cmd, "e.g. my-agent --read-only", cx)).into_any_element()));
-
-        let card = div().id("settings-card").flex().flex_col().w(px(720.0)).h(px(780.0)).max_h(relative(0.92)).rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_hidden()
-            .child(div().flex().items_center().px_5().py_3().border_b_1().border_color(p.border).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Settings")))
-            .child(scroll)
-            .child(div().flex().items_center().justify_end().gap_2().px_5().py_3().border_t_1().border_color(p.border).bg(p.surface)
-                .child(div().flex_1().text_xs().text_color(p.muted).child("Changes are saved as you make them."))
-                .child(icon_text_btn("set-done", ic::CHECK, "Done", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.mode = Mode::Normal; cx.notify(); }))));
-        deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.55)).occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.mode = Mode::Normal; cx.notify(); }))
-            .child(card)).with_priority(20)
     }
 
     fn finish_overlay(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -930,9 +1160,9 @@ impl View {
         let (nd, nai, unviewed, total) = self.finish_counts();
         let remote = self.m.mr.is_some();
         let gitlab = self.m.mr.as_ref().map(|m| m.kind == perusal_providers::Kind::GitLab).unwrap_or(false);
-        let v = self.verdict.clone();
+        let v = self.verdict.clone(); let focused = self.focus == Some(Fid::Summary);
         let vchip = |id: &'static str, label: &'static str, on: bool, color: gpui::Hsla| div().id(id).flex().items_center().gap_2().px_3().h(px(32.0)).rounded_md().border_1().border_color(if on { color } else { p.border }).bg(if on { color.opacity(0.14) } else { gpui::transparent_black() }).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).hover(move |x| x.bg(p.hover)).child(label);
-        let summary_box = self.wire(Fid::Summary, div().id("sum-box").flex().items_center().px_3().py(px(8.0)).rounded_md().border_1().border_color(if self.mode == Mode::Finish { p.accent } else { p.border }).bg(p.bg).min_h(px(40.0)).child(self.text_of(Fid::Summary, self.mode == Mode::Finish, "Summary (optional): what should the author know?")), cx);
+        let summary_box = self.winp(Fid::Summary, div().id("sum-box").flex().px_3().py(px(8.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).min_h(px(90.0)).child(input_text(&self.summary, focused, "Summary (optional): what should the author know?", &p, false, 4)), cx);
         let msg = self.submit_msg.clone().map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })
             .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m)));
         let body = div().flex().flex_col().gap_4().px_5().py_4()
@@ -947,16 +1177,23 @@ impl View {
             .when(!remote, |d| d.child(div().text_sm().text_color(p.muted).child("This is a local review, so there is no host to post to. Copy your drafts as Markdown or save them to a file.")))
             .children(msg);
         let footer = div().flex().items_center().justify_end().gap_2().px_5().py_3().border_t_1().border_color(p.border).bg(p.surface)
-            .child(icon_text_btn("fin-cancel", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.mode = Mode::Normal; cx.notify(); })))
+            .child(icon_text_btn("fin-cancel", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = false; this.focus = None; cx.notify(); })))
             .child(if remote {
                 if self.submit_busy { div().flex().items_center().gap_2().px_3().child(loading_dots(&p)).child(div().text_sm().text_color(p.accent).child("Posting…")).into_any_element() }
                 else { icon_text_btn("fin-submit", ic::SEND, "Post review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.start_submit(cx); cx.notify(); })).into_any_element() }
             } else { icon_text_btn("fin-export", ic::CONTENT_COPY, "Copy and save Markdown", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.export_local(cx); cx.notify(); })).into_any_element() });
         let card = div().id("finish-card").flex().flex_col().w(px(560.0)).rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_hidden()
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(div().flex().items_center().gap_2().px_5().py_3().border_b_1().border_color(p.border).child(icon(ic::RATE_REVIEW, 20.0, p.accent)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Finish review")))
             .child(body).child(footer);
         deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.55)).occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.mode = Mode::Normal; cx.notify(); }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.finish_open = false; this.focus = None; cx.notify(); }))
             .child(card)).with_priority(20)
     }
 }
+
+type TextField2 = perusal_app::textfield::TextField;
+
+/// Small helper: attach a tooltip to a button after the fact.
+trait TooltipText { fn tooltip_text(self, t: String, p: &Pal) -> Self; }
+impl TooltipText for gpui::Stateful<gpui::Div> { fn tooltip_text(self, t: String, p: &Pal) -> Self { tip(self, t, p) } }

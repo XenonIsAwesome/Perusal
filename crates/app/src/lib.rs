@@ -4,6 +4,7 @@ pub mod ci;
 pub mod deeplink;
 pub mod filterbar;
 pub mod graph;
+pub mod hosts;
 pub mod events;
 pub mod markdown;
 pub mod notify;
