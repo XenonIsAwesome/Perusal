@@ -1,5 +1,6 @@
 //! Agent adapters, ACP client, safety rules and full-review parsing. UI-free.
 pub mod acp;
+pub mod run;
 pub mod safety;
 
 use serde::Deserialize;
@@ -9,20 +10,24 @@ pub const REVIEW_SKILL: &str = include_str!("../../../skills/review.md");
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AgentKind { ClaudeCode, Gemini, Codex, OpenCode }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Launch { pub program: String, pub args: Vec<String>, pub acp: bool }
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Launch { pub program: String, pub args: Vec<String>, pub acp: bool,
+    /// Extra environment for this agent only (for example a thinking budget).
+    pub env: Vec<(String, String)>,
+    /// Output is Claude Code `stream-json`, which carries tool activity.
+    pub stream_json: bool }
 
 impl AgentKind {
     /// ACP launch where the agent speaks it; headless CLI otherwise.
     pub fn launch(self, prompt: &str, prefer_acp: bool) -> Launch {
         let p = |s: &str| s.to_string();
         match (self, prefer_acp) {
-            (AgentKind::Gemini, true) => Launch { program: p("gemini"), args: vec![p("--experimental-acp")], acp: true },
-            (AgentKind::OpenCode, true) => Launch { program: p("opencode"), args: vec![p("acp")], acp: true },
-            (AgentKind::ClaudeCode, _) => Launch { program: p("claude"), args: vec![p("-p"), p(prompt), p("--permission-mode"), p("plan")], acp: false },
-            (AgentKind::Gemini, _) => Launch { program: p("gemini"), args: vec![p("-p"), p(prompt)], acp: false },
-            (AgentKind::Codex, _) => Launch { program: p("codex"), args: vec![p("exec"), p("--sandbox"), p("read-only"), p(prompt)], acp: false },
-            (AgentKind::OpenCode, _) => Launch { program: p("opencode"), args: vec![p("run"), p(prompt)], acp: false },
+            (AgentKind::Gemini, true) => Launch { program: p("gemini"), args: vec![p("--experimental-acp")], acp: true, ..Default::default() },
+            (AgentKind::OpenCode, true) => Launch { program: p("opencode"), args: vec![p("acp")], acp: true, ..Default::default() },
+            (AgentKind::ClaudeCode, _) => Launch { program: p("claude"), args: vec![p("-p"), p(prompt), p("--permission-mode"), p("plan")], acp: false, ..Default::default() },
+            (AgentKind::Gemini, _) => Launch { program: p("gemini"), args: vec![p("-p"), p(prompt)], acp: false, ..Default::default() },
+            (AgentKind::Codex, _) => Launch { program: p("codex"), args: vec![p("exec"), p("--sandbox"), p("read-only"), p(prompt)], acp: false, ..Default::default() },
+            (AgentKind::OpenCode, _) => Launch { program: p("opencode"), args: vec![p("run"), p(prompt)], acp: false, ..Default::default() },
         }
     }
 }
@@ -31,7 +36,7 @@ impl AgentKind {
 pub fn custom_launch(cmdline: &str, prompt: &str) -> Option<Launch> {
     let mut parts = cmdline.split_whitespace().map(String::from);
     let program = parts.next()?; let mut args: Vec<String> = parts.collect(); args.push(prompt.to_string());
-    Some(Launch { program, args, acp: false })
+    Some(Launch { program, args, acp: false, ..Default::default() })
 }
 
 /// Launch for a settings agent id ("claude", "gemini", "codex", "opencode"); a custom command overrides it.
@@ -40,6 +45,50 @@ pub fn launch_for(agent: &str, custom: &str, prompt: &str) -> Option<Launch> {
     let kind = match agent { "claude" => AgentKind::ClaudeCode, "gemini" => AgentKind::Gemini, "codex" => AgentKind::Codex, "opencode" => AgentKind::OpenCode, _ => return None };
     Some(kind.launch(prompt, false))
 }
+
+/// Model and effort selection passed to the agent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Options { pub model: String, pub effort: String }
+
+/// Like `launch_for`, adding the model and effort/variant where the agent supports them:
+/// claude `--model` and a thinking budget (MAX_THINKING_TOKENS), codex `-m` and reasoning effort,
+/// gemini `-m` (no effort control), opencode `-m` and `--variant`. Claude is run in stream-json mode for live activity.
+pub fn launch_with(agent: &str, custom: &str, prompt: &str, o: &Options) -> Option<Launch> {
+    if !custom.trim().is_empty() { return custom_launch(custom, prompt); }
+    let (m, e) = (o.model.trim(), o.effort.trim());
+    let mut args: Vec<String> = vec![]; let mut env = vec![]; let mut stream = false;
+    let program = match agent {
+        "claude" => {
+            args.extend(["-p".into(), prompt.into(), "--output-format".into(), "stream-json".into(), "--verbose".into(), "--permission-mode".into(), "plan".into()]);
+            if !m.is_empty() { args.extend(["--model".into(), m.into()]); }
+            if let Some(t) = match e { "low" => Some("4000"), "medium" => Some("12000"), "high" => Some("31999"), _ => None } { env.push(("MAX_THINKING_TOKENS".to_string(), t.to_string())); }
+            stream = true; "claude"
+        }
+        "gemini" => { if !m.is_empty() { args.extend(["-m".into(), m.into()]); } args.extend(["-p".into(), prompt.into()]); "gemini" }
+        "codex" => {
+            args.extend(["exec".into(), "--sandbox".into(), "read-only".into()]);
+            if !m.is_empty() { args.extend(["-m".into(), m.into()]); }
+            if !e.is_empty() { args.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]); }
+            args.push(prompt.into()); "codex"
+        }
+        "opencode" => {
+            args.push("run".into());
+            if !m.is_empty() { args.extend(["-m".into(), m.into()]); }
+            if !e.is_empty() { args.extend(["--variant".into(), e.into()]); }
+            args.push(prompt.into()); "opencode"
+        }
+        _ => return None,
+    };
+    Some(Launch { program: program.into(), args, acp: false, env, stream_json: stream })
+}
+
+/// Model names worth offering as one-click choices for an agent (a custom model can always be typed).
+pub fn model_suggestions(agent: &str) -> &'static [&'static str] {
+    match agent { "claude" => &["opus", "sonnet", "haiku"], "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"], "codex" => &["gpt-5", "gpt-5-codex"], _ => &[] }
+}
+
+/// Whether the agent has an effort / variant control.
+pub fn supports_effort(agent: &str) -> bool { matches!(agent, "claude" | "codex" | "opencode") }
 
 /// True if `program` resolves on PATH.
 pub fn on_path(program: &str) -> bool {
@@ -107,12 +156,12 @@ pub fn run_headless(l: &Launch, cwd: &std::path::Path, env: &std::collections::B
 #[cfg(test)]
 mod tests {
     #[test] fn headless_timeout_kills() {
-        let l = super::Launch { program: "sleep".into(), args: vec!["30".into()], acp: false };
+        let l = super::Launch { program: "sleep".into(), args: vec!["30".into()], acp: false, ..Default::default() };
         let env = [("PATH".to_string(), std::env::var("PATH").unwrap())].into();
         let e = super::run_headless(&l, &std::env::temp_dir(), &env, std::time::Duration::from_millis(300)).unwrap_err(); assert!(e.to_string().contains("did not finish"));
     }
     #[test] fn headless_fallback_runs_with_minimal_env() {
-        let l = super::Launch { program: "sh".into(), args: vec!["-c".into(), "echo \"[]$SECRET\"".into()], acp: false };
+        let l = super::Launch { program: "sh".into(), args: vec!["-c".into(), "echo \"[]$SECRET\"".into()], acp: false, ..Default::default() };
         let env = [("PATH".to_string(), std::env::var("PATH").unwrap())].into();
         assert_eq!(super::run_headless(&l, &std::env::temp_dir(), &env, std::time::Duration::from_secs(10)).unwrap().trim(), "[]");
     }
@@ -137,6 +186,16 @@ mod tests {
         assert_eq!(launch_for("gemini", "", "q").unwrap().program, "gemini"); assert!(launch_for("nope", "", "q").is_none());
         let c = launch_for("claude", "my-agent --flag", "q").unwrap(); assert_eq!((c.program.as_str(), c.args.clone()), ("my-agent", vec!["--flag".to_string(), "q".to_string()]));
         assert!(on_path("sh") && !on_path("definitely-not-installed-xyz"));
+    }
+    #[test] fn model_and_effort_flags() {
+        let o = Options { model: "sonnet".into(), effort: "high".into() };
+        let c = launch_with("claude", "", "q", &o).unwrap(); assert!(c.stream_json && c.args.windows(2).any(|w| w == ["--model", "sonnet"]) && c.env == vec![("MAX_THINKING_TOKENS".to_string(), "31999".to_string())]);
+        let x = launch_with("codex", "", "q", &o).unwrap(); assert!(x.args.contains(&"model_reasoning_effort=\"high\"".to_string()) && x.args.last().unwrap() == "q");
+        let g = launch_with("gemini", "", "q", &o).unwrap(); assert!(g.args.windows(2).any(|w| w == ["-m", "sonnet"]) && g.env.is_empty());
+        let op = launch_with("opencode", "", "q", &o).unwrap(); assert!(op.args.windows(2).any(|w| w == ["--variant", "high"]));
+        let d = launch_with("claude", "", "q", &Options::default()).unwrap(); assert!(!d.args.contains(&"--model".to_string()) && d.env.is_empty());
+        assert!(launch_with("nope", "", "q", &o).is_none()); assert_eq!(launch_with("x", "my-agent -v", "q", &o).unwrap().program, "my-agent");
+        assert!(supports_effort("codex") && !supports_effort("gemini") && !model_suggestions("claude").is_empty());
     }
     #[test] fn skill_ships() { assert!(REVIEW_SKILL.contains("high-signal") && REVIEW_SKILL.contains("untrusted")); }
 }

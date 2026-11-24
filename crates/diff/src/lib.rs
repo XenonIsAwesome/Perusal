@@ -21,6 +21,7 @@ pub struct FileStat {
     pub hunks: u32,
     pub size: u64,
     pub binary: bool,
+    pub symlink: bool,
     pub generated: bool,
     pub viewed: bool,
     pub comments: u32,
@@ -30,7 +31,7 @@ pub struct FileStat {
 
 impl FileStat {
     pub fn new(path: &str, status: Status, additions: u32, deletions: u32) -> Self {
-        FileStat { path: path.into(), status, additions, deletions, hunks: 1, size: 0, binary: false,
+        FileStat { path: path.into(), status, additions, deletions, hunks: 1, size: 0, binary: false, symlink: false,
             generated: is_noisy_path(path), viewed: false, comments: 0, unresolved: 0, ai_flagged: false }
     }
     pub fn name(&self) -> &str { self.path.rsplit('/').next().unwrap_or(&self.path) }
@@ -53,27 +54,39 @@ pub fn is_noisy_path(path: &str) -> bool {
         || path.starts_with("vendor/") || path.contains("/vendor/") || path.starts_with("dist/") || path.contains("/dist/")
 }
 
-/// Parses `git diff --numstat -M` output (with `--name-status` merged separately is overkill: status is
-/// derived from `git diff --name-status -M`).
-pub fn parse_numstat(numstat: &str, name_status: &str) -> Vec<FileStat> {
+/// Parses `git diff --raw -z` (modes, status, paths) and `git diff --numstat -z` (counts) into the stats index.
+/// Handles renames (`old\0new`) and symlinks (mode 120000 on either side).
+pub fn parse_diff_z(raw: &str, numstat: &str) -> Vec<FileStat> {
     use std::collections::HashMap;
-    let mut st: HashMap<String, Status> = HashMap::new();
-    for l in name_status.lines() {
-        let p: Vec<&str> = l.split('\t').collect();
-        if p.len() < 2 { continue; }
-        let s = match p[0].chars().next() { Some('A') => Status::Added, Some('D') => Status::Deleted, Some('R') => Status::Renamed, _ => Status::Modified };
-        st.insert(p[p.len() - 1].to_string(), s);
+    struct Meta { status: Status, symlink: bool }
+    let mut meta: HashMap<String, Meta> = HashMap::new();
+    let mut it = raw.split('\0').filter(|t| !t.is_empty());
+    while let Some(m) = it.next() {
+        let Some(m) = m.strip_prefix(':') else { continue };
+        let f: Vec<&str> = m.split(' ').collect();
+        if f.len() < 5 { continue; }
+        let st = f[4].chars().next().unwrap_or('M');
+        let path = if st == 'R' || st == 'C' { it.next(); it.next() } else { it.next() };
+        let Some(path) = path else { break };
+        let status = match st { 'A' => Status::Added, 'D' => Status::Deleted, 'R' => Status::Renamed, _ => Status::Modified };
+        meta.insert(path.to_string(), Meta { status, symlink: f[0] == "120000" || f[1] == "120000" });
     }
-    numstat.lines().filter_map(|l| {
-        let p: Vec<&str> = l.splitn(3, '\t').collect();
-        if p.len() < 3 { return None; }
-        let path = p[2].to_string();
-        let binary = p[0] == "-";
-        let status = st.get(&path).copied().unwrap_or(Status::Modified);
-        let mut f = FileStat::new(&path, status, p[0].parse().unwrap_or(0), p[1].parse().unwrap_or(0));
-        f.binary = binary;
-        Some(f)
-    }).collect()
+    let mut out = Vec::new();
+    let mut it = numstat.split('\0').filter(|t| !t.is_empty() || false);
+    // numstat -z: "add\tdel\tpath\0" or, for renames, "add\tdel\t\0old\0new\0" (the empty path is significant)
+    let toks: Vec<&str> = numstat.split('\0').collect();
+    let mut i = 0; let _ = it.next();
+    while i < toks.len() {
+        let t = toks[i]; i += 1;
+        let p: Vec<&str> = t.splitn(3, '\t').collect();
+        if p.len() < 3 { continue; }
+        let path = if p[2].is_empty() { i += 1; let n = toks.get(i).copied().unwrap_or(""); i += 1; n.to_string() } else { p[2].to_string() };
+        let m = meta.get(&path);
+        let mut f = FileStat::new(&path, m.map(|m| m.status).unwrap_or(Status::Modified), p[0].parse().unwrap_or(0), p[1].parse().unwrap_or(0));
+        f.binary = p[0] == "-"; f.symlink = m.map(|m| m.symlink).unwrap_or(false);
+        out.push(f);
+    }
+    out
 }
 
 /// Computes the stats index for `base..head` in the repo at `repo`, via the git CLI.
@@ -83,53 +96,29 @@ pub fn index_range(repo: &Path, base: &str, head: &str) -> std::io::Result<Vec<F
         if !o.status.success() { return Err(std::io::Error::other(String::from_utf8_lossy(&o.stderr).to_string())); }
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
     };
-    Ok(parse_numstat(&run(&["diff", "--numstat", "-M"])?, &run(&["diff", "--name-status", "-M"])?))
+    Ok(parse_diff_z(&run(&["diff", "--raw", "--no-abbrev", "-z", "-M"])?, &run(&["diff", "--numstat", "-z", "-M"])?))
 }
 
-/// Built-in name-based grouping: files sharing a stem across folders are batched together.
-pub fn group_key(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let mut stem = name.rsplit_once('.').map(|x| x.0).unwrap_or(name).to_string();
-    for suf in [".test", ".spec", "_test"] { if let Some(s) = stem.strip_suffix(suf) { stem = s.to_string(); } }
-    if let Some(s) = stem.strip_prefix("test_") { stem = s.to_string(); }
-    stem
-}
-
-/// Groups file indexes by stem; only groups that really relate several files are returned multi-member.
-pub fn group_files(files: &[FileStat]) -> Vec<Vec<usize>> {
-    use std::collections::BTreeMap;
-    let mut m: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut order = Vec::new();
-    for (i, f) in files.iter().enumerate() {
-        let k = group_key(&f.path);
-        if !m.contains_key(&k) { order.push(k.clone()); }
-        m.entry(k).or_default().push(i);
-    }
-    order.into_iter().map(|k| m.remove(&k).unwrap()).collect()
-}
+pub mod rules;
+pub use rules::{group_files, GroupRule};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn numstat_and_status() {
-        let f = parse_numstat("3\t1\ta/b.rs\n-\t-\timg.png\n", "M\ta/b.rs\nA\timg.png\n");
-        assert_eq!(f.len(), 2);
-        assert_eq!(f[0].additions, 3); assert_eq!(f[0].status, Status::Modified);
-        assert!(f[1].binary && f[1].noisy()); assert_eq!(f[1].status, Status::Added);
+    fn diff_z_parses_modes_renames_and_symlinks() {
+        let raw = ":100644 100644 aaa bbb M\0a/b.rs\0:000000 100644 000 ccc A\0img.png\0:100644 100644 ddd eee R090\0old/n.rs\0new/n.rs\0:120000 120000 f1 f2 M\0link\0";
+        let num = "3\t1\ta/b.rs\0-\t-\timg.png\0" .to_string() + "2\t2\t\0old/n.rs\0new/n.rs\0" + "1\t1\tlink\0";
+        let f = parse_diff_z(raw, &num);
+        assert_eq!(f.len(), 4);
+        assert_eq!((f[0].path.as_str(), f[0].additions, f[0].status), ("a/b.rs", 3, Status::Modified));
+        assert!(f[1].binary && f[1].noisy() && f[1].status == Status::Added);
+        assert_eq!((f[2].path.as_str(), f[2].status), ("new/n.rs", Status::Renamed));
+        assert!(f[3].symlink && !f[0].symlink);
     }
     #[test]
     fn noisy_paths() {
         assert!(is_noisy_path("web/package-lock.json")); assert!(is_noisy_path("a/b.min.js")); assert!(!is_noisy_path("src/a.rs"));
-    }
-    #[test]
-    fn grouping() {
-        let fs: Vec<_> = ["a/foo.h", "b/foo.cpp", "x/foo.test.ts", "y/foo.ts", "t/test_bar.py", "bar.py", "z.rs"]
-            .iter().map(|p| FileStat::new(p, Status::Modified, 1, 1)).collect();
-        let g = group_files(&fs);
-        assert_eq!(g.len(), 3);
-        assert_eq!(g[0], vec![0, 1, 2, 3]);
-        assert_eq!(g[1], vec![4, 5]);
     }
     #[test]
     fn index_real_repo() {
@@ -142,7 +131,10 @@ mod tests {
         run(&["checkout","-qb","f"]);
         std::fs::write(d.join("a.txt"), "1\n3\n4\n").unwrap(); std::fs::write(d.join("b.txt"), "x\n").unwrap();
         run(&["add","-A"]); run(&["commit","-qm","b"]);
+        std::os::unix::fs::symlink("a.txt", d.join("ln")).unwrap(); run(&["add","-A"]); run(&["commit","-qm","ln"]);
         let mut f = index_range(&d, "main", "f").unwrap(); f.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(f.iter().find(|x| x.path == "ln").unwrap().symlink); assert!(!f.iter().find(|x| x.path == "a.txt").unwrap().symlink);
+        let f: Vec<FileStat> = f.into_iter().filter(|x| x.path != "ln").collect();
         assert_eq!((f[0].additions, f[0].deletions), (2, 1)); assert_eq!(f[1].status, Status::Added);
         let _ = std::fs::remove_dir_all(&d);
     }

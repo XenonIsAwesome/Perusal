@@ -4222,6 +4222,8 @@ dependencies = [
 name = "perusal-diff"
 version = "0.1.0"
 dependencies = [
+ "regex",
+ "serde",
  "similar",
  "tree-sitter",
  "tree-sitter-python",

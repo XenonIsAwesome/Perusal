@@ -27,7 +27,8 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::Start(Tag::CodeBlock(k)) => { code = Some((match k { CodeBlockKind::Fenced(l) => l.to_string(), _ => String::new() }, String::new())); }
             Event::End(TagEnd::CodeBlock) => { if let Some((lang, text)) = code.take() { stack.last_mut().unwrap().push(Block::Code { lang, text: text.trim_end_matches('\n').to_string() }); } }
             Event::Text(t) if code.is_some() => { code.as_mut().unwrap().1.push_str(&t); }
-            Event::Start(Tag::Paragraph) | Event::Start(Tag::Heading { .. }) => spans.clear(),
+            Event::Start(Tag::Paragraph) | Event::Start(Tag::Heading { .. }) | Event::Start(Tag::HtmlBlock) => spans.clear(),
+            Event::End(TagEnd::HtmlBlock) => { let s = std::mem::take(&mut spans); if !s.is_empty() { stack.last_mut().unwrap().push(Block::Para(s)); } }
             Event::End(TagEnd::Paragraph) => { let s = std::mem::take(&mut spans); stack.last_mut().unwrap().push(Block::Para(s)); }
             Event::End(TagEnd::Heading(l)) => { let s = std::mem::take(&mut spans); let n = match l { HeadingLevel::H1 => 1, HeadingLevel::H2 => 2, HeadingLevel::H3 => 3, HeadingLevel::H4 => 4, HeadingLevel::H5 => 5, HeadingLevel::H6 => 6 }; stack.last_mut().unwrap().push(Block::Heading(n, s)); }
             Event::Start(Tag::BlockQuote(_)) => stack.push(vec![]),
@@ -66,6 +67,28 @@ pub fn parse(src: &str) -> Vec<Block> {
     stack.swap_remove(0)
 }
 
+/// A top-level block with the 1-based source lines it covers (for commenting on rendered markdown).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Located { pub block: Block, pub first_line: u32, pub last_line: u32 }
+
+fn is_block_tag(t: &Tag) -> bool { matches!(t, Tag::Paragraph | Tag::Heading { .. } | Tag::BlockQuote(_) | Tag::CodeBlock(_) | Tag::List(_) | Tag::Table(_) | Tag::HtmlBlock) }
+fn is_block_end(t: &TagEnd) -> bool { matches!(t, TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::BlockQuote(_) | TagEnd::CodeBlock | TagEnd::List(_) | TagEnd::Table | TagEnd::HtmlBlock) }
+
+pub fn parse_located(src: &str) -> Vec<Located> {
+    let blocks = parse(src);
+    let line_of = |off: usize| src[..off.min(src.len())].bytes().filter(|b| *b == b'\n').count() as u32 + 1;
+    let mut ranges: Vec<(u32, u32)> = vec![]; let mut depth = 0usize;
+    for (ev, r) in Parser::new_ext(src, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS).into_offset_iter() {
+        match &ev {
+            Event::Start(t) if is_block_tag(t) => { if depth == 0 { let end = src[..r.end.min(src.len())].trim_end().len(); ranges.push((line_of(r.start), line_of(end.saturating_sub(1)))); } depth += 1; }
+            Event::End(t) if is_block_end(t) => depth = depth.saturating_sub(1),
+            Event::Rule if depth == 0 => ranges.push((line_of(r.start), line_of(r.start))),
+            _ => {}
+        }
+    }
+    blocks.into_iter().enumerate().map(|(i, block)| { let (a, b) = ranges.get(i).copied().unwrap_or((0, 0)); Located { block, first_line: a, last_line: b.max(a) } }).collect()
+}
+
 pub fn is_markdown(path: &str) -> bool { let l = path.to_lowercase(); l.ends_with(".md") || l.ends_with(".markdown") || l.ends_with(".mdx") }
 
 #[cfg(test)]
@@ -87,6 +110,13 @@ mod tests {
         let Block::Table { head, rows } = &b[0] else { panic!() }; assert_eq!(head.len(), 2); assert_eq!(rows.len(), 2); assert_eq!(plain(&rows[1][0]), "3");
         let Block::List { items, .. } = &b[1] else { panic!() }; assert!(matches!(&items[0][0], Block::Para(s) if plain(s).starts_with('☑')));
         assert!(items[1].iter().any(|x| matches!(x, Block::List { .. })));
+    }
+    #[test] fn located_blocks_know_their_source_lines() {
+        let src = "# Title\n\nfirst para\nsecond line\n\n- a\n- b\n\n```rust\nlet x = 1;\n```\n\n---\n\n> quote\n";
+        let l = parse_located(src);
+        let got: Vec<(u32, u32)> = l.iter().map(|x| (x.first_line, x.last_line)).collect();
+        assert_eq!(got, vec![(1, 1), (3, 4), (6, 7), (9, 11), (13, 13), (15, 15)]);
+        assert!(matches!(l[1].block, Block::Para(_)) && matches!(l[5].block, Block::Quote(_)));
     }
     #[test] fn robust_on_garbage() { for s in ["", "***", "```", "| x", "> > >", "[a](", "# \n#"] { let _ = parse(s); } assert!(is_markdown("a/README.MD") && !is_markdown("a.rs")); }
 }

@@ -1,6 +1,6 @@
 //! Review view model: file list, batches, viewed progress, quit prompt.
 use perusal_core::store::Store;
-use perusal_diff::{group_files, FileStat};
+use perusal_diff::{group_files, FileStat, GroupRule};
 use std::collections::HashSet;
 
 pub struct ReviewVm {
@@ -9,6 +9,8 @@ pub struct ReviewVm {
     pub filter: String,
     pub sort: String,
     pub grouping: bool,
+    /// Rules used when `grouping` is on.
+    pub rules: Vec<GroupRule>,
     /// Order files as the directory tree shows them (folders first), so n/p follow the Files panel.
     pub dir_order: bool,
     pub exclude_noisy_from_progress: bool,
@@ -31,7 +33,7 @@ impl ReviewVm {
     pub fn new(store: &Store, review: i64, mut files: Vec<FileStat>) -> Self {
         let viewed = store.viewed(review).unwrap_or_default();
         for f in &mut files { f.viewed = viewed.contains(&f.path); }
-        let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, dir_order: false, exclude_noisy_from_progress: false,
+        let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, rules: perusal_diff::rules::builtin_rules(), dir_order: false, exclude_noisy_from_progress: false,
             commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: true, history: vec![], manual: vec![] };
         let _ = vm.refresh(); vm
     }
@@ -43,7 +45,7 @@ impl ReviewVm {
         if self.dir_order { idx.sort_by_cached_key(|&i| crate::tree::tree_key(&self.files[i].path)); }
         self.batches = if self.grouping {
             let sel: Vec<FileStat> = idx.iter().map(|&i| self.files[i].clone()).collect();
-            group_files(&sel).into_iter().map(|g| g.into_iter().map(|j| idx[j]).collect()).collect()
+            group_files(&sel, &self.rules).into_iter().map(|g| g.into_iter().map(|j| idx[j]).collect()).collect()
         } else { idx.iter().map(|&i| vec![i]).collect() };
         // manual groups: members (that are visible) form one batch at the position of the first member
         for g in &self.manual {
@@ -59,6 +61,14 @@ impl ReviewVm {
     pub fn set_filter(&mut self, f: &str) -> Result<(), String> {
         let old = std::mem::replace(&mut self.filter, f.into());
         self.refresh().inspect_err(|_| { self.filter = old; })
+    }
+    /// Refreshes per-file comment counts and the AI flag from saved drafts, so filters like `ai` and `comments > 0` work.
+    pub fn sync_review_state(&mut self, store: &Store) {
+        let drafts = store.drafts(self.review).unwrap_or_default();
+        for f in &mut self.files {
+            let mine: Vec<_> = drafts.iter().filter(|d| d.file.as_deref() == Some(f.path.as_str())).collect();
+            f.comments = mine.len() as u32; f.ai_flagged = mine.iter().any(|d| d.ai);
+        }
     }
     /// Makes `members` one batch (needs at least two). Files already in another manual group leave it.
     pub fn group_files_manually(&mut self, members: Vec<usize>) {
@@ -136,6 +146,13 @@ mod tests {
         vm.ungroup(2); assert_eq!(vm.batch_count(), 5); assert!(!vm.is_manually_grouped(4));
         vm.group_files_manually(vec![0]); assert_eq!(vm.batch_count(), 5); // a single file is not a group
         vm.grouping = true; vm.refresh().unwrap(); vm.group_files_manually(vec![0, 3]); assert!(vm.batches_contain_together(0, 3));
+    }
+    #[test] fn ai_flag_and_comment_counts_drive_filters() {
+        let (s, mut vm) = setup();
+        s.add_draft(vm.review, Some("c/bar.rs"), Some((1, 1)), "x", true).unwrap(); s.add_draft(vm.review, Some("a/foo.h"), None, "y", false).unwrap();
+        vm.sync_review_state(&s);
+        vm.set_filter("ai").unwrap(); assert_eq!(vm.visible.iter().map(|&i| vm.files[i].path.as_str()).collect::<Vec<_>>(), vec!["c/bar.rs"]);
+        vm.set_filter("comments > 0").unwrap(); assert_eq!(vm.visible.len(), 2);
     }
     #[test] fn dir_order_follows_tree() {
         let (_s, mut vm) = setup(); vm.dir_order = true; vm.refresh().unwrap();
