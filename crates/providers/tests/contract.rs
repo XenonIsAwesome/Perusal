@@ -102,3 +102,32 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     g.edit_comment(&glref(), "d1", "5", "y").await.unwrap(); g.delete_comment(&glref(), "d1", "5").await.unwrap();
     assert_eq!(g.find_for_branch("g/p", "feat").await.unwrap(), None);
 }
+
+#[tokio::test] async fn empty_token_sends_no_authorization_header() {
+    use wiremock::matchers::any;
+    for gitlab in [false, true] {
+        let s = MockServer::start().await;
+        Mock::given(any()).respond_with(ResponseTemplate::new(200).set_body_json(json!({"title":"T","state":"open","user":{"login":"u"},"author":{"username":"u"},"head":{"sha":"abc"},"sha":"abc","base":{"ref":"main"},"target_branch":"main","html_url":"x","web_url":"x"}))).mount(&s).await;
+        if gitlab { let g = GitLab { http: reqwest::Client::new(), api: s.uri(), token: String::new() }; g.mr_info(&glref()).await.unwrap(); }
+        else { let g = GitHub { http: reqwest::Client::new(), api: s.uri(), token: String::new() }; g.mr_info(&ghref()).await.unwrap(); }
+        let reqs = s.received_requests().await.unwrap();
+        assert!(reqs.iter().all(|r| !r.headers.contains_key("authorization") && !r.headers.contains_key("private-token")), "a public request must be anonymous");
+    }
+}
+
+#[tokio::test] async fn my_reviews_github_and_gitlab() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/search/issues")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[
+        {"html_url":"https://github.com/o/r/pull/7","title":"A","number":7,"user":{"login":"bob"},"state":"open","pull_request":{"merged_at":null},"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-01-01T00:00:00Z"},
+        {"html_url":"https://github.com/o/r/pull/6","title":"B","number":6,"user":{"login":"al"},"state":"closed","pull_request":{"merged_at":"2026-01-02"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"x"}]}))).mount(&s).await;
+    let g = GitHub { http: reqwest::Client::new(), api: s.uri(), token: "t".into() };
+    let l = g.my_reviews("github.com", Role::ReviewRequested, StateFilter::All).await.unwrap();
+    assert_eq!((l[0].project.as_str(), l[0].state.as_str(), l[0].number), ("o/r", "open", 7)); assert_eq!(l[1].state, "merged");
+    assert!(matches!(GitHub { http: reqwest::Client::new(), api: s.uri(), token: String::new() }.my_reviews("h", Role::Authored, StateFilter::Open).await, Err(Error::Unauthorized)));
+    let s2 = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"username":"me","login":"me"}))).mount(&s2).await;
+    Mock::given(method("GET")).and(path("/merge_requests")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"web_url":"https://gl.corp/grp/sub/proj/-/merge_requests/3","title":"C","iid":3,"author":{"username":"zed"},"state":"opened","updated_at":"u"}]))).mount(&s2).await;
+    let l = GitLab { http: reqwest::Client::new(), api: s2.uri(), token: "t".into() }.my_reviews("gl.corp", Role::ReviewRequested, StateFilter::Open).await.unwrap();
+    assert_eq!((l[0].project.as_str(), l[0].state.as_str(), l[0].number), ("grp/sub/proj", "open", 3));
+    assert_eq!(ci_page(&Kind::GitHub, "https://github.com/o/r/pull/7"), "https://github.com/o/r/pull/7/checks");
+}

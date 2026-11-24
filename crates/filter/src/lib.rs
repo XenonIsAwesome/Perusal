@@ -329,9 +329,29 @@ pub fn suggest(before: &str) -> (Vec<Suggestion>, usize) {
     (out, wl)
 }
 
+/// Suggestions for the sort field: expressions as in the filter, then `asc`/`desc` after a finished term.
+pub fn suggest_sort(before: &str) -> (Vec<Suggestion>, usize) {
+    let word: String = before.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+    let wl = word.chars().count();
+    let dir = |l: &str, d: &'static str| Suggestion { label: l.into(), detail: d, insert: l.into(), kind: "order" };
+    let trimmed = before.trim_end();
+    let after_term = before.ends_with(' ') && !trimmed.is_empty() && !trimmed.ends_with([',', '+', '-', '*', '/', '%', '(', '&', '|', '<', '>', '=', '!', '~']);
+    if after_term { return (vec![dir("desc", "largest first"), dir("asc", "smallest first")], 0); }
+    let (mut s, n) = suggest(before);
+    for (l, d) in [("asc", "smallest first"), ("desc", "largest first")] { if !word.is_empty() && l.starts_with(&word.to_lowercase()) && l != word { s.insert(0, dir(l, d)); } }
+    if before.trim().is_empty() { s = vec![Suggestion { label: "additions + deletions".into(), detail: "total changed lines", insert: "additions + deletions desc".into(), kind: "example" }, Suggestion { label: "name".into(), detail: "alphabetical", insert: "name asc".into(), kind: "example" }, Suggestion { label: "path".into(), detail: "by path", insert: "path asc".into(), kind: "example" }]; return (s, 0); }
+    let n = n.max(if s.first().map(|x| x.kind == "order").unwrap_or(false) { wl } else { 0 });
+    (s, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn sort_suggestions() {
+        let (s, _) = suggest_sort("additions + deletions "); assert_eq!(s[0].insert, "desc");
+        let (s, n) = suggest_sort("name a"); assert!(s.iter().any(|x| x.insert == "asc") && n == 1);
+        assert!(suggest_sort("").0.iter().any(|x| x.insert.contains("desc"))); assert!(suggest_sort("additions, ").0.is_empty() || suggest_sort("additions, ").0[0].kind != "order");
+    }
     #[test] fn suggestions() {
         let (s, n) = suggest("name ~ /x/ && add"); assert_eq!(n, 3); assert!(s.iter().any(|x| x.insert == "additions" && x.kind == "field"));
         let (s, _) = suggest("av"); assert_eq!(s[0].insert, "avg(");

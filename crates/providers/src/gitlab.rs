@@ -6,7 +6,7 @@ pub struct GitLab { pub http: reqwest::Client, pub api: String, pub token: Strin
 
 impl GitLab {
     pub fn api_base(host: &str) -> String { format!("https://{host}/api/v4") }
-    fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder { self.http.request(m, format!("{}{path}", self.api)).header("PRIVATE-TOKEN", &self.token) }
+    fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder { let r = self.http.request(m, format!("{}{path}", self.api)); if self.token.is_empty() { r } else { r.header("PRIVATE-TOKEN", &self.token) } }
     fn mr(r: &MrRef) -> String { format!("/projects/{}/merge_requests/{}", utf8_percent_encode(&r.project, NON_ALPHANUMERIC), r.number) }
 }
 
@@ -84,5 +84,24 @@ impl Provider for GitLab {
     async fn find_for_branch(&self, project: &str, branch: &str) -> Result<Option<u64>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/projects/{}/merge_requests?state=opened&source_branch={}", utf8_percent_encode(project, NON_ALPHANUMERIC), utf8_percent_encode(branch, NON_ALPHANUMERIC))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v.first().and_then(|p| p["iid"].as_u64()))
+    }
+    async fn current_user(&self) -> Result<String> {
+        let v: Value = check(self.req(reqwest::Method::GET, "/user").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v["username"].as_str().unwrap_or("").to_string())
+    }
+    async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>> {
+        if self.token.is_empty() { return Err(Error::Unauthorized); }
+        let me = self.current_user().await?;
+        let who = match role { Role::ReviewRequested => format!("reviewer_username={me}"), Role::Authored => "scope=created_by_me".into(), Role::Assigned => "scope=assigned_to_me".into() };
+        let scope = if matches!(role, Role::ReviewRequested) { "&scope=all" } else { "" };
+        let st = match state { StateFilter::Open => "opened", StateFilter::Merged => "merged", StateFilter::Closed => "closed", StateFilter::All => "all" };
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/merge_requests?{who}{scope}&state={st}&order_by=updated_at&sort=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.iter().map(|m| {
+            let web = m["web_url"].as_str().unwrap_or("");
+            let project = web.split("https://").nth(1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
+            let state = match m["state"].as_str() { Some("opened") => "open", Some("merged") => "merged", _ => "closed" };
+            RemoteMr { url: web.into(), title: m["title"].as_str().unwrap_or("").into(), project, number: m["iid"].as_u64().unwrap_or(0), author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
+                state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab }
+        }).collect())
     }
 }

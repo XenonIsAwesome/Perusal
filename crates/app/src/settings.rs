@@ -9,6 +9,11 @@ pub enum DiffMode { #[default] Unified, Split }
 #[serde(rename_all = "lowercase")]
 pub enum MdMode { #[default] Source, Rendered }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostCfg { pub host: String, /// "github" or "gitlab"
+    pub kind: String }
+pub fn default_hosts() -> Vec<HostCfg> { vec![HostCfg { host: "github.com".into(), kind: "github".into() }, HostCfg { host: "gitlab.com".into(), kind: "gitlab".into() }] }
+
 pub const AGENTS: [(&str, &str); 4] = [("claude", "Claude Code"), ("gemini", "Gemini CLI"), ("codex", "Codex"), ("opencode", "opencode")];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +43,14 @@ pub struct Settings {
     pub effort: String,
     /// File grouping rules (built-in plus custom).
     pub group_rules: Vec<perusal_diff::GroupRule>,
+    /// Hosts the user can sign in to (github.com and gitlab.com are always present).
+    pub hosts: Vec<HostCfg>,
+    /// OAuth app client ids per host for the device flow (optional; tokens and `gh`/`glab` login also work).
+    pub oauth_client_ids: std::collections::BTreeMap<String, String>,
+    /// First-run setup has been completed or skipped.
+    pub onboarded: bool,
+    /// Desktop notifications for important updates.
+    pub desktop_notifications: bool,
     /// Panel layout, remembered between sessions.
     pub left_width: f32,
     pub right_width: f32,
@@ -47,13 +60,14 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
+            model: String::new(), effort: String::new(), hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
 impl Settings {
     pub fn from_toml(s: &str) -> Settings {
         let mut st: Settings = toml::from_str(s).unwrap_or_default();
         st.group_rules = perusal_diff::rules::merge_with_builtins(std::mem::take(&mut st.group_rules));
+        for d in default_hosts() { if !st.hosts.iter().any(|h| h.host == d.host) { st.hosts.insert(0, d); } }
         st.left_width = st.left_width.clamp(200.0, 700.0); st.right_width = st.right_width.clamp(220.0, 700.0);
         st
     }
@@ -75,6 +89,10 @@ mod tests { use super::*;
         let t = Settings::from_toml("left_width = 5000.0\nright_width = 1.0\n[[group_rules]]\nid = \"mine\"\nlabel = \"m\"\npattern = \"(?P<stem>x)\"\nenabled = true\n");
         assert_eq!((t.left_width, t.right_width), (700.0, 220.0)); assert_eq!(t.group_rules.len(), 6); assert!(t.group_rules.iter().any(|r| r.id == "mine" && !r.builtin));
         assert!(Settings::from_toml("").group_rules.iter().all(|r| r.builtin));
+    }
+    #[test] fn hosts_always_include_the_cloud_hosts() {
+        let t = Settings::from_toml("[[hosts]]\nhost = \"git.corp\"\nkind = \"gitlab\"\n"); assert_eq!(t.hosts.iter().map(|h| h.host.as_str()).collect::<Vec<_>>(), vec!["gitlab.com", "github.com", "git.corp"]);
+        assert!(!Settings::default().onboarded && Settings::default().desktop_notifications);
     }
     #[test] fn theme_choice() {
         let mut s = Settings::default(); assert_eq!(s.effective_theme(false), "dark");

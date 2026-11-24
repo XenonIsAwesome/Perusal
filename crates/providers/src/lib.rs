@@ -31,6 +31,17 @@ pub fn parse_mr_url(url: &str) -> std::result::Result<MrRef, String> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MrInfo { pub title: String, pub state: String, pub author: String, pub head_sha: String, pub base_ref: String, pub web_url: String }
 
+/// Why a merge request is in your list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role { ReviewRequested, Authored, Assigned }
+
+/// Which states to list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StateFilter { Open, Merged, Closed, All }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteMr { pub url: String, pub title: String, pub project: String, pub number: u64, pub author: String, pub state: String, pub updated: String, pub host: String, pub kind: Kind }
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ci { None, Pending, Running, Passed, Failed, Canceled }
 
@@ -60,6 +71,9 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+/// Page in the browser that shows this MR's CI (checks on GitHub, pipelines on GitLab).
+pub fn ci_page(kind: &Kind, web_url: &str) -> String { match kind { Kind::GitHub => format!("{web_url}/checks"), Kind::GitLab => format!("{web_url}/pipelines") } }
+
 /// What the app does about an error. Offline keeps local review fully usable; drafts are never lost.
 #[derive(Debug, PartialEq)]
 pub enum Action { Relogin, RetryAfter(u64), WorkOffline, HideControl, ShowMessage }
@@ -90,6 +104,10 @@ pub trait Provider: Send + Sync {
     async fn react(&self, _r: &MrRef, _thread: &str, _comment: &str, _emoji: &str) -> Result<()> { Err(Error::Unsupported("reactions")) }
     async fn edit_comment(&self, _r: &MrRef, _thread: &str, _comment: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("edit")) }
     async fn delete_comment(&self, _r: &MrRef, _thread: &str, _comment: &str) -> Result<()> { Err(Error::Unsupported("delete")) }
+    /// Login of the authenticated user.
+    async fn current_user(&self) -> Result<String>;
+    /// The user's own merge/pull requests by role and state (needs a token).
+    async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>>;
     /// Open MR/PR number whose source branch is `branch`, for attaching a local-branch review.
     async fn find_for_branch(&self, project: &str, branch: &str) -> Result<Option<u64>>;
 }

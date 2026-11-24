@@ -7,7 +7,9 @@ impl GitHub {
     /// github.com uses api.github.com; Enterprise Server serves the API at https://host/api/v3.
     pub fn api_base(host: &str) -> String { if host == "github.com" { "https://api.github.com".into() } else { format!("https://{host}/api/v3") } }
     fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http.request(m, format!("{}{path}", self.api)).bearer_auth(&self.token).header("accept", "application/vnd.github+json")
+        let r = self.http.request(m, format!("{}{path}", self.api)).header("accept", "application/vnd.github+json");
+        // an empty token must not send `Authorization: Bearer ` (GitHub answers 401 to it, even for public repositories)
+        if self.token.is_empty() { r } else { r.bearer_auth(&self.token) }
     }
 }
 
@@ -92,5 +94,22 @@ impl Provider for GitHub {
         let owner = project.split('/').next().unwrap_or("");
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{project}/pulls?state=open&head={owner}:{branch}")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v.first().and_then(|p| p["number"].as_u64()))
+    }
+    async fn current_user(&self) -> Result<String> {
+        let v: Value = check(self.req(reqwest::Method::GET, "/user").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v["login"].as_str().unwrap_or("").to_string())
+    }
+    async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>> {
+        if self.token.is_empty() { return Err(Error::Unauthorized); }
+        let r = match role { Role::ReviewRequested => "review-requested:@me", Role::Authored => "author:@me", Role::Assigned => "assignee:@me" };
+        let st = match state { StateFilter::Open => "+is:open", StateFilter::Merged => "+is:merged", StateFilter::Closed => "+is:closed+is:unmerged", StateFilter::All => "" };
+        let v: Value = check(self.req(reqwest::Method::GET, &format!("/search/issues?q=is:pr+{r}{st}&sort=updated&order=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v["items"].as_array().cloned().unwrap_or_default().iter().map(|i| {
+            let merged = i.pointer("/pull_request/merged_at").map(|m| !m.is_null()).unwrap_or(false);
+            let state = if merged { "merged" } else if i["state"] == "open" { "open" } else { "closed" };
+            let project = i["repository_url"].as_str().and_then(|u| u.split("/repos/").nth(1)).unwrap_or("").to_string();
+            RemoteMr { url: i["html_url"].as_str().unwrap_or("").into(), title: i["title"].as_str().unwrap_or("").into(), project, number: i["number"].as_u64().unwrap_or(0),
+                author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub }
+        }).collect())
     }
 }

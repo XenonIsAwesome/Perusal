@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, Result};
 pub struct Draft { pub id: i64, pub file: Option<String>, pub start_line: Option<u32>, pub end_line: Option<u32>, pub body: String, pub ai: bool }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecentRow { pub id: i64, pub key: String, pub title: String, pub viewed: u32, pub total: u32, pub drafts: u32, pub pinned: bool, pub state: String }
+pub struct RecentRow { pub id: i64, pub key: String, pub title: String, pub viewed: u32, pub total: u32, pub drafts: u32, pub pinned: bool, pub state: String, pub mr_state: String }
 
 pub struct Store { conn: Connection }
 
@@ -22,6 +22,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, review INTEGER, file TEXT, start_line INTEGER, end_line INTEGER, body TEXT, ai INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, review INTEGER, role TEXT, text TEXT);
             CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);")?;
+        // additive migrations for databases created by earlier versions
+        for alter in ["ALTER TABLE reviews ADD COLUMN mr_state TEXT DEFAULT ''", "ALTER TABLE reviews ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE chat ADD COLUMN conv INTEGER DEFAULT 0"] { let _ = conn.execute(alter, []); }
         Ok(Store { conn })
     }
     pub fn memory() -> Result<Self> { Self::open(":memory:") }
@@ -92,10 +94,17 @@ impl Store {
         Ok(lost)
     }
     /// Docked chat is saved with the review.
-    pub fn add_message(&self, review: i64, role: &str, text: &str) -> Result<()> { self.conn.execute("INSERT INTO chat(review,role,text) VALUES(?1,?2,?3)", params![review, role, text])?; Ok(()) }
+    fn conv(&self, review: i64) -> i64 { self.conn.query_row("SELECT COALESCE(conv,0) FROM reviews WHERE id=?1", params![review], |r| r.get(0)).unwrap_or(0) }
+    pub fn add_message(&self, review: i64, role: &str, text: &str) -> Result<()> { let c = self.conv(review); self.conn.execute("INSERT INTO chat(review,role,text,conv) VALUES(?1,?2,?3,?4)", params![review, role, text, c])?; Ok(()) }
+    /// Messages of the current conversation.
     pub fn messages(&self, review: i64) -> Result<Vec<(String, String)>> {
-        let mut s = self.conn.prepare("SELECT role,text FROM chat WHERE review=?1 ORDER BY id")?; let r = s.query_map(params![review], |r| Ok((r.get(0)?, r.get(1)?)))?.collect(); r
+        let mut s = self.conn.prepare("SELECT role,text FROM chat WHERE review=?1 AND COALESCE(conv,0)=?2 ORDER BY id")?; let r = s.query_map(params![review, self.conv(review)], |r| Ok((r.get(0)?, r.get(1)?)))?.collect(); r
     }
+    /// Starts a fresh conversation; earlier ones stay in the database.
+    pub fn new_chat(&self, review: i64) -> Result<()> { self.conn.execute("UPDATE reviews SET conv=COALESCE(conv,0)+1 WHERE id=?1", params![review])?; Ok(()) }
+    pub fn rename_review(&self, review: i64, title: &str) -> Result<()> { self.conn.execute("UPDATE reviews SET title=?2 WHERE id=?1", params![review, title])?; Ok(()) }
+    pub fn set_mr_state(&self, review: i64, state: &str) -> Result<()> { self.conn.execute("UPDATE reviews SET mr_state=?2 WHERE id=?1", params![review, state])?; Ok(()) }
+    pub fn review_title(&self, review: i64) -> Result<String> { self.conn.query_row("SELECT title FROM reviews WHERE id=?1", params![review], |r| r.get(0)) }
     pub fn set_state(&self, review: i64, state: &str) -> Result<()> { self.conn.execute("UPDATE reviews SET state=?2 WHERE id=?1", params![review, state])?; Ok(()) }
     pub fn set_pinned(&self, review: i64, pinned: bool) -> Result<()> { self.conn.execute("UPDATE reviews SET pinned=?2 WHERE id=?1", params![review, pinned])?; Ok(()) }
     /// Retention: reviews stay until submitted or discarded; submitted/merged ones expire after `days`; pinned never expire.
@@ -113,8 +122,8 @@ impl Store {
     /// Rows for the recent-reviews page, pinned first then most recently opened.
     pub fn recent_rows(&self) -> Result<Vec<RecentRow>> {
         let mut s = self.conn.prepare("SELECT r.id, r.key, r.title, (SELECT COUNT(*) FROM viewed v WHERE v.review=r.id), r.total_files,
-            (SELECT COUNT(*) FROM drafts d WHERE d.review=r.id), r.pinned, r.state FROM reviews r ORDER BY r.pinned DESC, r.last_opened DESC, r.id DESC")?;
-        let r = s.query_map([], |r| Ok(RecentRow { id: r.get(0)?, key: r.get(1)?, title: r.get(2)?, viewed: r.get(3)?, total: r.get(4)?, drafts: r.get(5)?, pinned: r.get::<_, i64>(6)? != 0, state: r.get(7)? }))?.collect(); r
+            (SELECT COUNT(*) FROM drafts d WHERE d.review=r.id), r.pinned, r.state, COALESCE(r.mr_state,'') FROM reviews r ORDER BY r.pinned DESC, r.last_opened DESC, r.id DESC")?;
+        let r = s.query_map([], |r| Ok(RecentRow { id: r.get(0)?, key: r.get(1)?, title: r.get(2)?, viewed: r.get(3)?, total: r.get(4)?, drafts: r.get(5)?, pinned: r.get::<_, i64>(6)? != 0, state: r.get(7)?, mr_state: r.get(8)? }))?.collect(); r
     }
     /// Recent-reviews page rows: (id, title, viewed, total, drafts, pinned).
     pub fn recent(&self) -> Result<Vec<(i64, String, u32, u32, u32, bool)>> {
@@ -157,6 +166,15 @@ mod tests {
         assert_eq!(s.messages(r).unwrap().len(), 2);
         let m = s.messages(r).unwrap(); s.add_draft(r, Some("a"), Some((1, 1)), &m[1].1, true).unwrap(); assert!(s.drafts(r).unwrap()[0].ai);
         s.discard(r).unwrap(); assert!(s.messages(r).unwrap().is_empty());
+    }
+    #[test] fn rename_state_and_new_chat() {
+        let s = Store::memory().unwrap(); let r = s.open_review("k", "old", "h", 1).unwrap();
+        s.rename_review(r, "Nicer title").unwrap(); assert_eq!(s.review_title(r).unwrap(), "Nicer title");
+        s.set_mr_state(r, "merged").unwrap(); assert_eq!(s.recent_rows().unwrap()[0].mr_state, "merged");
+        s.add_message(r, "user", "one").unwrap(); s.new_chat(r).unwrap(); assert!(s.messages(r).unwrap().is_empty());
+        s.add_message(r, "user", "two").unwrap(); assert_eq!(s.messages(r).unwrap(), vec![("user".to_string(), "two".to_string())]);
+        // re-opening keeps a custom title
+        s.open_review("k", "auto title", "h", 1).unwrap(); assert_eq!(s.review_title(r).unwrap(), "Nicer title");
     }
     #[test] fn retention() {
         let s = Store::memory().unwrap();
