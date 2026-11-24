@@ -16,6 +16,7 @@ impl Store {
                 state TEXT DEFAULT 'open', total_files INTEGER DEFAULT 0, last_opened INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS viewed(review INTEGER, path TEXT, PRIMARY KEY(review, path));
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, review INTEGER, file TEXT, start_line INTEGER, end_line INTEGER, body TEXT, ai INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, review INTEGER, role TEXT, text TEXT);
             CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);")?;
         Ok(Store { conn })
     }
@@ -86,8 +87,13 @@ impl Store {
         self.log(review, &format!("moved head {new_head}"))?;
         Ok(lost)
     }
+    /// Docked chat is saved with the review.
+    pub fn add_message(&self, review: i64, role: &str, text: &str) -> Result<()> { self.conn.execute("INSERT INTO chat(review,role,text) VALUES(?1,?2,?3)", params![review, role, text])?; Ok(()) }
+    pub fn messages(&self, review: i64) -> Result<Vec<(String, String)>> {
+        let mut s = self.conn.prepare("SELECT role,text FROM chat WHERE review=?1 ORDER BY id")?; let r = s.query_map(params![review], |r| Ok((r.get(0)?, r.get(1)?)))?.collect(); r
+    }
     pub fn discard(&self, review: i64) -> Result<()> {
-        for t in ["viewed", "drafts", "journal"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
+        for t in ["viewed", "drafts", "journal", "chat"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
     }
     /// Recent-reviews page rows: (id, title, viewed, total, drafts, pinned).
@@ -123,6 +129,13 @@ mod tests {
         let lost = s.move_head(r, "h2", &|_, old| Some(if old { "a\nb\nc\n".into() } else { "z\na\nB\nc\n".into() })).unwrap();
         assert_eq!(lost, vec![gone]); assert_eq!(s.pinned_head(r).unwrap(), "h2");
         assert_eq!(s.drafts(r).unwrap().iter().find(|d| d.id == ok).unwrap().start_line, Some(4));
+    }
+    #[test] fn chat_saved_and_answer_becomes_draft() {
+        let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h", 1).unwrap();
+        s.add_message(r, "user", "why?").unwrap(); s.add_message(r, "agent", "because").unwrap();
+        assert_eq!(s.messages(r).unwrap().len(), 2);
+        let m = s.messages(r).unwrap(); s.add_draft(r, Some("a"), Some((1, 1)), &m[1].1, true).unwrap(); assert!(s.drafts(r).unwrap()[0].ai);
+        s.discard(r).unwrap(); assert!(s.messages(r).unwrap().is_empty());
     }
     #[test] fn survives_reopen_on_disk() {
         let p = std::env::temp_dir().join(format!("perusal-db-{}.sqlite", std::process::id())); let ps = p.to_str().unwrap();
