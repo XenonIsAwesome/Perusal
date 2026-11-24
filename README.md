@@ -5,18 +5,22 @@ commit graph instead of one long scrolling page. Licensed MIT OR Apache-2.0. No 
 
 ## Status
 
-The review engine is implemented and tested headless: git indexing, the filter/sort language, presets, SQLite-backed
-reviews with crash-safe drafts, GitHub and GitLab providers (mock-tested), agent integration over ACP, view models,
-themes, keymap, deep links, a browser extension and packaging scripts. **The GPUI window is not built yet**: `gpui`
-does not compile in the development sandbox (see `DECISIONS.md`). `perusal` today supports `perusal theme check <file>`
-and validates `perusal://` links. Use `perusal-cli` for headless review.
+The review engine is implemented and tested headless (git indexing, filter/sort language, presets, SQLite-backed
+reviews, GitHub/GitLab providers against mocks, ACP agent integration, themes, keymap, deep links, extension,
+packaging scripts). A first GPUI window reviews a local branch. It is early: see `DECISIONS.md` for what it lacks.
 
-See `docs/PROGRESS.md` for milestone status, `docs/USER.md` for usage, `docs/BENCHMARKS.md` for performance.
+```bash
+cargo run --release -p perusal-ui -- /path/to/repo my-branch --base main
+```
+Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl +/-/0` zoom.
+Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
+and `libwayland-dev` to build. `perusal-cli` is the headless harness.
 
 ## Build and test
 
 ```bash
-cargo build --workspace
+cargo build --workspace            # everything except the GUI
+cargo build --release -p perusal-ui  # the GUI
 cargo test --workspace
 cargo run --release -p perusal-cli -- bench     # checks the performance budget
 extension/build.sh                              # browser extension zips

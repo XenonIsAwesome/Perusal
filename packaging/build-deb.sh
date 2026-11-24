@@ -2,7 +2,7 @@
 # Builds target/perusal_<version>_amd64.deb from the release binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo build --release -p perusal-app -p perusal-cli
+cargo build --release -p perusal-ui -p perusal-cli
 V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2); R=target/deb-root; rm -rf $R
 install -Dm755 target/release/perusal $R/usr/bin/perusal
 install -Dm755 target/release/perusal-cli $R/usr/bin/perusal-cli

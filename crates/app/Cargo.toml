@@ -8,10 +8,6 @@ license.workspace = true
 name = "perusal_app"
 path = "src/lib.rs"
 
-[[bin]]
-name = "perusal"
-path = "src/main.rs"
-
 [dependencies]
 perusal-core.workspace = true
 perusal-diff.workspace = true

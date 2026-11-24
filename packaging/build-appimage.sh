@@ -2,7 +2,7 @@
 # Needs appimagetool on PATH. Builds an AppDir; first run offers to install the .desktop entry (see AppRun).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo build --release -p perusal-app
+cargo build --release -p perusal-ui
 A=target/Perusal.AppDir; rm -rf $A; mkdir -p $A/usr/bin
 cp target/release/perusal $A/usr/bin/; cp packaging/perusal.desktop $A/
 cat > $A/AppRun <<'R'

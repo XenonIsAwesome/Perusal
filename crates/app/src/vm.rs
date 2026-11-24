@@ -46,6 +46,10 @@ impl ReviewVm {
         let old = std::mem::replace(&mut self.filter, f.into());
         self.refresh().inspect_err(|_| { self.filter = old; })
     }
+    /// Moves the cursor to the batch containing file `i` (clicking a file in the list).
+    pub fn select_file(&mut self, i: usize) {
+        if let Some(b) = self.batches.iter().position(|b| b.contains(&i)) { if b != self.cursor { self.history.push(self.cursor); } self.cursor = b; }
+    }
     pub fn current_batch(&self) -> &[usize] { self.batches.get(self.cursor).map(|v| v.as_slice()).unwrap_or(&[]) }
     pub fn batch_count(&self) -> usize { self.batches.len() }
     pub fn set_viewed(&mut self, store: &Store, i: usize, v: bool) {
