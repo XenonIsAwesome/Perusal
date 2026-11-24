@@ -32,7 +32,12 @@ impl Provider for GitLab {
         if s.verdict == Verdict::RequestChanges { return Err(Error::Unsupported("request changes")); }
         let base = Self::mr(r);
         let mut created: Vec<u64> = Vec::new();
-        let mut bodies: Vec<Value> = s.comments.iter().map(|c| json!({"note": c.body, "position": {"position_type": "text", "new_path": c.path, "new_line": c.end_line, "base_sha": null, "head_sha": s.head_sha, "start_sha": null}})).collect();
+        // Inline positions need the MR's diff_refs; without real SHAs GitLab files the note as a plain MR thread.
+        let mr: Value = check(self.req(reqwest::Method::GET, &base).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let refs = |k: &str| mr.pointer(&format!("/diff_refs/{k}")).and_then(|x| x.as_str()).map(String::from);
+        let head = refs("head_sha").unwrap_or_else(|| s.head_sha.clone());
+        let (base_sha, start_sha) = (refs("base_sha"), refs("start_sha"));
+        let mut bodies: Vec<Value> = s.comments.iter().map(|c| json!({"note": c.body, "position": {"position_type": "text", "old_path": c.path, "new_path": c.path, "new_line": c.end_line, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha}})).collect();
         if !s.summary.is_empty() { bodies.push(json!({"note": s.summary})); }
         let res: Result<()> = async {
             for b in &bodies {

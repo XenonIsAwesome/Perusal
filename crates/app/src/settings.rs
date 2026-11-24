@@ -49,8 +49,14 @@ pub struct Settings {
     pub oauth_client_ids: std::collections::BTreeMap<String, String>,
     /// First-run setup has been completed or skipped.
     pub onboarded: bool,
-    /// Desktop notifications for important updates.
+    /// Desktop notifications for important updates (master switch).
     pub desktop_notifications: bool,
+    /// Per-event overrides of the master switch (key from `events::DESKTOP_EVENTS`); missing = on.
+    pub desktop_events: std::collections::BTreeMap<String, bool>,
+    /// Hide files whose changes are whitespace only.
+    pub hide_whitespace: bool,
+    /// Draw our own title bar and window buttons instead of the system's (restart-free where the platform allows).
+    pub custom_titlebar: bool,
     /// Panel layout, remembered between sessions.
     pub left_width: f32,
     pub right_width: f32,
@@ -60,7 +66,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
+            model: String::new(), effort: String::new(), hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
 impl Settings {
@@ -75,6 +81,8 @@ impl Settings {
     pub fn agent_label(&self) -> &'static str { AGENTS.iter().find(|(k, _)| *k == self.agent).map(|(_, l)| *l).unwrap_or("Claude Code") }
     /// Theme to use now: the chosen one, or the light/dark pair when following the OS.
     pub fn effective_theme(&self, os_dark: bool) -> &str { if self.follow_os { if os_dark { &self.theme_dark } else { &self.theme_light } } else { &self.theme } }
+    /// Whether a desktop notification should be raised for this event key.
+    pub fn desktop_event_on(&self, key: &str) -> bool { self.desktop_notifications && self.desktop_events.get(key).copied().unwrap_or(true) }
     pub fn next_agent(&mut self) { let i = AGENTS.iter().position(|(k, _)| *k == self.agent).unwrap_or(0); self.agent = AGENTS[(i + 1) % AGENTS.len()].0.to_string(); }
 }
 
@@ -93,6 +101,11 @@ mod tests { use super::*;
     #[test] fn hosts_always_include_the_cloud_hosts() {
         let t = Settings::from_toml("[[hosts]]\nhost = \"git.corp\"\nkind = \"gitlab\"\n"); assert_eq!(t.hosts.iter().map(|h| h.host.as_str()).collect::<Vec<_>>(), vec!["gitlab.com", "github.com", "git.corp"]);
         assert!(!Settings::default().onboarded && Settings::default().desktop_notifications);
+    }
+    #[test] fn desktop_event_choices() {
+        let mut s = Settings::default(); assert!(s.desktop_event_on("merged")); s.desktop_events.insert("merged".into(), false); assert!(!s.desktop_event_on("merged") && s.desktop_event_on("closed"));
+        s.desktop_notifications = false; assert!(!s.desktop_event_on("closed")); assert!(Settings::default().custom_titlebar && !Settings::default().hide_whitespace);
+        assert_eq!(Settings::from_toml(&s.to_toml()), s);
     }
     #[test] fn theme_choice() {
         let mut s = Settings::default(); assert_eq!(s.effective_theme(false), "dark");

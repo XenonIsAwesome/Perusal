@@ -14,7 +14,7 @@ const GENERIC_STEMS: [&str; 12] = ["index", "main", "mod", "lib", "__init__", "u
 pub fn builtin_rules() -> Vec<GroupRule> {
     let r = |id: &str, label: &str, pattern: &str| GroupRule { id: id.into(), label: label.into(), pattern: pattern.into(), enabled: true, builtin: true };
     vec![
-        r("c-cpp", "C and C++ headers with sources (foo.h, foo.cpp)", r"(?i)^(?:.*/)?(?P<stem>[^/]+)\.(?:h|hpp|c|cc|cpp)$"),
+        r("c-cpp", "C and C++ headers with sources (foo.h, foo.cpp)", r"(?i)^(?:.*/)?(?P<stem>[^/]+)\.(?:h|hh|hpp|hxx|h\+\+|inl|ipp|tpp|txx|c|cc|cpp|cxx|c\+\+|cu|cuh|m|mm)$"),
         r("ts-tests", "TypeScript and JavaScript with tests (foo.ts, foo.test.ts, foo.spec.ts)", r"^(?:.*/)?(?P<stem>[^/]+?)(?:\.test|\.spec)?\.(?:ts|tsx|js|jsx)$"),
         r("proto", "Protobuf with generated files (foo.proto, foo.pb.go, foo_pb2.py)", r"^(?:.*/)?(?P<stem>[^/]+?)(?:\.proto|\.pb\.(?:go|h|cc)|_pb2(?:_grpc)?\.pyi?|_pb\.js)$"),
         r("py-tests", "Python modules with tests (foo.py, test_foo.py)", r"^(?:.*/)?(?:test_)?(?P<stem>[^/]+?)\.py$"),
@@ -63,6 +63,10 @@ mod tests {
         let f = fs(&["a/foo.h", "b/foo.cpp", "x/foo.test.ts", "y/foo.ts", "t/test_bar.py", "bar.py", "z.rs", "m/z_test.rs", "p/api.proto", "gen/api.pb.go", "gen/api_pb2.py"]);
         let g = group_files(&f, &builtin_rules());
         assert_eq!(g, vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7], vec![8, 9, 10]]);
+    }
+    #[test] fn c_family_extensions() {
+        let f = fs(&["k/gemm.cuh", "k/gemm.cu", "i/vec.tpp", "i/vec.hpp", "i/vec.cxx", "i/Vec.H", "o/a.mm", "o/a.h"]);
+        assert_eq!(group_files(&f, &builtin_rules()), vec![vec![0, 1], vec![2, 3, 4, 5], vec![6, 7]]);
     }
     #[test] fn rules_do_not_cross_languages_or_generic_stems() {
         let f = fs(&["a/foo.rs", "b/foo.py", "c/main.rs", "d/main.rs", "e/lib.rs"]);

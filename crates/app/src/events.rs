@@ -4,14 +4,28 @@ pub struct Snapshot { pub state: String, pub head: String, pub ci: Option<String
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event { pub title: String, pub body: String, /// also worth a desktop notification
-    pub important: bool, pub level: Level }
+    pub important: bool, pub level: Level, /// which desktop-notification setting governs it (see [`DESKTOP_EVENTS`])
+    pub key: &'static str }
+
+/// Events that can raise a desktop notification: (key, label, description). Users pick which ones in Settings.
+pub const DESKTOP_EVENTS: [(&str, &str, &str); 9] = [
+    ("merged", "Merged", "A merge request you have open was merged"),
+    ("closed", "Closed", "It was closed without merging"),
+    ("reopened", "Reopened", "A closed one was reopened"),
+    ("new_commits", "New commits", "Commits were pushed to it"),
+    ("force_push", "History rewritten", "It was force-pushed"),
+    ("ci_passed", "Checks passed", "Its pipeline or checks succeeded"),
+    ("ci_failed", "Checks failed", "Its pipeline or checks failed"),
+    ("ai_done", "AI finished", "An AI review or answer is ready"),
+    ("posted", "Review posted", "Your review was sent to the host"),
+];
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Level { Info, Success, Warning, Error }
 
 /// `is_ancestor(old, new)` says whether the previous head is still in the new head's history (false = force-push).
 pub fn diff(prev: &Snapshot, now: &Snapshot, title: &str, is_ancestor: &dyn Fn(&str, &str) -> bool) -> Vec<Event> {
     let mut out = vec![];
-    let ev = |t: &str, b: String, imp: bool, l: Level| Event { title: t.into(), body: b, important: imp, level: l };
+    let ev = |t: &str, b: String, imp: bool, l: Level| Event { title: t.into(), body: b, important: imp, level: l, key: match t { "Merged" => "merged", "Closed" => "closed", "Reopened" => "reopened", "New commits" => "new_commits", "History rewritten" => "force_push", "Checks passed" => "ci_passed", _ => "ci_failed" } };
     if prev.state != now.state && !prev.state.is_empty() {
         match now.state.as_str() {
             "merged" => out.push(ev("Merged", format!("{title} was merged."), true, Level::Success)),
@@ -44,7 +58,8 @@ mod tests { use super::*;
         assert_eq!(diff(&s("open", "a", None), &s("closed", "a", None), "T", &anc)[0].level, Level::Warning);
         assert_eq!(diff(&s("open", "old", None), &s("open", "new", None), "T", &anc)[0].title, "New commits");
         assert_eq!(diff(&s("open", "x", None), &s("open", "new", None), "T", &anc)[0].title, "History rewritten");
-        assert_eq!(diff(&s("open", "a", Some("running")), &s("open", "a", Some("failed")), "T", &anc)[0].title, "Checks failed");
+        assert_eq!(diff(&s("open", "a", Some("running")), &s("open", "a", Some("failed")), "T", &anc)[0].key, "ci_failed");
+        assert!(DESKTOP_EVENTS.iter().any(|e| e.0 == "force_push"));
         assert_eq!(diff(&s("open", "a", Some("running")), &s("open", "a", Some("passed")), "T", &anc)[0].level, Level::Success);
         assert!(diff(&s("", "", None), &s("open", "a", None), "T", &anc).is_empty()); // first poll is not a change
         assert!(diff(&s("open", "a", Some("running")), &s("open", "a", Some("running")), "T", &anc).is_empty());

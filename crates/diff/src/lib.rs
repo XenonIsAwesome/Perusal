@@ -27,17 +27,21 @@ pub struct FileStat {
     pub comments: u32,
     pub unresolved: u32,
     pub ai_flagged: bool,
+    /// Changed lines when whitespace is ignored (`git diff -w`); equals `changed()` until computed.
+    pub meaningful: u32,
 }
 
 impl FileStat {
     pub fn new(path: &str, status: Status, additions: u32, deletions: u32) -> Self {
         FileStat { path: path.into(), status, additions, deletions, hunks: 1, size: 0, binary: false, symlink: false,
-            generated: is_noisy_path(path), viewed: false, comments: 0, unresolved: 0, ai_flagged: false }
+            generated: is_noisy_path(path), viewed: false, comments: 0, unresolved: 0, ai_flagged: false, meaningful: additions + deletions }
     }
     pub fn name(&self) -> &str { self.path.rsplit('/').next().unwrap_or(&self.path) }
     pub fn ext(&self) -> &str { let n = self.name(); n.rsplit_once('.').map(|x| x.1).unwrap_or("") }
     pub fn net(&self) -> i64 { self.additions as i64 - self.deletions as i64 }
     pub fn changed(&self) -> u32 { self.additions + self.deletions }
+    /// True when every change in the file is whitespace only (text files with changes).
+    pub fn ws_only(&self) -> bool { !self.binary && self.changed() > 0 && self.meaningful == 0 }
     pub fn change_ratio(&self) -> f64 {
         let t = self.changed(); if t == 0 { 0.0 } else { self.additions.min(self.deletions) as f64 / t as f64 }
     }
@@ -96,7 +100,11 @@ pub fn index_range(repo: &Path, base: &str, head: &str) -> std::io::Result<Vec<F
         if !o.status.success() { return Err(std::io::Error::other(String::from_utf8_lossy(&o.stderr).to_string())); }
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
     };
-    Ok(parse_diff_z(&run(&["diff", "--raw", "--no-abbrev", "-z", "-M"])?, &run(&["diff", "--numstat", "-z", "-M"])?))
+    let mut files = parse_diff_z(&run(&["diff", "--raw", "--no-abbrev", "-z", "-M"])?, &run(&["diff", "--numstat", "-z", "-M"])?);
+    // files that disappear from a whitespace-ignoring diff are whitespace-only changes
+    let w: std::collections::HashMap<String, u32> = parse_diff_z("", &run(&["diff", "-w", "--numstat", "-z", "-M"])?).into_iter().map(|f| (f.path.clone(), f.changed())).collect();
+    for f in &mut files { if !f.binary { f.meaningful = w.get(&f.path).copied().unwrap_or(0); } }
+    Ok(files)
 }
 
 pub mod rules;
@@ -131,10 +139,16 @@ mod tests {
         run(&["checkout","-qb","f"]);
         std::fs::write(d.join("a.txt"), "1\n3\n4\n").unwrap(); std::fs::write(d.join("b.txt"), "x\n").unwrap();
         run(&["add","-A"]); run(&["commit","-qm","b"]);
-        std::os::unix::fs::symlink("a.txt", d.join("ln")).unwrap(); run(&["add","-A"]); run(&["commit","-qm","ln"]);
+        std::os::unix::fs::symlink("a.txt", d.join("ln")).unwrap(); std::fs::write(d.join("w.txt"), "a\nb\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","ln"]);
+        run(&["checkout","-qb","g","main"]); std::fs::write(d.join("w.txt"), "a\nb\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","w0"]);
+        std::fs::write(d.join("w.txt"), "a\n    b\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","w1"]);
+        let g = index_range(&d, "main", "g").unwrap(); let w = g.iter().find(|x| x.path == "w.txt").unwrap(); assert!(w.status == Status::Added && !w.ws_only());
+        run(&["checkout","-q","f"]);
+        run(&["checkout","-qb","h","f"]); std::fs::write(d.join("w.txt"), "a\n   b\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","w2"]);
+        let h = index_range(&d, "f", "h").unwrap(); let w = h.iter().find(|x| x.path == "w.txt").unwrap(); assert!(w.ws_only(), "{w:?}");
         let mut f = index_range(&d, "main", "f").unwrap(); f.sort_by(|a, b| a.path.cmp(&b.path));
         assert!(f.iter().find(|x| x.path == "ln").unwrap().symlink); assert!(!f.iter().find(|x| x.path == "a.txt").unwrap().symlink);
-        let f: Vec<FileStat> = f.into_iter().filter(|x| x.path != "ln").collect();
+        let f: Vec<FileStat> = f.into_iter().filter(|x| x.path != "ln" && x.path != "w.txt").collect();
         assert_eq!((f[0].additions, f[0].deletions), (2, 1)); assert_eq!(f[1].status, Status::Added);
         let _ = std::fs::remove_dir_all(&d);
     }

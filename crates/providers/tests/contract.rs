@@ -43,13 +43,20 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
 }
 #[tokio::test] async fn gitlab_submit_publishes() {
     let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"diff_refs":{"base_sha":"BASE","start_sha":"START","head_sha":"HEAD"}}))).mount(&s).await;
     Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes")).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":11}))).expect(2).mount(&s).await;
     Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes/bulk_publish")).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
     Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/approve")).respond_with(ResponseTemplate::new(201)).expect(1).mount(&s).await;
     gl(&s).submit(&glref(), &sub(Verdict::Approve)).await.unwrap();
+    // inline positions carry the MR's real diff refs, otherwise GitLab posts a plain MR thread
+    let posted: Vec<serde_json::Value> = s.received_requests().await.unwrap().iter().filter(|r| r.url.path().ends_with("/draft_notes")).map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+    let pos = &posted[0]["position"];
+    assert_eq!((pos["base_sha"].as_str(), pos["start_sha"].as_str(), pos["head_sha"].as_str(), pos["position_type"].as_str()), (Some("BASE"), Some("START"), Some("HEAD"), Some("text")));
+    assert!(pos["new_line"].as_u64().is_some() && pos["old_path"].as_str().is_some());
 }
 #[tokio::test] async fn gitlab_failed_submit_leaves_nothing_half_posted() {
     let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"diff_refs":{"base_sha":"BASE","start_sha":"START","head_sha":"HEAD"}}))).mount(&s).await;
     Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes")).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":11}))).mount(&s).await;
     Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes/bulk_publish")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
     Mock::given(method("DELETE")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes/11")).respond_with(ResponseTemplate::new(204)).expect(2).mount(&s).await;

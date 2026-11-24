@@ -22,6 +22,19 @@ pub fn token_from_glab(out: &str) -> Option<String> {
     out.lines().find_map(|l| { let l = l.trim(); let i = l.to_lowercase().find("token")?; let rest = l[i..].split_once(':')?.1.trim(); let t = rest.split_whitespace().next()?; (t.len() > 8 && !t.contains('*')).then(|| t.to_string()) })
 }
 
+/// Hosts a `gh auth status` / `glab auth status` listing says the user is logged in to. Both CLIs print the host on its own
+/// line (`github.com`, `ghe.corp`) followed by indented status lines, and `glab` also writes `Logged in to <host> as ...`.
+pub fn hosts_from_status(out: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for l in out.lines() {
+        let t = l.trim().trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+        let host = if let Some(r) = t.split(" to ").nth(1).filter(|_| t.to_lowercase().contains("logged in")) { r.split_whitespace().next() }
+            else if !l.starts_with(char::is_whitespace) && !t.is_empty() && !t.contains(' ') && t.contains('.') { Some(t) } else { None };
+        if let Some(h) = host { let h = h.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-').to_lowercase(); if h.contains('.') && !v.contains(&h) { v.push(h); } }
+    }
+    v
+}
+
 /// Page where a personal access token with the right scopes can be created.
 pub fn token_page(host: &str, kind: &str) -> String {
     if kind == "gitlab" { format!("https://{host}/-/user_settings/personal_access_tokens?name=Perusal&scopes=api,read_repository") }
@@ -37,6 +50,12 @@ mod tests { use super::*;
         assert!(parse_remote("/local/path").is_none() && parse_remote("https://host/onlyone").is_none());
         let hosts = vec![HostCfg { host: "git.corp".into(), kind: "gitlab".into() }, HostCfg { host: "ghe.corp".into(), kind: "github".into() }];
         assert_eq!((kind_of(&hosts, "git.corp"), kind_of(&hosts, "ghe.corp"), kind_of(&hosts, "gitlab.example"), kind_of(&hosts, "x.y")), ("gitlab", "github", "gitlab", "github"));
+    }
+    #[test] fn status_hosts() {
+        let gh = "github.com\n  ✓ Logged in to github.com account me (keyring)\n  - Active account: true\nghe.corp.io\n  ✓ Logged in to ghe.corp.io account me (keyring)\n";
+        assert_eq!(hosts_from_status(gh), vec!["github.com", "ghe.corp.io"]);
+        let gl = "gitlab.com\n  ✓ Logged in to gitlab.com as me (/home/x/.config/glab-cli/config.yml)\n  ✓ Token found: **************************\ngit.acme.dev\n  ✓ Logged in to git.acme.dev as me\n";
+        assert_eq!(hosts_from_status(gl), vec!["gitlab.com", "git.acme.dev"]); assert!(hosts_from_status("You are not logged in").is_empty());
     }
     #[test] fn glab_token_parsing() {
         assert_eq!(token_from_glab("gitlab.com\n  ✓ Logged in\n  ✓ Token found: glpat-abcdef123456\n").as_deref(), Some("glpat-abcdef123456"));

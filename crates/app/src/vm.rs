@@ -14,6 +14,8 @@ pub struct ReviewVm {
     /// Order files as the directory tree shows them (folders first), so n/p follow the Files panel.
     pub dir_order: bool,
     pub exclude_noisy_from_progress: bool,
+    /// Hide files whose changes are whitespace only.
+    pub hide_whitespace: bool,
     /// When set, only these paths (a commit or commit range) are listed.
     pub commit_scope: Option<HashSet<String>>,
     pub visible: Vec<usize>,
@@ -33,7 +35,7 @@ impl ReviewVm {
     pub fn new(store: &Store, review: i64, mut files: Vec<FileStat>) -> Self {
         let viewed = store.viewed(review).unwrap_or_default();
         for f in &mut files { f.viewed = viewed.contains(&f.path); }
-        let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, rules: perusal_diff::rules::builtin_rules(), dir_order: false, exclude_noisy_from_progress: false,
+        let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, rules: perusal_diff::rules::builtin_rules(), dir_order: false, exclude_noisy_from_progress: false, hide_whitespace: false,
             commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: false, history: vec![], manual: vec![] };
         let _ = vm.refresh(); vm
     }
@@ -41,6 +43,7 @@ impl ReviewVm {
     pub fn refresh(&mut self) -> Result<(), String> {
         let mut idx = perusal_filter::filter(&self.files, &self.filter)?;
         if let Some(scope) = &self.commit_scope { idx.retain(|&i| scope.contains(&self.files[i].path)); }
+        if self.hide_whitespace { idx.retain(|&i| !self.files[i].ws_only()); }
         perusal_filter::sort(&self.files, &mut idx, &self.sort)?;
         if self.dir_order { idx.sort_by_cached_key(|&i| crate::tree::tree_key(&self.files[i].path)); }
         self.batches = if self.grouping {
@@ -95,11 +98,12 @@ impl ReviewVm {
     pub fn set_viewed(&mut self, store: &Store, i: usize, v: bool) {
         self.files[i].viewed = v; let _ = store.set_viewed(self.review, &self.files[i].path.clone(), v);
     }
-    /// Next batch: applies the viewed toggle to the current batch, then advances. Returns false at the end.
+    /// Next batch: applies the viewed toggle to the current batch, then advances; after the last batch it wraps to the first.
+    /// Returns false only when there is nowhere else to go.
     pub fn next(&mut self, store: &Store) -> bool {
         if self.mark_on_next { for i in self.current_batch().to_vec() { self.set_viewed(store, i, true); } }
-        if self.cursor + 1 >= self.batches.len() { return false; }
-        self.history.push(self.cursor); self.cursor += 1; true
+        if self.batches.len() < 2 { return false; }
+        self.history.push(self.cursor); self.cursor = (self.cursor + 1) % self.batches.len(); true
     }
     /// Back to the previous batch (covers a forgotten comment).
     pub fn back(&mut self) -> bool { if let Some(c) = self.history.pop() { self.cursor = c; true } else { false } }
@@ -169,6 +173,11 @@ mod tests {
         let (_s, mut vm) = setup(); vm.dir_order = true; vm.refresh().unwrap();
         let order: Vec<&str> = vm.visible.iter().map(|&i| vm.files[i].path.as_str()).collect();
         assert_eq!(order, vec!["a/foo.h", "b/foo.cpp", "c/bar.rs", "d/baz.rs", "Cargo.lock"]);
+    }
+    #[test] fn next_wraps_and_whitespace_hides() {
+        let (s, mut vm) = setup(); for _ in 0..4 { assert!(vm.next(&s)); } assert_eq!(vm.cursor, 4); assert!(vm.next(&s)); assert_eq!(vm.cursor, 0);
+        vm.commit_scope = Some(["c/bar.rs".to_string()].into()); vm.refresh().unwrap(); assert!(!vm.next(&s)); vm.commit_scope = None;
+        vm.files[0].meaningful = 0; vm.refresh().unwrap(); assert_eq!(vm.batch_count(), 5); vm.hide_whitespace = true; vm.refresh().unwrap(); assert_eq!(vm.batch_count(), 4);
     }
     #[test] fn noisy_exclusion_and_commit_scope() {
         let (_s, mut vm) = setup(); vm.exclude_noisy_from_progress = true; assert_eq!(vm.progress().1, 4);

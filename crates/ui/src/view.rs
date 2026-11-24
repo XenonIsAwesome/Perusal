@@ -1,5 +1,5 @@
 use crate::icons as ic;
-use crate::kit::{self, badge, ci_badge, col, diff_squares, field_key, icon, icon_btn, icon_text_btn, input_text, kbd, loading_dots, markdown_view, new_bounds, pill, seg_box, seg_icon, tip, wire_input, Btn, FieldBounds, Fonts, Input, Pal};
+use crate::kit::{self, badge, ci_badge, diff_squares, field_key, icon, icon_btn, icon_text_btn, input_text, kbd, loading_dots, markdown_view, new_bounds, seg_box, seg_icon, tip, wire_input, Btn, FieldBounds, Fonts, Input, Pal};
 use crate::model::{self, Model};
 use gpui::{deferred, div, list, point, prelude::*, px, relative, uniform_list, AnyElement, ClickEvent, Context, FontWeight, HighlightStyle, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText};
 use perusal_agents::run::{agent_env, run_streaming, AgentEvent, RunError};
@@ -11,7 +11,7 @@ use perusal_app::settings::{DiffMode, MdMode, Settings};
 use perusal_app::theme::{self, Theme};
 use perusal_app::tree::{self, TreeRow};
 use perusal_core::presets::{Preset, Presets};
-use perusal_diff::text::{diff_lines, highlight, language_for_ext, split_pairs, Class, Kind, Line};
+use perusal_diff::text::{diff_lines, language_for_ext, split_pairs, Kind, Line};
 use perusal_diff::Status;
 use perusal_filter::Suggestion;
 use perusal_providers::{InlineComment, Submission, Thread, Verdict};
@@ -34,7 +34,8 @@ struct Comp { editing: Option<i64>, global: bool, preview: bool }
 #[derive(Clone)]
 struct RLine { line: Line, runs: Vec<(Range<usize>, HighlightStyle)> }
 #[derive(Clone)]
-struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai: bool, resolved: bool, outdated: bool, replies: Vec<(String, String)> }
+struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai: bool, resolved: bool, outdated: bool, replies: Vec<(String, String)>, /// the code a suggestion in the body replaces
+    orig: Option<String> }
 #[derive(Clone)]
 enum RowKind { FileHeader, Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
 #[derive(Clone)]
@@ -63,29 +64,6 @@ pub struct View {
 
 fn status_style(s: Status, p: &Pal) -> (&'static str, gpui::Hsla) {
     match s { Status::Added => ("A", p.success), Status::Modified => ("M", p.warn), Status::Deleted => ("D", p.danger), Status::Renamed => ("R", p.accent) }
-}
-
-/// Highlight spans for the lines of `text` (parsed as a whole file, so multi-line comments and strings work): per line, byte ranges within that line.
-fn line_spans(lang: &str, text: &str, th: &Theme) -> Vec<Vec<(Range<usize>, HighlightStyle)>> {
-    let mut starts = vec![0usize]; for (i, b) in text.bytes().enumerate() { if b == b'\n' { starts.push(i + 1); } }
-    let n = starts.len(); let mut out: Vec<Vec<(Range<usize>, HighlightStyle)>> = vec![vec![]; n];
-    if lang.is_empty() { return out; }
-    let mut spans = highlight(lang, text); spans.sort_by_key(|s| s.0);
-    let mut last_end = 0usize;
-    for (a, b, c) in spans {
-        if a < last_end { continue; } last_end = b;
-        let key = match c { Class::Keyword => "keyword", Class::String => "string", Class::Comment => "comment", Class::Number => "number", Class::Type => "type", Class::Function => "function", Class::Other => "keyword" };
-        let st = HighlightStyle { color: Some(col(&th.syntax, key)), ..Default::default() };
-        let first = starts.partition_point(|s| *s <= a).saturating_sub(1);
-        let mut li = first;
-        while li < n && starts[li] < b {
-            let ls = starts[li]; let le = if li + 1 < n { starts[li + 1] - 1 } else { text.len() };
-            let (sa, sb) = (a.max(ls), b.min(le));
-            if sa < sb && text.is_char_boundary(sa) && text.is_char_boundary(sb) { out[li].push((sa - ls..sb - ls, st)); }
-            li += 1;
-        }
-    }
-    out
 }
 
 fn merge_words(mut runs: Vec<(Range<usize>, HighlightStyle)>, line: &Line, p: &Pal) -> Vec<(Range<usize>, HighlightStyle)> {
@@ -167,7 +145,7 @@ impl View {
         if self.shown.as_ref() == Some(&batch) { return; }
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.len() == 1 && markdown::is_markdown(&self.m.vm.files[batch[0]].path); self.nav_changed = false; }
         self.shown = Some(batch.clone()); self.md = None; self.sym_target = None;
-        let (th, p) = (self.theme.clone(), self.pal);
+        let p = self.pal;
         let mut rows: Vec<Row> = Vec::new();
         let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None };
         for &fi in &batch {
@@ -185,7 +163,7 @@ impl View {
             }
             if f.noisy() && !f.symlink { rows.push(mk(fi, RowKind::Note(format!("{} is collapsed because it is generated, binary or very large.", f.path)))); continue; }
             let lang = language_for_ext(f.ext());
-            let (old_sp, new_sp) = (line_spans(lang, &old, &th), line_spans(lang, &new, &th));
+            let (old_sp, new_sp) = (kit::line_spans(lang, &old, &p), kit::line_spans(lang, &new, &p));
             let lines = diff_lines(&old, &new, 3);
             let rl = |l: &Line| -> RLine {
                 let spans = if l.kind == Kind::Removed { l.old_no.and_then(|n| old_sp.get(n as usize - 1)) } else { l.new_no.and_then(|n| new_sp.get(n as usize - 1)) }.cloned().unwrap_or_default();
@@ -219,10 +197,14 @@ impl View {
         let path = &self.m.vm.files[fi].path; let mut out = vec![];
         for t in self.threads.iter().filter(|t| t.path.as_deref() == Some(path.as_str())) {
             let (author, body) = t.comments.first().cloned().unwrap_or_default();
-            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect() }));
+            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect(), orig: None }));
         }
         for d in self.m.store.drafts(self.m.vm.review).unwrap_or_default().into_iter().filter(|d| d.file.as_deref() == Some(path.as_str())) {
-            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![] }));
+            let orig = (d.body.contains("```suggestion")).then(|| d.start_line.zip(d.end_line).and_then(|(a, b)| {
+                let t = perusal_gitops::show(&self.m.repo, &self.m.branch, path)?;
+                let v: Vec<&str> = t.lines().skip(a.saturating_sub(1) as usize).take((b + 1).saturating_sub(a) as usize).collect(); (!v.is_empty()).then(|| v.join("\n"))
+            })).flatten();
+            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![], orig }));
         }
         out
     }
@@ -698,7 +680,7 @@ impl View {
         div().flex().items_center().gap_3().px_4().h(px(52.0)).bg(p.surface).border_b_1().border_color(p.border)
             .child(icon_btn("home", ic::HOME, "Back to Home (Esc)", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::Home))))
             .child(title)
-            .children(self.m.remote.clone().map(|u| pill(u.trim_start_matches("https://").to_string(), &p)))
+            .children(self.m.remote.clone().map(|u| { let label = u.trim_start_matches("https://").to_string(); let hv = p.hover; let t = tip(div().id("mr-link").flex().items_center().gap_1().px_2().py(px(1.0)).rounded_full().text_xs().border_1().border_color(p.border).text_color(p.accent).cursor_pointer().hover(move |x| x.bg(hv)).child(label).child(icon(ic::OPEN_IN_NEW, 12.0, p.accent)), "Open on the host in your browser", &p); t.on_click(cx.listener(move |_, _, _, _| { let _ = model::open_url(&u); })) }))
             .children(Some(self.m.mr_state.clone()).filter(|s| !s.is_empty()).map(|s| { let (c, l) = match s.as_str() { "merged" => (p.ai, "Merged"), "closed" => (p.danger, "Closed"), _ => (p.success, "Open") }; badge(l, c, c.opacity(0.15)) }))
             .children(ci).children(local_mr)
             .child(div().flex_1())
@@ -886,8 +868,8 @@ impl View {
         let collapsed = self.collapsed_c.contains(&c.key); let raw = self.raw_c.contains(&c.key);
         let (k1, k2) = (c.key.clone(), c.key.clone()); let id = SharedString::from(c.key.clone());
         let first_line: String = c.body.lines().next().unwrap_or("").chars().take(120).collect();
-        let draft = c.draft;
-        let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { markdown_view(&markdown::parse(text), &p, &mono).text_sm().into_any_element() } };
+        let draft = c.draft; let orig = c.orig.clone();
+        let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(text), &p, &mono, orig.as_deref()).text_sm().into_any_element() } };
         let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
         div().flex().w_full().pl(px(110.0)).pr_3().py(px(4.0)).child(
             div().id(SharedString::from(format!("card-{}", c.key))).flex().flex_col().flex_1().min_w_0().rounded_md().border_1().border_color(p.border).border_l_4().border_color(accent).bg(p.surface).overflow_hidden()
@@ -1022,7 +1004,7 @@ impl View {
         let focused = self.focus == Some(Fid::Comment);
         let tb = |id: &'static str, i: ic::Icon, t: &'static str, cx: &mut Context<Self>, f: fn(&mut TextField2)| icon_btn(id, i, t, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.focus = Some(Fid::Comment); f(&mut this.comment.f); cx.stop_propagation(); cx.notify(); }));
         let editor: AnyElement = if preview {
-            div().min_h(px(110.0)).max_h(px(260.0)).overflow_hidden().px_3().py_2().child(if self.comment.f.text.trim().is_empty() { div().text_sm().text_color(p.muted).child("Nothing to preview yet.").into_any_element() } else { markdown_view(&markdown::parse(&self.comment.f.text), &p, &mono).text_sm().into_any_element() }).into_any_element()
+            div().min_h(px(110.0)).max_h(px(260.0)).overflow_hidden().px_3().py_2().child(if self.comment.f.text.trim().is_empty() { div().text_sm().text_color(p.muted).child("Nothing to preview yet.").into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(&self.comment.f.text), &p, &mono, sel.as_ref().and_then(|_| self.selection_new_text()).as_deref()).text_sm().into_any_element() }).into_any_element()
         } else {
             self.winp(Fid::Comment, div().id("cbox").flex().px_3().py(px(6.0)).min_h(px(110.0)).max_h(px(260.0)).overflow_hidden().font_family(self.fonts.ui.clone()).child(input_text(&self.comment, focused, "Write a comment. Markdown is supported: **bold**, `code`, lists, links, and suggestions.", &p, false, 5)), cx).into_any_element()
         };

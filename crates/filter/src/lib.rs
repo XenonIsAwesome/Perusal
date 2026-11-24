@@ -57,8 +57,8 @@ enum Expr {
     Agg(usize, String, Vec<Expr>),
 }
 
-pub const FIELDS: [&str; 22] = ["name", "path", "extension", "ext", "language", "status", "binary", "generated", "additions", "deletions",
-    "net", "ratio", "hunks", "size", "viewed", "comments", "unresolved", "ai", "noisy", "added", "removed", "changed"];
+pub const FIELDS: [&str; 24] = ["name", "path", "extension", "ext", "language", "status", "binary", "generated", "additions", "deletions",
+    "net", "ratio", "hunks", "size", "viewed", "comments", "unresolved", "ai", "noisy", "added", "removed", "changed", "whitespace", "meaningful"];
 pub const FUNCS: [&str; 7] = ["avg", "sum", "max", "min", "count", "top", "bottom"];
 
 struct Parser { t: Vec<Tok>, p: usize, aggs: usize, depth: usize }
@@ -147,6 +147,7 @@ fn field(name: &str, f: &FileStat) -> Val {
         "size" => Val::Num(f.size as f64), "viewed" => Val::Bool(f.viewed), "comments" => Val::Num(f.comments as f64),
         "unresolved" => Val::Num(f.unresolved as f64), "ai" => Val::Bool(f.ai_flagged), "noisy" => Val::Bool(f.noisy()),
         "changed" => Val::Num(f.changed() as f64),
+        "whitespace" => Val::Bool(f.ws_only()), "meaningful" => Val::Num(f.meaningful as f64),
         _ => Val::Bool(false),
     }
 }
@@ -264,6 +265,19 @@ pub fn sort(files: &[FileStat], idx: &mut [usize], src: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Splits a sort expression into tiers: ("additions + deletions", true) for "additions + deletions desc, name asc".
+pub fn parse_tiers(src: &str) -> Vec<(String, bool)> {
+    split_top(src).into_iter().filter_map(|p| {
+        let p = p.trim();
+        if p.is_empty() { return None; }
+        Some(if let Some(x) = p.strip_suffix(" desc") { (x.trim().to_string(), true) } else if let Some(x) = p.strip_suffix(" asc") { (x.trim().to_string(), false) } else { (p.to_string(), false) })
+    }).collect()
+}
+/// Inverse of [`parse_tiers`]; empty expressions are dropped.
+pub fn format_tiers(t: &[(String, bool)]) -> String {
+    t.iter().filter(|(e, _)| !e.trim().is_empty()).map(|(e, d)| format!("{} {}", e.trim(), if *d { "desc" } else { "asc" })).collect::<Vec<_>>().join(", ")
+}
+
 fn split_top(s: &str) -> Vec<String> {
     let (mut d, mut cur, mut out) = (0, String::new(), Vec::new());
     for ch in s.chars() {
@@ -291,6 +305,7 @@ fn field_doc(f: &str) -> &'static str {
         "additions" | "added" => "lines added", "deletions" | "removed" => "lines removed", "net" => "additions minus deletions", "changed" => "additions plus deletions",
         "ratio" => "balance of adds and removes, 0 to 0.5", "hunks" => "number of hunks", "size" => "file size in bytes",
         "viewed" => "marked as viewed", "comments" => "number of comments", "unresolved" => "unresolved threads", "ai" => "flagged by AI",
+        "whitespace" => "only whitespace changed", "meaningful" => "lines changed ignoring whitespace",
         _ => "",
     }
 }
@@ -379,6 +394,12 @@ mod tests {
         assert_eq!(filter(&files(), "bottom(1, additions)").unwrap(), vec![2]);
     }
     #[test] fn noisy_target() { assert_eq!(filter(&files(), "noisy").unwrap(), vec![3]); }
+    #[test] fn tiers_roundtrip() {
+        let t = parse_tiers("top(2, additions) desc, name"); assert_eq!(t, vec![("top(2, additions)".to_string(), true), ("name".to_string(), false)]);
+        assert_eq!(format_tiers(&t), "top(2, additions) desc, name asc"); assert!(parse_tiers("").is_empty());
+    }
+    #[test] fn whitespace_fields() { let mut f = files(); f[0].meaningful = 0; assert_eq!(filter(&f, "whitespace").unwrap(), vec![0]); assert_eq!(filter(&f, "meaningful == 0").unwrap(), vec![0]); }
+    #[test] fn reference_lists_everything() { let r = reference(); assert!(FIELDS.iter().all(|f| r.contains(f)) && FUNCS.iter().all(|f| r.contains(f)) && r.contains("whitespace")); }
     #[test] fn sorting() {
         let f = files(); let mut i: Vec<usize> = (0..4).collect();
         sort(&f, &mut i, "additions + deletions desc, name asc").unwrap(); assert_eq!(i, vec![3, 0, 1, 2]);
@@ -435,4 +456,15 @@ mod perf {
         eprintln!("10k filter+sort: {ms} ms");
         assert!(ms < if cfg!(debug_assertions) { 2000 } else { 100 }, "{ms} ms");
     }
+}
+
+/// Plain-text documentation of the expression language, generated from the field and function tables (used in AI prompts).
+pub fn reference() -> String {
+    let mut s = String::from("Fields:\n");
+    for f in FIELDS { s.push_str(&format!("- {f}: {}\n", field_doc(f))); }
+    s.push_str("Functions (aggregates over all files):\n");
+    for f in FUNCS { s.push_str(&format!("- {f}: {}\n", func_doc(f))); }
+    s.push_str("Operators: && || ! == != < > <= >= + - * / % and `x ~ /regex/` (or `x ~ \"substring\"`). Booleans such as viewed or noisy can be used directly. Examples: `additions > 50 && !viewed`, `name ~ /test/`, `changed > avg(changed)`, `top(5, changed)`.\n");
+    s.push_str("Sorting: comma separated tiers, each an expression followed by asc or desc (default asc), e.g. `changed desc, path asc`.\n");
+    s
 }
