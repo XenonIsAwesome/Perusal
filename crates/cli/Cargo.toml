@@ -15,3 +15,5 @@ path = "src/lib.rs"
 [dependencies]
 perusal-core.workspace = true
 clap.workspace = true
+perusal-diff.workspace = true
+perusal-filter.workspace = true
