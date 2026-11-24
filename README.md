@@ -19,8 +19,8 @@ and `libwayland-dev` to build. `perusal-cli` is the headless harness.
 ## Build and test
 
 ```bash
-cargo build --workspace            # everything except the GUI
-cargo build --release -p perusal-ui  # the GUI
+cargo build --workspace
+cargo build --release                 # builds the GUI (target/release/perusal) and perusal-cli
 cargo test --workspace
 cargo run --release -p perusal-cli -- bench     # checks the performance budget
 extension/build.sh                              # browser extension zips
