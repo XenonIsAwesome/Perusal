@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/core","crates/gitops","crates/diff","crates/filter","crates/providers","crates/agents","crates/app","crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/XenonIsAwesome/Perusal"
+
+[workspace.dependencies]
+perusal-core = { path = "crates/core" }
+perusal-gitops = { path = "crates/gitops" }
+perusal-diff = { path = "crates/diff" }
+perusal-filter = { path = "crates/filter" }
+perusal-providers = { path = "crates/providers" }
+perusal-agents = { path = "crates/agents" }
+clap = { version = "4", features = ["derive"] }

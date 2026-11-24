@@ -1,0 +1,17 @@
+[package]
+name = "perusal-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "perusal-cli"
+path = "src/main.rs"
+
+[lib]
+name = "perusal_cli"
+path = "src/lib.rs"
+
+[dependencies]
+perusal-core.workspace = true
+clap.workspace = true
