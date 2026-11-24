@@ -61,11 +61,18 @@ pub const FIELDS: [&str; 22] = ["name", "path", "extension", "ext", "language", 
     "net", "ratio", "hunks", "size", "viewed", "comments", "unresolved", "ai", "noisy", "added", "removed", "changed"];
 pub const FUNCS: [&str; 7] = ["avg", "sum", "max", "min", "count", "top", "bottom"];
 
-struct Parser { t: Vec<Tok>, p: usize, aggs: usize }
+struct Parser { t: Vec<Tok>, p: usize, aggs: usize, depth: usize }
+const MAX_DEPTH: usize = 64;
 
 impl Parser {
     fn peek_op(&self) -> Option<&'static str> { if let Some(Tok::Op(o)) = self.t.get(self.p) { Some(o) } else { None } }
     fn bin(&mut self, level: usize) -> Result<Expr, String> {
+        if level == 0 { self.depth += 1; if self.depth > MAX_DEPTH { return Err("expression nested too deeply".into()); } }
+        let r = self.bin_inner(level);
+        if level == 0 { self.depth -= 1; }
+        r
+    }
+    fn bin_inner(&mut self, level: usize) -> Result<Expr, String> {
         const LV: [&[&str]; 5] = [&["||"], &["&&"], &["==", "!=", "<", ">", "<=", ">=", "~"], &["+", "-"], &["*", "/", "%"]];
         if level == LV.len() { return self.unary(); }
         let mut l = self.bin(level + 1)?;
@@ -79,7 +86,10 @@ impl Parser {
     }
     fn unary(&mut self) -> Result<Expr, String> {
         match self.peek_op() {
-            Some(o @ ("!" | "-")) => { self.p += 1; Ok(Expr::Un(o, Box::new(self.unary()?))) }
+            Some(o @ ("!" | "-")) => {
+                self.p += 1; self.depth += 1; if self.depth > MAX_DEPTH { return Err("expression nested too deeply".into()); }
+                let r = self.unary(); self.depth -= 1; Ok(Expr::Un(o, Box::new(r?)))
+            }
             _ => self.atom(),
         }
     }
@@ -148,7 +158,7 @@ pub struct Compiled { expr: Expr, n_aggs: usize }
 pub fn compile(src: &str) -> Result<Compiled, String> {
     let t = lex(src)?;
     if t.is_empty() { return Err("empty expression".into()); }
-    let mut p = Parser { t, p: 0, aggs: 0 };
+    let mut p = Parser { t, p: 0, aggs: 0, depth: 0 };
     let expr = p.bin(0)?;
     if p.p < p.t.len() { return Err(format!("unexpected token at position {}", p.p)); }
     Ok(Compiled { expr, n_aggs: p.aggs })
@@ -213,7 +223,7 @@ impl Compiled {
                 "min" => AggVal::Scalar(col.iter().cloned().fold(f64::MAX, f64::min)),
                 "count" => AggVal::Scalar(files.iter().filter(|f| eval(col_expr, f, &vals).truthy()).count() as f64),
                 _ => {
-                    let k = eval(&args[0], &files[0.min(files.len().saturating_sub(1))], &vals).num().max(0.0) as usize;
+                    let k = eval(&args[0], &files[0], &vals).num().max(0.0) as usize;
                     let mut s = col.clone();
                     let top = name == "top";
                     s.sort_by(|a, b| if top { b.partial_cmp(a).unwrap() } else { a.partial_cmp(b).unwrap() });
@@ -234,7 +244,7 @@ pub fn filter(files: &[FileStat], src: &str) -> Result<Vec<usize>, String> {
 }
 
 /// Multi-key sort: "additions + deletions desc, name asc". Stable. Sorts `idx` in place.
-pub fn sort(files: &[FileStat], idx: &mut Vec<usize>, src: &str) -> Result<(), String> {
+pub fn sort(files: &[FileStat], idx: &mut [usize], src: &str) -> Result<(), String> {
     if src.trim().is_empty() { return Ok(()); }
     let mut keys = Vec::new();
     for part in split_top(src) {
@@ -304,6 +314,32 @@ mod tests {
     #[test] fn never_panics_on_garbage() {
         for s in ["", "&&", "))((", "\"", "/", "~", "1 +", "top(", "top(1)", "a b c", "@@", "avg()", "!!!!"] { let _ = filter(&files(), s); }
     }
+}
+
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+    use perusal_diff::Status;
+    struct Rng(u64);
+    impl Rng { fn next(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 } fn pick<'a>(&mut self, v: &[&'a str]) -> &'a str { v[(self.next() % v.len() as u64) as usize] } }
+    const PIECES: [&str; 40] = ["additions", "name", "path", "viewed", "noisy", "top(", "avg(", "count(", ")", "(", ",", "&&", "||", "!", "~", "/x+/", "/", "\"", "\"a\"", "1", "2.5", ".", "+", "-", "*", "%", ">", "<=", "==", "=", " ", "\u{0}", "é", "😀", "\\", "[", "]", "{", "bottom(", "status"];
+    #[test] fn random_inputs_never_panic_or_hang() {
+        let files = vec![FileStat::new("a.rs", Status::Added, 3, 1), FileStat::new("b/c.py", Status::Modified, 0, 9)];
+        let mut r = Rng(0x9E3779B97F4A7C15);
+        for _ in 0..30_000 {
+            let n = (r.next() % 12) as usize; let s: String = (0..n).map(|_| r.pick(&PIECES)).collect();
+            let _ = filter(&files, &s); let mut idx = vec![0, 1]; let _ = sort(&files, &mut idx, &s); let _ = complete(&s);
+        }
+        // mutations of valid expressions
+        let valid = ["additions > avg(additions) && name ~ /test/ && !viewed", "top(10, additions + deletions)", "status == \"added\" || noisy"];
+        for v in valid { for i in 0..v.len() { if !v.is_char_boundary(i) { continue; } let mut m = v.to_string(); m.truncate(i); let _ = filter(&files, &m); let mut m2 = v.to_string(); m2.insert_str(i, r.pick(&PIECES)); let _ = filter(&files, &m2); } }
+    }
+    #[test] fn deep_nesting_is_rejected_not_overflowed() {
+        let deep = format!("{}1{}", "(".repeat(100_000), ")".repeat(100_000)); assert!(filter(&files_one(), &deep).unwrap_err().contains("too deeply"));
+        assert!(filter(&files_one(), &"!".repeat(100_000)).is_err());
+        assert!(filter(&files_one(), &format!("{}1", "-".repeat(100_000))).is_err());
+    }
+    fn files_one() -> Vec<FileStat> { vec![FileStat::new("a", Status::Added, 1, 1)] }
 }
 
 #[cfg(test)]

@@ -106,7 +106,7 @@ mod tests {
     #[test] fn clone_fetch_and_commits() {
         let d = std::env::temp_dir().join(format!("perusal-go-{}", std::process::id())); let _ = std::fs::remove_dir_all(&d);
         let up = d.join("up"); std::fs::create_dir_all(&up).unwrap();
-        let g = |a: &[&str]| { git(&up, &["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap(); };
+        let g = |a: &[&str]| { git(&up, ["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap(); };
         g(&["init", "-q", "-b", "main"]); std::fs::write(up.join("a"), "1").unwrap(); g(&["add", "-A"]); g(&["commit", "-qm", "base"]);
         g(&["checkout", "-qb", "pr"]); std::fs::write(up.join("a"), "2").unwrap(); g(&["commit", "-qam", "change"]);
         g(&["update-ref", "refs/pull/7/head", "HEAD"]); g(&["checkout", "-q", "main"]);
@@ -126,10 +126,11 @@ mod tests {
         let d = std::env::temp_dir().join(format!("perusal-gr-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst))); let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap(); d
     }
-    fn g(d: &Path, a: &[&str]) -> String { git(d, &["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap() }
+    fn g(d: &Path, a: &[&str]) -> String { git(d, ["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap() }
     #[test] fn graph_range_and_local_base() {
         let d = repo(); g(&d, &["init", "-q", "-b", "main"]);
-        for (f, c) in [("a", "1")] { std::fs::write(d.join(f), c).unwrap(); } g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "base"]);
+        {
+        let (f, c) = ("a", "1"); std::fs::write(d.join(f), c).unwrap(); } g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "base"]);
         g(&d, &["checkout", "-qb", "feat"]);
         std::fs::write(d.join("x"), "x").unwrap(); g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "c1"]);
         std::fs::write(d.join("y"), "y").unwrap(); g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "c2"]);

@@ -3,7 +3,7 @@ use perusal_core::store::Store;
 use perusal_gitops::{git, show};
 use std::path::{Path, PathBuf};
 
-fn g(d: &Path, a: &[&str]) -> String { git(d, &["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap() }
+fn g(d: &Path, a: &[&str]) -> String { git(d, ["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap() }
 fn repo(n: &str) -> PathBuf { let d = std::env::temp_dir().join(format!("perusal-fl-{}-{n}", std::process::id())); let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap(); g(&d, &["init", "-q", "-b", "main"]); d }
 fn commit(d: &Path, f: &str, c: &str, m: &str) { std::fs::write(d.join(f), c).unwrap(); g(d, &["add", "-A"]); g(d, &["commit", "-qm", m]); }
 

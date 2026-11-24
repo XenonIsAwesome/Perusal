@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! SQLite persistence: reviews, viewed marks, drafts, journal. Tokens never go here.
 use rusqlite::{params, Connection, Result};
 
@@ -92,6 +93,16 @@ impl Store {
     pub fn messages(&self, review: i64) -> Result<Vec<(String, String)>> {
         let mut s = self.conn.prepare("SELECT role,text FROM chat WHERE review=?1 ORDER BY id")?; let r = s.query_map(params![review], |r| Ok((r.get(0)?, r.get(1)?)))?.collect(); r
     }
+    pub fn set_state(&self, review: i64, state: &str) -> Result<()> { self.conn.execute("UPDATE reviews SET state=?2 WHERE id=?1", params![review, state])?; Ok(()) }
+    pub fn set_pinned(&self, review: i64, pinned: bool) -> Result<()> { self.conn.execute("UPDATE reviews SET pinned=?2 WHERE id=?1", params![review, pinned])?; Ok(()) }
+    /// Retention: reviews stay until submitted or discarded; submitted/merged ones expire after `days`; pinned never expire.
+    /// `now` is unix seconds. Returns how many were removed.
+    pub fn expire(&self, now: i64, days: i64) -> Result<usize> {
+        let mut s = self.conn.prepare("SELECT id FROM reviews WHERE pinned=0 AND state IN ('submitted','merged') AND last_opened < ?1")?;
+        let ids: Vec<i64> = s.query_map(params![now - days * 86400], |r| r.get(0))?.collect::<Result<_>>()?;
+        for id in &ids { self.discard(*id)?; }
+        Ok(ids.len())
+    }
     pub fn discard(&self, review: i64) -> Result<()> {
         for t in ["viewed", "drafts", "journal", "chat"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
@@ -136,6 +147,15 @@ mod tests {
         assert_eq!(s.messages(r).unwrap().len(), 2);
         let m = s.messages(r).unwrap(); s.add_draft(r, Some("a"), Some((1, 1)), &m[1].1, true).unwrap(); assert!(s.drafts(r).unwrap()[0].ai);
         s.discard(r).unwrap(); assert!(s.messages(r).unwrap().is_empty());
+    }
+    #[test] fn retention() {
+        let s = Store::memory().unwrap();
+        let a = s.open_review("a", "a", "h", 1).unwrap(); let b = s.open_review("b", "b", "h", 1).unwrap(); let c = s.open_review("c", "c", "h", 1).unwrap(); let d = s.open_review("d", "d", "h", 1).unwrap();
+        s.set_state(a, "submitted").unwrap(); s.set_state(b, "submitted").unwrap(); s.set_pinned(b, true).unwrap(); s.set_state(c, "merged").unwrap();
+        let _ = d; // open and unsubmitted: kept forever
+        let far = 4_000_000_000; assert_eq!(s.expire(far, 30).unwrap(), 2);
+        let left: Vec<String> = s.recent().unwrap().into_iter().map(|r| r.1).collect(); assert!(left.contains(&"b".to_string()) && left.contains(&"d".to_string()) && left.len() == 2);
+        assert_eq!(s.expire(0, 30).unwrap(), 0);
     }
     #[test] fn survives_reopen_on_disk() {
         let p = std::env::temp_dir().join(format!("perusal-db-{}.sqlite", std::process::id())); let ps = p.to_str().unwrap();

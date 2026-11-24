@@ -25,6 +25,8 @@ enum Cmd {
     Draft { repo: PathBuf, branch: String, body: String, #[arg(long)] file: Option<String>, #[arg(long)] line: Option<u32>, #[arg(long)] ai: bool },
     /// Open an MR/PR from its https URL and print its info and CI state. `--api` overrides the API base (tests, mocks).
     Mr { url: String, #[arg(long)] api: Option<String>, #[arg(long, env = "PERUSAL_TOKEN", default_value = "")] token: String },
+    /// Benchmark open/filter/sort on a generated synthetic MR and check the spec budgets (use a release build).
+    Bench { #[arg(long, default_value_t = 10_000)] files: usize, #[arg(long, default_value_t = 500_000)] lines: usize },
     /// Export drafts as Markdown.
     Export { repo: PathBuf, branch: String },
 }
@@ -81,6 +83,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let i = p.mr_info(&r).await?;
             println!("{} [{}] by {} @ {}", i.title, i.state, i.author, i.head_sha);
             println!("ci: {:?}", p.ci(&r, &i.head_sha).await?);
+        }
+        Cmd::Bench { files, lines } => {
+            let d = std::env::temp_dir().join(format!("perusal-bench-{}", std::process::id()));
+            perusal_cli::generate(&d, files, lines)?;
+            let t = std::time::Instant::now();
+            let idx = perusal_diff::index_range(&d, "main", "feature")?;
+            let open = t.elapsed();
+            let t = std::time::Instant::now();
+            let mut sel = perusal_filter::filter(&idx, "additions > avg(additions) && path ~ /m4/ || top(50, additions + deletions)")?;
+            let filt = t.elapsed();
+            let t = std::time::Instant::now();
+            perusal_filter::sort(&idx, &mut sel, "additions + deletions desc, name asc")?;
+            let srt = t.elapsed();
+            let rss_mb = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmHWM")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0) / 1024;
+            println!("files={} open={open:?} filter={filt:?} sort={srt:?} peak_rss={rss_mb}MB", idx.len());
+            let _ = std::fs::remove_dir_all(&d);
+            let ok = open.as_millis() < 1000 && filt.as_millis() < 100 && srt.as_millis() < 100 && rss_mb < 1024;
+            println!("budget (open<1s, filter<100ms, sort<100ms, mem<1GB): {}", if ok { "PASS" } else { "FAIL" });
+            if !ok { std::process::exit(1); }
         }
         Cmd::Export { repo, branch } => {
             let store = Store::open(&cli.db)?; let r = open(&store, &repo, &branch, "main")?; print!("{}", store.export_markdown(r)?);

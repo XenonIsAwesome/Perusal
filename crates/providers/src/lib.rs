@@ -60,6 +60,17 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+/// What the app does about an error. Offline keeps local review fully usable; drafts are never lost.
+#[derive(Debug, PartialEq)]
+pub enum Action { Relogin, RetryAfter(u64), WorkOffline, HideControl, ShowMessage }
+
+impl Error {
+    pub fn action(&self) -> Action {
+        match self { Error::Unauthorized => Action::Relogin, Error::RateLimited(s) => Action::RetryAfter(s.unwrap_or(60)),
+            Error::Offline(_) => Action::WorkOffline, Error::Unsupported(_) => Action::HideControl, Error::Http(..) => Action::ShowMessage }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[async_trait]
@@ -98,6 +109,10 @@ pub(crate) async fn check(resp: std::result::Result<reqwest::Response, reqwest::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn error_actions() {
+        assert_eq!(Error::Unauthorized.action(), Action::Relogin); assert_eq!(Error::RateLimited(Some(5)).action(), Action::RetryAfter(5)); assert_eq!(Error::RateLimited(None).action(), Action::RetryAfter(60));
+        assert_eq!(Error::Offline("x".into()).action(), Action::WorkOffline); assert_eq!(Error::Unsupported("x").action(), Action::HideControl);
+    }
     #[test] fn urls() {
         assert_eq!(parse_mr_url("https://github.com/o/r/pull/12/files").unwrap(), MrRef { kind: Kind::GitHub, host: "github.com".into(), project: "o/r".into(), number: 12 });
         let g = parse_mr_url("https://git.corp/a/b/c/-/merge_requests/9?x=1").unwrap();

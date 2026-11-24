@@ -1,0 +1,34 @@
+# Using Perusal
+
+## Headless review (`perusal-cli`)
+```bash
+perusal-cli files <repo> <branch> --base main --filter 'additions > 50 && !viewed' --sort 'additions + deletions desc, name asc'
+perusal-cli files <repo> <branch> --group          # related files batched (foo.h + foo.cpp, foo.ts + foo.test.ts)
+perusal-cli view <repo> <branch> <path>            # mark viewed (--unset to clear)
+perusal-cli draft <repo> <branch> "text" --file f --line 12 [--ai]
+perusal-cli export <repo> <branch>                 # Markdown of drafts
+perusal-cli mr https://github.com/o/r/pull/3       # needs PERUSAL_TOKEN
+```
+State lives in `perusal.sqlite` (override with `--db`). Drafts and viewed marks persist across crashes.
+
+## Filter language
+Fields: name path ext language status binary generated additions deletions net ratio hunks size viewed comments unresolved ai noisy changed.
+Operators: `&& || ! == != < <= > >= + - * / %`, regex match `~ /re/`, substring `~ "text"`.
+Aggregates over all files: `avg() sum() max() min() count() top(n, expr) bottom(n, expr)`.
+Examples: `additions > avg(additions)`, `name ~ /test/ && !viewed`, `top(10, additions + deletions)`.
+Sort: any expressions, comma separated, each optionally `asc` or `desc`.
+
+## Presets, keys, themes
+Presets are TOML (global and per project, keyed by normalized remote URL); a project default auto-applies.
+Keymap overrides go in `keymap.toml` under `[keys]`. Themes: see `crates/app/themes/agents.md`; check with `perusal theme check`.
+
+## Hosts and tokens
+GitHub/GitLab (cloud and self-hosted). Tokens are stored in a mode-0600 file outside the database (keychain support pending).
+Custom CA files per host. SSH keys only cover git transport; commenting needs a token.
+
+## Agents
+Agents run read-only in a checkout of the reviewed head, with a minimal environment (no tokens). Their output is only ever
+saved as AI-tagged drafts. Edit `skills/review.md` to change the review prompt.
+
+## Browser extension
+`extension/build.sh` builds Chromium and Firefox zips. Add self-hosted domains in the extension options.
