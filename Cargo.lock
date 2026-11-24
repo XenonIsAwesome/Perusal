@@ -804,6 +804,7 @@ dependencies = [
  "perusal-core",
  "perusal-diff",
  "perusal-filter",
+ "perusal-gitops",
  "serde",
  "toml",
 ]

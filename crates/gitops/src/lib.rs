@@ -57,6 +57,47 @@ pub fn commits(dir: &Path, base: &str, head: &str) -> Result<Vec<(String, Vec<St
     Ok(out.lines().filter_map(|l| { let p: Vec<&str> = l.splitn(3, '\t').collect(); (p.len() == 3).then(|| (p[0].into(), p[1].split_whitespace().map(String::from).collect(), p[2].into())) }).collect())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphRow { pub sha: String, pub parents: Vec<String>, pub subject: String, pub in_mr: bool, pub lane: usize }
+
+/// Commit graph rows newest first: the MR's commits (`base..head`) plus `context` commits of target-branch history.
+/// Lanes: the MR line is lane 0, target-branch context lane 1.
+pub fn graph(dir: &Path, base: &str, head: &str, context: usize) -> Result<Vec<GraphRow>> {
+    let mr: Vec<_> = commits(dir, base, head)?;
+    let mut rows: Vec<GraphRow> = mr.iter().rev().map(|(s, p, t)| GraphRow { sha: s.clone(), parents: p.clone(), subject: t.clone(), in_mr: true, lane: 0 }).collect();
+    let out = git(dir, &["log", &format!("-{context}"), "--format=%H%x09%P%x09%s", base])?;
+    for l in out.lines() {
+        let p: Vec<&str> = l.splitn(3, '\t').collect();
+        if p.len() == 3 { rows.push(GraphRow { sha: p[0].into(), parents: p[1].split_whitespace().map(String::from).collect(), subject: p[2].into(), in_mr: false, lane: 1 }); }
+    }
+    Ok(rows)
+}
+
+/// Files touched by a commit (`from == None`) or by the range `from..to`.
+pub fn files_in(dir: &Path, from: Option<&str>, to: &str) -> Result<Vec<String>> {
+    let out = match from {
+        None => git(dir, &["diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--root", to])?,
+        Some(f) => git(dir, &["diff", "--name-only", f, to])?,
+    };
+    Ok(out.lines().map(String::from).collect())
+}
+
+/// Default branch: origin/HEAD target if known, else `main` or `master` if present.
+pub fn default_branch(dir: &Path) -> Result<String> {
+    if let Ok(r) = git(dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) { return Ok(r); }
+    for b in ["main", "master"] { if git(dir, &["rev-parse", "--verify", "-q", b]).is_ok() { return Ok(b.into()); } }
+    Err("cannot determine the default branch".into())
+}
+
+/// Base for a local-branch review: merge-base of the branch and the default branch (or an explicit override).
+pub fn local_base(dir: &Path, branch: &str, override_base: Option<&str>) -> Result<String> {
+    let b = match override_base { Some(b) => b.to_string(), None => default_branch(dir)? };
+    merge_base(dir, &b, branch)
+}
+
+/// File content at a revision, if present.
+pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> { git(dir, &["show", &format!("{rev}:{path}")]).ok() }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +117,29 @@ mod tests {
         let mb = merge_base(&c, "refs/perusal/mr/7", "main").unwrap();
         let cs = commits(&c, &mb, &sha).unwrap();
         assert_eq!(cs.len(), 1); assert_eq!(cs[0].2, "change");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn repo() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!("perusal-gr-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst))); let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap(); d
+    }
+    fn g(d: &Path, a: &[&str]) -> String { git(d, &["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap() }
+    #[test] fn graph_range_and_local_base() {
+        let d = repo(); g(&d, &["init", "-q", "-b", "main"]);
+        for (f, c) in [("a", "1")] { std::fs::write(d.join(f), c).unwrap(); } g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "base"]);
+        g(&d, &["checkout", "-qb", "feat"]);
+        std::fs::write(d.join("x"), "x").unwrap(); g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "c1"]);
+        std::fs::write(d.join("y"), "y").unwrap(); g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "c2"]);
+        let base = local_base(&d, "feat", None).unwrap();
+        let rows = graph(&d, &base, "feat", 5).unwrap();
+        assert_eq!(rows.iter().filter(|r| r.in_mr).count(), 2); assert_eq!(rows[0].subject, "c2"); assert!(rows.last().map(|r| !r.in_mr).unwrap());
+        let c1 = rows[1].sha.clone(); let c2 = rows[0].sha.clone();
+        assert_eq!(files_in(&d, None, &c1).unwrap(), vec!["x"]); assert_eq!(files_in(&d, None, &c2).unwrap(), vec!["y"]);
+        let mut both = files_in(&d, Some(&base), "feat").unwrap(); both.sort(); assert_eq!(both, vec!["x", "y"]);
+        assert_eq!(show(&d, "feat", "x").unwrap(), "x"); assert!(show(&d, "main", "x").is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

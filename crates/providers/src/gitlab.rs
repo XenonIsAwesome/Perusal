@@ -66,4 +66,23 @@ impl Provider for GitLab {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/projects/{}/merge_requests?state=opened", utf8_percent_encode(project, NON_ALPHANUMERIC))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v.iter().map(|p| (p["iid"].as_u64().unwrap_or(0), p["title"].as_str().unwrap_or("").to_string())).collect())
     }
+    async fn reply(&self, r: &MrRef, thread: &str, body: &str) -> Result<()> {
+        check(self.req(reqwest::Method::POST, &format!("{}/discussions/{thread}/notes", Self::mr(r))).json(&json!({"body": body})).send().await).await.map(|_| ())
+    }
+    async fn resolve(&self, r: &MrRef, thread: &str, resolved: bool) -> Result<()> {
+        check(self.req(reqwest::Method::PUT, &format!("{}/discussions/{thread}", Self::mr(r))).json(&json!({"resolved": resolved})).send().await).await.map(|_| ())
+    }
+    async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        check(self.req(reqwest::Method::POST, &format!("{}/notes/{comment}/award_emoji", Self::mr(r))).json(&json!({"name": emoji})).send().await).await.map(|_| ())
+    }
+    async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
+        check(self.req(reqwest::Method::PUT, &format!("{}/notes/{comment}", Self::mr(r))).json(&json!({"body": body})).send().await).await.map(|_| ())
+    }
+    async fn delete_comment(&self, r: &MrRef, _thread: &str, comment: &str) -> Result<()> {
+        check(self.req(reqwest::Method::DELETE, &format!("{}/notes/{comment}", Self::mr(r))).send().await).await.map(|_| ())
+    }
+    async fn find_for_branch(&self, project: &str, branch: &str) -> Result<Option<u64>> {
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/projects/{}/merge_requests?state=opened&source_branch={}", utf8_percent_encode(project, NON_ALPHANUMERIC), utf8_percent_encode(branch, NON_ALPHANUMERIC))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.first().and_then(|p| p["iid"].as_u64()))
+    }
 }

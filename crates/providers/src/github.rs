@@ -69,4 +69,28 @@ impl Provider for GitHub {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{project}/pulls?state=open")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v.iter().map(|p| (p["number"].as_u64().unwrap_or(0), p["title"].as_str().unwrap_or("").to_string())).collect())
     }
+    async fn reply(&self, r: &MrRef, thread: &str, body: &str) -> Result<()> {
+        check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/{}/comments/{thread}/replies", r.project, r.number)).json(&json!({"body": body})).send().await).await.map(|_| ())
+    }
+    async fn resolve(&self, _r: &MrRef, thread: &str, resolved: bool) -> Result<()> {
+        // `thread` is the GraphQL review-thread node id here.
+        let gql = if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) };
+        let m = if resolved { "resolveReviewThread" } else { "unresolveReviewThread" };
+        let q = json!({"query": format!("mutation($t:ID!){{{m}(input:{{threadId:$t}}){{thread{{id}}}}}}"), "variables": {"t": thread}});
+        check(self.http.post(&gql).bearer_auth(&self.token).json(&q).send().await).await.map(|_| ())
+    }
+    async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/comments/{comment}/reactions", r.project)).json(&json!({"content": emoji})).send().await).await.map(|_| ())
+    }
+    async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
+        check(self.req(reqwest::Method::PATCH, &format!("/repos/{}/pulls/comments/{comment}", r.project)).json(&json!({"body": body})).send().await).await.map(|_| ())
+    }
+    async fn delete_comment(&self, r: &MrRef, _thread: &str, comment: &str) -> Result<()> {
+        check(self.req(reqwest::Method::DELETE, &format!("/repos/{}/pulls/comments/{comment}", r.project)).send().await).await.map(|_| ())
+    }
+    async fn find_for_branch(&self, project: &str, branch: &str) -> Result<Option<u64>> {
+        let owner = project.split('/').next().unwrap_or("");
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{project}/pulls?state=open&head={owner}:{branch}")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.first().and_then(|p| p["number"].as_u64()))
+    }
 }

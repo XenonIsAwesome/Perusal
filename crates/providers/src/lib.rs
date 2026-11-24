@@ -73,6 +73,14 @@ pub trait Provider: Send + Sync {
     /// Sync a viewed mark to the host; hosts without support return `Unsupported` and the mark stays local.
     async fn set_viewed(&self, r: &MrRef, path: &str, viewed: bool) -> Result<()>;
     async fn list_open(&self, project: &str) -> Result<Vec<(u64, String)>>;
+    /// Thread actions go to the host immediately, outside the pending review.
+    async fn reply(&self, _r: &MrRef, _thread: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("reply")) }
+    async fn resolve(&self, _r: &MrRef, _thread: &str, _resolved: bool) -> Result<()> { Err(Error::Unsupported("resolve")) }
+    async fn react(&self, _r: &MrRef, _thread: &str, _comment: &str, _emoji: &str) -> Result<()> { Err(Error::Unsupported("reactions")) }
+    async fn edit_comment(&self, _r: &MrRef, _thread: &str, _comment: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("edit")) }
+    async fn delete_comment(&self, _r: &MrRef, _thread: &str, _comment: &str) -> Result<()> { Err(Error::Unsupported("delete")) }
+    /// Open MR/PR number whose source branch is `branch`, for attaching a local-branch review.
+    async fn find_for_branch(&self, project: &str, branch: &str) -> Result<Option<u64>>;
 }
 
 pub(crate) async fn check(resp: std::result::Result<reqwest::Response, reqwest::Error>) -> Result<reqwest::Response> {

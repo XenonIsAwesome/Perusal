@@ -18,3 +18,4 @@ perusal-diff.workspace = true
 perusal-filter.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+perusal-gitops = { path = "../gitops" }

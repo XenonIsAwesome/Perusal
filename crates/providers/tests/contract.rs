@@ -75,3 +75,30 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     let d = auth::device_start(&c, &s.uri(), "cid").await.unwrap(); assert_eq!(d.user_code, "UC");
     assert_eq!(auth::device_poll(&c, &s.uri(), "cid", &d, 3).await.unwrap(), "tok");
 }
+
+#[tokio::test] async fn thread_parity_github() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/repos/o/r/pulls/3/comments/9/replies")).respond_with(ResponseTemplate::new(201)).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/repos/o/r/pulls/comments/9/reactions")).respond_with(ResponseTemplate::new(201)).expect(1).mount(&s).await;
+    Mock::given(method("PATCH")).and(path("/repos/o/r/pulls/comments/9")).and(body_partial_json(json!({"body":"new"}))).respond_with(ResponseTemplate::new(200)).expect(1).mount(&s).await;
+    Mock::given(method("DELETE")).and(path("/repos/o/r/pulls/comments/9")).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{}}))).expect(1).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"number":3,"title":"t"}]))).mount(&s).await;
+    let g = gh(&s);
+    g.reply(&ghref(), "9", "hi").await.unwrap(); g.react(&ghref(), "9", "9", "+1").await.unwrap(); g.edit_comment(&ghref(), "9", "9", "new").await.unwrap();
+    g.delete_comment(&ghref(), "9", "9").await.unwrap(); g.resolve(&ghref(), "PRRT_x", true).await.unwrap();
+    assert_eq!(g.find_for_branch("o/r", "feat").await.unwrap(), Some(3));
+}
+#[tokio::test] async fn thread_parity_gitlab() {
+    let s = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("POST")).and(path(format!("{b}/discussions/d1/notes"))).respond_with(ResponseTemplate::new(201)).expect(1).mount(&s).await;
+    Mock::given(method("PUT")).and(path(format!("{b}/discussions/d1"))).and(body_partial_json(json!({"resolved":false}))).respond_with(ResponseTemplate::new(200)).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path(format!("{b}/notes/5/award_emoji"))).respond_with(ResponseTemplate::new(201)).expect(1).mount(&s).await;
+    Mock::given(method("PUT")).and(path(format!("{b}/notes/5"))).respond_with(ResponseTemplate::new(200)).expect(1).mount(&s).await;
+    Mock::given(method("DELETE")).and(path(format!("{b}/notes/5"))).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests")).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&s).await;
+    let g = gl(&s);
+    g.reply(&glref(), "d1", "x").await.unwrap(); g.resolve(&glref(), "d1", false).await.unwrap(); g.react(&glref(), "d1", "5", "thumbsup").await.unwrap();
+    g.edit_comment(&glref(), "d1", "5", "y").await.unwrap(); g.delete_comment(&glref(), "d1", "5").await.unwrap();
+    assert_eq!(g.find_for_branch("g/p", "feat").await.unwrap(), None);
+}
