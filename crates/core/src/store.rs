@@ -69,6 +69,23 @@ impl Store {
         }
         Ok(out)
     }
+    /// Moves a review to a new head, re-anchoring drafts via `content(file, which)` where which = old/new head.
+    /// Returns ids of drafts that could not be re-anchored (flagged for manual placement).
+    pub fn move_head(&self, review: i64, new_head: &str, content: &dyn Fn(&str, bool) -> Option<String>) -> Result<Vec<i64>> {
+        let mut lost = Vec::new();
+        for d in self.drafts(review)? {
+            let (Some(f), Some(a), Some(b)) = (&d.file, d.start_line, d.end_line) else { continue };
+            let moved = match (content(f, true), content(f, false)) {
+                (Some(o), Some(n)) => perusal_diff::text::reanchor(&o, &n, (a, b)), _ => None };
+            match moved {
+                Some((x, y)) => { self.conn.execute("UPDATE drafts SET start_line=?2,end_line=?3 WHERE id=?1", params![d.id, x, y])?; }
+                None => lost.push(d.id),
+            }
+        }
+        self.conn.execute("UPDATE reviews SET head=?2 WHERE id=?1", params![review, new_head])?;
+        self.log(review, &format!("moved head {new_head}"))?;
+        Ok(lost)
+    }
     pub fn discard(&self, review: i64) -> Result<()> {
         for t in ["viewed", "drafts", "journal"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
@@ -98,6 +115,14 @@ mod tests {
         assert!(md.contains("`a.rs:3-5`") && md.contains("why this?") && md.contains("(AI)"));
         assert_eq!(s.recent().unwrap()[0].4, 2);
         s.discard(r).unwrap(); assert!(s.recent().unwrap().is_empty());
+    }
+    #[test] fn move_head_reanchors() {
+        let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h1", 1).unwrap();
+        let ok = s.add_draft(r, Some("f"), Some((3, 3)), "keep", false).unwrap();
+        let gone = s.add_draft(r, Some("f"), Some((2, 2)), "edited line", false).unwrap();
+        let lost = s.move_head(r, "h2", &|_, old| Some(if old { "a\nb\nc\n".into() } else { "z\na\nB\nc\n".into() })).unwrap();
+        assert_eq!(lost, vec![gone]); assert_eq!(s.pinned_head(r).unwrap(), "h2");
+        assert_eq!(s.drafts(r).unwrap().iter().find(|d| d.id == ok).unwrap().start_line, Some(4));
     }
     #[test] fn survives_reopen_on_disk() {
         let p = std::env::temp_dir().join(format!("perusal-db-{}.sqlite", std::process::id())); let ps = p.to_str().unwrap();

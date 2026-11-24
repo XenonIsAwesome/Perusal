@@ -3,3 +3,9 @@ name = "perusal-diff"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+similar = { version = "2", features = ["inline"] }
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
