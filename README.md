@@ -10,8 +10,13 @@ reviews, GitHub/GitLab providers against mocks, ACP agent integration, themes, k
 packaging scripts). A first GPUI window reviews a local branch. It is early: see `DECISIONS.md` for what it lacks.
 
 ```bash
-cargo run --release -p perusal-ui -- /path/to/repo my-branch --base main
+target/release/perusal                              # Home: recent reviews, open local, open from URL, browse remote MRs
+target/release/perusal /path/to/repo my-branch      # straight into a local review (--base <ref> optional)
+target/release/perusal https://github.com/o/r/pull/1  # straight into a remote review
 ```
+Home keys: Tab / Shift+Tab move between fields, Enter runs the focused action, click also works. Esc in a review returns Home.
+Remote reviews need a token for private repos (the app asks and stores it under `~/.config/perusal/tokens`, mode 0600).
+Data lives in `~/.local/share/perusal` (override with `PERUSAL_HOME`; `PERUSAL_CA_FILE` adds a CA certificate).
 Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl +/-/0` zoom.
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
 and `libwayland-dev` to build. `perusal-cli` is the headless harness.

@@ -4263,6 +4263,8 @@ dependencies = [
  "perusal-diff",
  "perusal-filter",
  "perusal-gitops",
+ "perusal-providers",
+ "tokio",
 ]
 
 [[package]]

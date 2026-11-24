@@ -23,6 +23,32 @@ pub fn redact(s: &str) -> String {
     out
 }
 
+fn b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 { if i <= c.len() { out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char) } else { out.push('=') } }
+    }
+    out
+}
+
+static AUTH: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Registers a token for `host`, passed to git as a host-scoped `http.<url>.extraHeader` through the process
+/// environment (GIT_CONFIG_*), so it is never written to disk and only sent to that host. This also covers the
+/// lazy blob fetches of partial clones.
+pub fn set_auth(host: &str, token: &str) {
+    let header = format!("Authorization: Basic {}", b64(format!("x-access-token:{token}").as_bytes()));
+    let mut a = AUTH.lock().unwrap();
+    a.retain(|(h, _)| h != host); a.push((host.to_string(), header));
+    for (i, (h, v)) in a.iter().enumerate() {
+        std::env::set_var(format!("GIT_CONFIG_KEY_{i}"), format!("http.https://{h}/.extraHeader"));
+        std::env::set_var(format!("GIT_CONFIG_VALUE_{i}"), v);
+    }
+    std::env::set_var("GIT_CONFIG_COUNT", a.len().to_string());
+}
+
 /// Cache directory for a repository, keyed by normalized remote.
 pub fn cache_dir(root: &Path, normalized_remote: &str) -> PathBuf { root.join(normalized_remote.replace('/', "__")) }
 
@@ -101,6 +127,7 @@ pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> { git(dir, &["s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn base64_matches_known() { assert_eq!(b64(b"x-access-token:abc"), "eC1hY2Nlc3MtdG9rZW46YWJj"); assert_eq!(b64(b"ab"), "YWI="); assert_eq!(b64(b"a"), "YQ=="); }
     #[test] fn redacts() { assert_eq!(redact("fatal: https://u:tok@host/x.git bad"), "fatal: https://***@host/x.git bad"); }
     #[test] fn refspecs() { assert!(mr_refspec(true, 5).contains("merge-requests/5")); assert!(mr_refspec(false, 5).contains("pull/5")); }
     #[test] fn clone_fetch_and_commits() {

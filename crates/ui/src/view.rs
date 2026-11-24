@@ -1,47 +1,31 @@
 use gpui::{
-    div, prelude::*, px, relative, rgb, uniform_list, App, Bounds, Context, FocusHandle, Hsla, HighlightStyle, KeyDownEvent, SharedString, StyledText, Window,
-    WindowBounds, WindowOptions, size,
+    div, prelude::*, px, relative, rgb, uniform_list, Context, Hsla, HighlightStyle, KeyDownEvent, SharedString, StyledText, Window,
 };
-use perusal_app::{graph::GraphVm, theme::{self, Theme}, vm::ReviewVm};
-use perusal_core::store::Store;
+use crate::model::Model;
+use perusal_app::theme::{self, Theme};
 use perusal_diff::text::{diff_lines, highlight, Class, Kind, Line};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
-
-pub struct Model {
-    repo: PathBuf, base_sha: String, branch: String, store: Store, vm: ReviewVm, graph: GraphVm, title: String,
-}
-
-impl Model {
-    pub fn open(repo: &Path, branch: &str, base: Option<&str>, db: &str) -> Result<Self, String> {
-        let base_sha = perusal_gitops::local_base(repo, branch, base)?;
-        let files = perusal_diff::index_range(repo, &base_sha, branch).map_err(|e| e.to_string())?;
-        let store = Store::open(db).map_err(|e| e.to_string())?;
-        let key = format!("local:{}#{branch}", repo.canonicalize().unwrap_or(repo.into()).display());
-        let title = format!("{branch} (local)");
-        let review = store.open_review(&key, &title, branch, files.len() as u32).map_err(|e| e.to_string())?;
-        let vm = ReviewVm::new(&store, review, files);
-        let graph = GraphVm::load(repo, &base_sha, branch, 6)?;
-        Ok(Model { repo: repo.into(), base_sha, branch: branch.into(), store, vm, graph, title })
-    }
-}
 
 #[derive(PartialEq, Clone, Copy)]
 enum Mode { Normal, Filter, Comment }
 
 struct RLine { line: Line, runs: Vec<(Range<usize>, HighlightStyle)> }
 
-struct View {
-    m: Model, theme: Theme, focus: FocusHandle, mode: Mode, input: String, error: Option<String>, zoom: f32,
+pub struct Back;
+impl gpui::EventEmitter<Back> for View {}
+
+pub struct View {
+    m: Model, theme: Theme, mode: Mode, input: String, error: Option<String>, zoom: f32,
     shown_file: Option<usize>, rlines: Vec<RLine>, cursor_line: Option<u32>, status: String,
 }
 
-fn col(t: &std::collections::BTreeMap<String, String>, k: &str) -> Hsla {
+pub fn col(t: &std::collections::BTreeMap<String, String>, k: &str) -> Hsla {
     let h = t.get(k).map(|s| s.trim_start_matches('#')).unwrap_or("ff00ff");
     rgb(u32::from_str_radix(h, 16).unwrap_or(0xff00ff)).into()
 }
 
 impl View {
+    pub fn new(m: Model, theme: Theme) -> Self { View { m, theme, mode: Mode::Normal, input: String::new(), error: None, zoom: 1.0, shown_file: None, rlines: vec![], cursor_line: None, status: String::new() } }
     fn c_ui(&self, k: &str) -> Hsla { col(&self.theme.ui, k) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
 
@@ -74,7 +58,7 @@ impl View {
         }).collect();
     }
 
-    fn key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    pub fn key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &ev.keystroke; let key = ks.key.as_str();
         if ks.modifiers.control || ks.modifiers.platform {
             match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), "0" => self.zoom = theme::zoom(self.zoom, 0), _ => {} }
@@ -97,6 +81,7 @@ impl View {
             },
             Mode::Normal => {
                 match key {
+                    "escape" => { cx.emit(Back); return; }
                     "/" => { self.mode = Mode::Filter; self.input = self.m.vm.filter.clone(); }
                     "c" => { self.mode = Mode::Comment; self.input.clear(); }
                     "v" => if let Some(fi) = self.current_file() { let v = !self.m.vm.files[fi].viewed; for i in self.m.vm.current_batch().to_vec() { self.m.vm.set_viewed(&self.m.store, i, v); } },
@@ -170,14 +155,13 @@ impl Render for View {
                 }))
         }).collect();
 
-        let top: SharedString = format!("{}  ·  {}/{} viewed  ·  {} drafts  ·  batch {}/{}  ·  {}", self.m.title, viewed, total, ndrafts, self.m.vm.cursor + 1, self.m.vm.batch_count().max(1), if self.m.vm.grouping { "grouped" } else { "single files" }).into();
-        let help: SharedString = "n/p file  v viewed  Enter next  Backspace back  / filter  c comment  g group  x clear commit  Ctrl +/-/0 zoom".into();
+        let top: SharedString = format!("{}{}  ·  {}/{} viewed  ·  {} drafts  ·  batch {}/{}  ·  {}", self.m.title, self.m.remote.as_ref().map(|u| format!("  {u}")).unwrap_or_default(), viewed, total, ndrafts, self.m.vm.cursor + 1, self.m.vm.batch_count().max(1), if self.m.vm.grouping { "grouped" } else { "single files" }).into();
+        let help: SharedString = "Esc home  n/p file  v viewed  Enter next  Backspace back  / filter  c comment  g group  x clear commit  Ctrl +/-/0 zoom".into();
         let status: SharedString = self.error.clone().map(|e| format!("error: {e}")).unwrap_or_else(|| self.status.clone()).into();
         let cur_path: SharedString = current.map(|i| self.m.vm.files[i].path.clone()).unwrap_or_else(|| "no files match".into()).into();
         let _ = (added_bg, removed_bg);
 
         div().size_full().flex().flex_col().bg(bg).text_color(fg).text_size(fs).font_family("DejaVu Sans Mono")
-            .track_focus(&self.focus).on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| this.key(ev, cx)))
             .child(div().px_2().py_1().border_b_1().border_color(border).child(top))
             .child(div().h(px(4.0)).w_full().bg(border).child(div().h_full().w(relative(frac)).bg(accent)))
             .child(div().px_2().py_1().border_b_1().border_color(border).child(prompt))
@@ -189,15 +173,3 @@ impl Render for View {
     }
 }
 
-pub fn run(m: Model) {
-    gpui_platform::application().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1400.0), px(850.0)), cx);
-        let t = theme::builtin("dark").expect("built-in theme");
-        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, move |window, cx| {
-            let view = cx.new(|cx| { let focus = cx.focus_handle(); View { m, theme: t, focus, mode: Mode::Normal, input: String::new(), error: None, zoom: 1.0, shown_file: None, rlines: vec![], cursor_line: None, status: String::new() } });
-            window.focus(&view.read(cx).focus.clone(), cx);
-            view
-        }).unwrap();
-        cx.activate(true);
-    });
-}

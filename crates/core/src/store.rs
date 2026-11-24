@@ -5,6 +5,9 @@ use rusqlite::{params, Connection, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft { pub id: i64, pub file: Option<String>, pub start_line: Option<u32>, pub end_line: Option<u32>, pub body: String, pub ai: bool }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentRow { pub id: i64, pub key: String, pub title: String, pub viewed: u32, pub total: u32, pub drafts: u32, pub pinned: bool, pub state: String }
+
 pub struct Store { conn: Connection }
 
 impl Store {
@@ -107,6 +110,12 @@ impl Store {
         for t in ["viewed", "drafts", "journal", "chat"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
     }
+    /// Rows for the recent-reviews page, pinned first then most recently opened.
+    pub fn recent_rows(&self) -> Result<Vec<RecentRow>> {
+        let mut s = self.conn.prepare("SELECT r.id, r.key, r.title, (SELECT COUNT(*) FROM viewed v WHERE v.review=r.id), r.total_files,
+            (SELECT COUNT(*) FROM drafts d WHERE d.review=r.id), r.pinned, r.state FROM reviews r ORDER BY r.pinned DESC, r.last_opened DESC, r.id DESC")?;
+        let r = s.query_map([], |r| Ok(RecentRow { id: r.get(0)?, key: r.get(1)?, title: r.get(2)?, viewed: r.get(3)?, total: r.get(4)?, drafts: r.get(5)?, pinned: r.get::<_, i64>(6)? != 0, state: r.get(7)? }))?.collect(); r
+    }
     /// Recent-reviews page rows: (id, title, viewed, total, drafts, pinned).
     pub fn recent(&self) -> Result<Vec<(i64, String, u32, u32, u32, bool)>> {
         let mut s = self.conn.prepare("SELECT r.id, r.title, (SELECT COUNT(*) FROM viewed v WHERE v.review=r.id), r.total_files,
@@ -131,6 +140,7 @@ mod tests {
         let md = s.export_markdown(r).unwrap();
         assert!(md.contains("`a.rs:3-5`") && md.contains("why this?") && md.contains("(AI)"));
         assert_eq!(s.recent().unwrap()[0].4, 2);
+        let row = &s.recent_rows().unwrap()[0]; assert_eq!((row.key.as_str(), row.viewed, row.total, row.drafts), ("gh/o/r#1", 1, 4, 2));
         s.discard(r).unwrap(); assert!(s.recent().unwrap().is_empty());
     }
     #[test] fn move_head_reanchors() {
