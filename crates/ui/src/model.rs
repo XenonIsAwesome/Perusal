@@ -23,6 +23,8 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&d); d
 }
+pub fn tree_pref() -> bool { std::fs::read_to_string(data_dir().join("files_tree")).map(|s| s.trim() == "1").unwrap_or(false) }
+pub fn set_tree_pref(on: bool) { let _ = std::fs::write(data_dir().join("files_tree"), if on { "1" } else { "0" }); }
 pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
 pub fn token_store() -> FileStore {
     let d = std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."));

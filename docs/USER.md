@@ -32,3 +32,9 @@ saved as AI-tagged drafts. Edit `skills/review.md` to change the review prompt.
 
 ## Browser extension
 `extension/build.sh` builds Chromium and Firefox zips. Add self-hosted domains in the extension options.
+
+## Files panel
+Switch between **List** and **Tree** in the Files header (or press `t`; the choice is remembered). Tree mode groups files by directory,
+folders first, compresses single-child chains (`crates/ui/src`), and shows `viewed/total` and `+/−` for each folder.
+Click a folder to collapse or expand it; **Collapse all** and **Expand all** act on every folder. Moving with `n`/`p`/Enter follows the
+order shown in the tree and expands folders to reveal the current file.

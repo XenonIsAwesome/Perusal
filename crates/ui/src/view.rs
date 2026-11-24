@@ -3,6 +3,8 @@ use crate::model::Model;
 use gpui::{div, prelude::*, px, relative, uniform_list, Context, FontWeight, HighlightStyle, KeyDownEvent, SharedString, StyledText};
 use perusal_app::textfield::TextField;
 use perusal_app::theme::{self, Theme};
+use perusal_app::tree::{self, TreeRow};
+use std::collections::HashSet;
 use perusal_diff::text::{diff_lines, highlight, Class, Kind, Line};
 use perusal_diff::Status;
 use std::ops::Range;
@@ -18,15 +20,28 @@ impl gpui::EventEmitter<Back> for View {}
 pub struct View {
     m: Model, theme: Theme, pal: Pal, fonts: Fonts, mode: Mode, filter_f: TextField, comment_f: TextField, error: Option<String>, zoom: f32,
     shown_file: Option<usize>, rlines: Vec<RLine>, cursor_line: Option<u32>, status: String,
+    tree: bool, collapsed: HashSet<String>, rows: Vec<TreeRow>,
 }
 
 impl View {
-    pub fn new(m: Model, theme: Theme, fonts: Fonts) -> Self {
+    pub fn new(mut m: Model, theme: Theme, fonts: Fonts) -> Self {
         let filter = TextField::new(&m.vm.filter);
-        View { pal: Pal::new(&theme), m, theme, fonts, mode: Mode::Normal, filter_f: filter, comment_f: TextField::default(), error: None, zoom: 1.0, shown_file: None, rlines: vec![], cursor_line: None, status: String::new() }
+        let tree = crate::model::tree_pref(); m.vm.dir_order = tree; let _ = m.vm.refresh();
+        View { tree, collapsed: HashSet::new(), rows: vec![], pal: Pal::new(&theme), m, theme, fonts, mode: Mode::Normal, filter_f: filter, comment_f: TextField::default(), error: None, zoom: 1.0, shown_file: None, rlines: vec![], cursor_line: None, status: String::new() }
     }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
-    fn reload(&mut self) { self.shown_file = None; }
+    fn reload(&mut self) {
+        self.shown_file = None;
+        if self.tree { if let Some(fi) = self.current_file() { tree::expand_to(&mut self.collapsed, &self.m.vm.files[fi].path); } }
+    }
+    fn toggle_tree(&mut self) {
+        let keep = self.current_file();
+        self.tree = !self.tree; crate::model::set_tree_pref(self.tree);
+        self.m.vm.dir_order = self.tree; let _ = self.m.vm.refresh();
+        if let Some(fi) = keep { self.m.vm.select_file(fi); }
+        self.reload();
+    }
+    fn toggle_dir(&mut self, path: &str) { if !self.collapsed.remove(path) { self.collapsed.insert(path.to_string()); } }
 
     fn load_diff(&mut self) {
         let Some(fi) = self.current_file() else { self.rlines.clear(); self.shown_file = None; return };
@@ -87,7 +102,7 @@ impl View {
                 "escape" => { cx.emit(Back); return; }
                 "/" => self.mode = Mode::Filter, "c" => self.mode = Mode::Comment,
                 "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
-                "n" => self.step(1), "p" => self.step(-1), "g" => self.toggle_group(), "x" => self.clear_scope(),
+                "t" => self.toggle_tree(), "n" => self.step(1), "p" => self.step(-1), "g" => self.toggle_group(), "x" => self.clear_scope(),
                 _ => {}
             },
         }
@@ -129,15 +144,30 @@ impl Render for View {
         let mono = self.fonts.mono.clone();
         let cur = current.map(|i| self.m.vm.files[i].clone());
 
-        // ---- sidebar: files
-        let files_list = uniform_list("files", n_files, cx.processor(move |this, range: Range<usize>, _w, cx| {
-            let p = this.pal;
+        // ---- sidebar: files (flat list or directory tree)
+        if self.tree { self.rows = tree::build_rows(&self.m.vm.files, &self.m.vm.visible, &self.collapsed); }
+        let list_len = if self.tree { self.rows.len() } else { n_files };
+        let files_list = uniform_list("files", list_len, cx.processor(move |this, range: Range<usize>, _w, cx| {
+            let p = this.pal; let rh = px(30.0 * this.zoom);
             range.map(|row| {
-                let fi = this.m.vm.visible[row]; let f = &this.m.vm.files[fi];
+                if this.tree {
+                    if let TreeRow::Dir { path, name, depth, collapsed, total, viewed, additions, deletions } = this.rows[row].clone() {
+                        let done = viewed == total;
+                        let toggle_path = path.clone();
+                        return div().id(row).flex().items_center().gap_2().pl(px(8.0 + 14.0 * depth as f32)).pr_3().h(rh).w_full().cursor_pointer().hover(move |s| s.bg(p.hover))
+                            .on_click(cx.listener(move |this, _, _, cx| { this.toggle_dir(&toggle_path); cx.notify(); }))
+                            .child(div().w(px(12.0)).flex_none().text_xs().text_color(p.muted).child(if collapsed { "▸" } else { "▾" }))
+                            .child(div().min_w_0().flex_1().truncate().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(format!("{name}/")))
+                            .child(div().text_xs().flex_none().flex().gap_1().child(div().text_color(p.success).child(format!("+{additions}"))).child(div().text_color(p.danger).child(format!("−{deletions}"))))
+                            .child(div().flex_none().px_2().rounded_full().text_xs().font_weight(FontWeight::MEDIUM).text_color(if done { p.success } else { p.muted }).bg(if done { p.success.opacity(0.15) } else { p.hover }).child(format!("{viewed}/{total}")));
+                    }
+                }
+                let (fi, depth) = if this.tree { match this.rows[row] { TreeRow::File { fi, depth } => (fi, depth), _ => unreachable!() } } else { (this.m.vm.visible[row], 0) };
+                let f = &this.m.vm.files[fi];
                 let sel = this.m.vm.current_batch().contains(&fi);
                 let (letter, c) = status_style(f.status, &p);
-                let (dir, name) = match f.path.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n.to_string()), None => (String::new(), f.path.clone()) };
-                div().id(row).flex().items_center().gap_2().px_3().h(px(30.0 * this.zoom)).w_full().cursor_pointer()
+                let (dir, name) = if this.tree { (String::new(), f.name().to_string()) } else { match f.path.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n.to_string()), None => (String::new(), f.path.clone()) } };
+                div().id(row).flex().items_center().gap_2().pl(px(12.0 + if this.tree { 14.0 * depth as f32 + 14.0 } else { 0.0 })).pr_3().h(rh).w_full().cursor_pointer()
                     .border_l_2().border_color(if sel { p.accent } else { gpui::transparent_black() }).when(sel, |d| d.bg(p.accent.opacity(0.12))).hover(move |s| s.bg(p.hover))
                     .on_click(cx.listener(move |this, _, _, cx| { this.m.vm.select_file(fi); this.reload(); cx.notify(); }))
                     .child(div().size(px(18.0)).rounded_sm().flex().items_center().justify_center().text_xs().font_weight(FontWeight::BOLD).text_color(c).bg(c.opacity(0.15)).flex_none().child(letter))
@@ -147,6 +177,21 @@ impl Render for View {
                     .child(div().size(px(16.0)).flex_none().flex().items_center().justify_center().when(f.viewed, |d| d.rounded_full().bg(p.success).text_color(gpui::white()).text_xs().child("✓")))
             }).collect()
         })).flex_1().min_h_0().w_full();
+
+        // Files header: count plus List/Tree switch and expand/collapse all
+        let seg = |id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>| {
+            div().id(id).px_2().py(px(2.0)).text_xs().font_weight(FontWeight::MEDIUM).cursor_pointer().text_color(if on { p.fg } else { p.muted }).bg(if on { p.hover } else { gpui::transparent_black() }).hover(move |s| s.text_color(p.fg)).child(label)
+                .on_click(cx.listener(move |this, _, _, cx| { if this.tree != (id == "seg-tree") { this.toggle_tree(); } cx.notify(); }))
+        };
+        let tree_on = self.tree;
+        let files_header = div().flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(p.border).bg(p.surface)
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Files")).child(badge(format!("{n_files}"), p.muted, p.hover))
+            .child(div().flex_1())
+            .when(tree_on, |d| d
+                .child(div().id("exp-all").text_xs().text_color(p.accent).cursor_pointer().child("Expand all").on_click(cx.listener(|this, _, _, cx| { this.collapsed.clear(); cx.notify(); })))
+                .child(div().id("col-all").text_xs().text_color(p.accent).cursor_pointer().child("Collapse all").on_click(cx.listener(|this, _, _, cx| {
+                    this.collapsed = tree::all_dirs(&this.m.vm.files, &this.m.vm.visible).into_iter().collect(); cx.notify(); }))))
+            .child(div().flex().rounded_md().border_1().border_color(p.border).overflow_hidden().child(seg("seg-list", "List", !tree_on, cx)).child(seg("seg-tree", "Tree", tree_on, cx)));
 
         // ---- center: diff
         let diff = uniform_list("diff", self.rlines.len(), { let mono = mono.clone(); cx.processor(move |this, range: Range<usize>, _w, cx| {
@@ -248,7 +293,7 @@ impl Render for View {
                     .child(div().text_sm().text_color(p.muted).child(format!("{}%", (frac * 100.0).round() as u32)))))
             // columns
             .child(div().flex().flex_1().min_h_0()
-                .child(div().w(px(380.0 * z)).h_full().flex().flex_col().flex_none().bg(p.surface).border_r_1().border_color(p.border).child(section("Files", Some(n_files))).child(files_list))
+                .child(div().w(px(380.0 * z)).h_full().flex().flex_col().flex_none().bg(p.surface).border_r_1().border_color(p.border).child(files_header).child(files_list))
                 .child(div().flex().flex_col().flex_1().min_w_0().h_full()
                     .children(file_card_header).child(diff)
                     .when(composing, |d| d.child(div().flex().flex_col().gap_2().p_3().border_t_1().border_color(p.accent).bg(p.surface)
@@ -263,7 +308,7 @@ impl Render for View {
                         .children(draft_rows))))
             // footer
             .child(div().flex().items_center().gap_4().px_4().py(px(6.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
-                .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next batch"), ("Backspace", "back"), ("/", "filter"), ("c", "comment"), ("g", "group"), ("Esc", "home"), ("Ctrl + / −", "zoom")]
+                .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next batch"), ("Backspace", "back"), ("/", "filter"), ("c", "comment"), ("g", "group"), ("t", "tree"), ("Esc", "home"), ("Ctrl + / −", "zoom")]
                     .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l))))
     }
 }

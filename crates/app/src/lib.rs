@@ -8,4 +8,5 @@ pub mod keymap;
 pub mod tabs;
 pub mod textfield;
 pub mod theme;
+pub mod tree;
 pub mod vm;

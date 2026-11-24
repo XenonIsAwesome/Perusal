@@ -9,6 +9,8 @@ pub struct ReviewVm {
     pub filter: String,
     pub sort: String,
     pub grouping: bool,
+    /// Order files as the directory tree shows them (folders first), so n/p follow the Files panel.
+    pub dir_order: bool,
     pub exclude_noisy_from_progress: bool,
     /// When set, only these paths (a commit or commit range) are listed.
     pub commit_scope: Option<HashSet<String>>,
@@ -27,7 +29,7 @@ impl ReviewVm {
     pub fn new(store: &Store, review: i64, mut files: Vec<FileStat>) -> Self {
         let viewed = store.viewed(review).unwrap_or_default();
         for f in &mut files { f.viewed = viewed.contains(&f.path); }
-        let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, exclude_noisy_from_progress: false,
+        let mut vm = ReviewVm { review, files, filter: String::new(), sort: String::new(), grouping: false, dir_order: false, exclude_noisy_from_progress: false,
             commit_scope: None, visible: vec![], batches: vec![], cursor: 0, mark_on_next: true, history: vec![] };
         let _ = vm.refresh(); vm
     }
@@ -36,6 +38,7 @@ impl ReviewVm {
         let mut idx = perusal_filter::filter(&self.files, &self.filter)?;
         if let Some(scope) = &self.commit_scope { idx.retain(|&i| scope.contains(&self.files[i].path)); }
         perusal_filter::sort(&self.files, &mut idx, &self.sort)?;
+        if self.dir_order { idx.sort_by_cached_key(|&i| crate::tree::tree_key(&self.files[i].path)); }
         self.batches = if self.grouping {
             let sel: Vec<FileStat> = idx.iter().map(|&i| self.files[i].clone()).collect();
             group_files(&sel).into_iter().map(|g| g.into_iter().map(|j| idx[j]).collect()).collect()
@@ -103,6 +106,11 @@ mod tests {
         vm.set_filter("additions > 8").unwrap(); assert_eq!(vm.batch_count(), 3);
         assert!(vm.set_filter("nope >").is_err()); assert_eq!(vm.filter, "additions > 8");
         vm.sort = "additions desc".into(); vm.refresh().unwrap(); assert_eq!(vm.files[vm.current_batch()[0]].path, "Cargo.lock");
+    }
+    #[test] fn dir_order_follows_tree() {
+        let (_s, mut vm) = setup(); vm.dir_order = true; vm.refresh().unwrap();
+        let order: Vec<&str> = vm.visible.iter().map(|&i| vm.files[i].path.as_str()).collect();
+        assert_eq!(order, vec!["a/foo.h", "b/foo.cpp", "c/bar.rs", "d/baz.rs", "Cargo.lock"]);
     }
     #[test] fn noisy_exclusion_and_commit_scope() {
         let (_s, mut vm) = setup(); vm.exclude_noisy_from_progress = true; assert_eq!(vm.progress().1, 4);
