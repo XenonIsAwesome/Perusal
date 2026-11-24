@@ -14,7 +14,7 @@ target/release/perusal                              # Home: recent reviews, open
 target/release/perusal /path/to/repo my-branch      # straight into a local review (--base <ref> optional)
 target/release/perusal https://github.com/o/r/pull/1  # straight into a remote review
 ```
-Home keys: Tab / Shift+Tab move between fields, Enter runs the focused action, click also works. Esc in a review returns Home.
+Home: click the tabs (pull request URL, local branch, browse remote), paste with Ctrl+V, Enter opens. Tab / Shift+Tab move between fields. Esc in a review returns Home.
 Remote reviews need a token for private repos (the app asks and stores it under `~/.config/perusal/tokens`, mode 0600).
 Data lives in `~/.local/share/perusal` (override with `PERUSAL_HOME`; `PERUSAL_CA_FILE` adds a CA certificate).
 Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl +/-/0` zoom.

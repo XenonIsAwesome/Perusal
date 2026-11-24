@@ -121,8 +121,11 @@ pub fn local_base(dir: &Path, branch: &str, override_base: Option<&str>) -> Resu
     merge_base(dir, &b, branch)
 }
 
-/// File content at a revision, if present.
-pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> { git(dir, &["show", &format!("{rev}:{path}")]).ok() }
+/// File content at a revision, if present. Exact bytes as text (no trimming: line diffs depend on the final newline).
+pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> {
+    let o = Command::new("git").args(["show", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
 
 #[cfg(test)]
 mod tests {
@@ -167,7 +170,7 @@ mod tests {
         let c1 = rows[1].sha.clone(); let c2 = rows[0].sha.clone();
         assert_eq!(files_in(&d, None, &c1).unwrap(), vec!["x"]); assert_eq!(files_in(&d, None, &c2).unwrap(), vec!["y"]);
         let mut both = files_in(&d, Some(&base), "feat").unwrap(); both.sort(); assert_eq!(both, vec!["x", "y"]);
-        assert_eq!(show(&d, "feat", "x").unwrap(), "x"); assert!(show(&d, "main", "x").is_none());
+        assert_eq!(show(&d, "feat", "x").unwrap(), "x"); std::fs::write(d.join("nl"), "a\nb\n").unwrap(); g(&d, &["add", "-A"]); g(&d, &["commit", "-qm", "nl"]); assert_eq!(show(&d, "feat", "nl").unwrap(), "a\nb\n"); assert!(show(&d, "main", "x").is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -1,144 +1,225 @@
-//! Root: the Home screen (recent reviews, open local, open from URL, browse remote) and the active review.
+//! Root: the Home screen (recent reviews, open local / URL / browse) and the active review.
+use crate::kit::{self, badge, button, input_box, pick_fonts, Btn, Fonts, Pal};
 use crate::model::{self, Model, OpenErr};
-use crate::view::{col, Back, View};
-use gpui::{div, prelude::*, px, App, Bounds, Context, Entity, FocusHandle, Hsla, KeyDownEvent, SharedString, Window, WindowBounds, WindowOptions, size};
+use crate::view::{Back, View};
+use gpui::{div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyDownEvent, SharedString, Window, WindowBounds, WindowOptions};
+use perusal_app::textfield::TextField;
 use perusal_app::theme::{self, Theme};
 use perusal_core::store::{RecentRow, Store};
 
 pub enum Initial { Home, Local(String, String, Option<String>), Url(String) }
 
-const LABELS: [&str; 5] = ["Repository path", "Branch", "MR / PR URL", "Browse open MRs: host/owner/repo", "Access token"];
+#[derive(Clone, Copy, PartialEq)]
+enum Tab { Local, Url, Browse }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Note { Info, Busy, Error, Ok }
 
 pub struct Root {
-    theme: Theme, focus: FocusHandle, review: Option<Entity<View>>, fields: [String; 5], active: usize, recent: Vec<RecentRow>,
-    mrs: Vec<(u64, String, String)>, msg: String, busy: bool, token_host: Option<String>, retry_url: Option<String>,
+    theme: Theme, pal: Pal, fonts: Fonts, focus: FocusHandle, review: Option<Entity<View>>,
+    tab: Tab, f_repo: TextField, f_branch: TextField, f_url: TextField, f_browse: TextField, f_token: TextField, active: u8,
+    recent: Vec<RecentRow>, mrs: Vec<(u64, String, String)>, msg: String, note: Note, busy: bool, token_host: Option<String>, retry_url: Option<String>,
 }
 
 type Opened = Result<Model, OpenErr>;
 
+// field ids: 0 repo, 1 branch, 2 url, 3 browse, 4 token
 impl Root {
-    fn new(initial: Initial, cx: &mut Context<Self>) -> Self {
-        let mut r = Root { theme: theme::builtin("dark").expect("built-in theme"), focus: cx.focus_handle(), review: None, fields: Default::default(), active: 2, recent: vec![], mrs: vec![], msg: String::new(), busy: false, token_host: None, retry_url: None };
+    fn new(initial: Initial, fonts: Fonts, cx: &mut Context<Self>) -> Self {
+        let theme = theme::builtin("dark").expect("built-in theme");
+        let mut r = Root { pal: Pal::new(&theme), theme, fonts, focus: cx.focus_handle(), review: None, tab: Tab::Url, f_repo: Default::default(), f_branch: Default::default(), f_url: Default::default(),
+            f_browse: Default::default(), f_token: Default::default(), active: 2, recent: vec![], mrs: vec![], msg: String::new(), note: Note::Info, busy: false, token_host: None, retry_url: None };
         r.refresh_recent();
         match initial {
             Initial::Home => {}
             Initial::Local(repo, branch, base) => { let res = Model::open_local(std::path::Path::new(&repo), &branch, base.as_deref()); r.finish_open(res, cx); }
-            Initial::Url(u) => r.open_url(u, cx),
+            Initial::Url(u) => { r.f_url.set(&u); r.open_url(u, cx) }
         }
         r
     }
-    fn refresh_recent(&mut self) {
-        if let Ok(s) = Store::open(&model::db_path()) { self.recent = s.recent_rows().unwrap_or_default(); }
+    fn field_mut(&mut self, id: u8) -> &mut TextField { match id { 0 => &mut self.f_repo, 1 => &mut self.f_branch, 2 => &mut self.f_url, 3 => &mut self.f_browse, _ => &mut self.f_token } }
+    fn visible_fields(&self) -> Vec<u8> {
+        let mut v = match self.tab { Tab::Local => vec![0, 1], Tab::Url => vec![2], Tab::Browse => vec![3] };
+        if self.token_host.is_some() { v.push(4); } v
     }
+    fn refresh_recent(&mut self) { if let Ok(s) = Store::open(&model::db_path()) { self.recent = s.recent_rows().unwrap_or_default(); } }
+    fn say(&mut self, note: Note, m: impl Into<String>) { self.note = note; self.msg = m.into(); }
     fn finish_open(&mut self, res: Opened, cx: &mut Context<Self>) {
         self.busy = false;
         match res {
             Ok(m) => {
-                let v = cx.new(|_| View::new(m, self.theme.clone()));
+                let (theme, fonts) = (self.theme.clone(), self.fonts.clone());
+                let v = cx.new(|_| View::new(m, theme, fonts));
                 cx.subscribe(&v, |this, _, _: &Back, cx| { this.review = None; this.refresh_recent(); this.msg.clear(); cx.notify(); }).detach();
                 self.review = Some(v); self.msg.clear(); self.token_host = None;
             }
-            Err(OpenErr::NeedsToken { host, why }) => { self.msg = format!("{why}. Type the token below, then press Enter."); self.token_host = Some(host); self.active = 4; }
-            Err(OpenErr::Msg(m)) => self.msg = m,
+            Err(OpenErr::NeedsToken { host, why }) => { self.say(Note::Error, format!("{why}. Paste an access token for {host} below and press Enter.")); self.token_host = Some(host); self.active = 4; }
+            Err(OpenErr::Msg(m)) => self.say(Note::Error, m),
         }
         cx.notify();
     }
-    /// Runs blocking open work on the background executor and delivers the result back to the UI.
     fn spawn_open(&mut self, label: String, work: impl FnOnce() -> Opened + Send + 'static, cx: &mut Context<Self>) {
-        self.busy = true; self.msg = label; cx.notify();
+        self.busy = true; self.say(Note::Busy, label); cx.notify();
         let task = cx.background_executor().spawn(async move { work() });
         cx.spawn(async move |this, cx| { let r = task.await; let _ = this.update(cx, |t, cx| t.finish_open(r, cx)); }).detach();
     }
     fn open_url(&mut self, url: String, cx: &mut Context<Self>) {
         self.retry_url = Some(url.clone());
-        self.spawn_open(format!("Opening {url} (first open clones the repository, this can take a while)..."), move || Model::open_remote(&url), cx);
+        self.spawn_open(format!("Opening {url}. The first open clones the repository, which can take a while for large projects."), move || Model::open_remote(&url), cx);
+    }
+    fn submit_url(&mut self, cx: &mut Context<Self>) {
+        let u = model::normalize_url_input(&self.f_url.text);
+        if u.is_empty() { self.say(Note::Error, "Paste a pull request or merge request URL first."); cx.notify(); return; }
+        self.open_url(u, cx);
     }
     fn open_local(&mut self, cx: &mut Context<Self>) {
-        let (repo, branch) = (self.fields[0].trim().to_string(), self.fields[1].trim().to_string());
-        if repo.is_empty() || branch.is_empty() { self.msg = "enter a repository path and a branch".into(); cx.notify(); return; }
+        let (repo, branch) = (self.f_repo.text.trim().to_string(), self.f_branch.text.trim().to_string());
+        if repo.is_empty() || branch.is_empty() { self.say(Note::Error, "Enter a repository path and a branch name."); cx.notify(); return; }
         let res = Model::open_local(std::path::Path::new(&repo), &branch, None); self.finish_open(res, cx);
     }
     fn open_key(&mut self, key: String, cx: &mut Context<Self>) { self.spawn_open("Opening review...".into(), move || Model::reopen(&key), cx); }
     fn browse(&mut self, cx: &mut Context<Self>) {
-        let t = self.fields[3].clone(); self.busy = true; self.msg = format!("Listing open MRs of {t}..."); cx.notify();
+        let t = self.f_browse.text.trim().to_string();
+        if t.is_empty() { self.say(Note::Error, "Enter host/owner/repo, for example github.com/rust-lang/rust."); cx.notify(); return; }
+        self.busy = true; self.say(Note::Busy, format!("Listing open merge/pull requests of {t}...")); cx.notify();
         let task = cx.background_executor().spawn(async move { model::list_remote(&t) });
         cx.spawn(async move |this, cx| { let r = task.await; let _ = this.update(cx, |t, cx| {
             t.busy = false;
-            match r { Ok(l) => { t.msg = format!("{} open merge/pull requests", l.len()); t.mrs = l; } Err(OpenErr::NeedsToken { host, why }) => { t.msg = format!("{why}. Type the token below, then press Enter."); t.token_host = Some(host); t.active = 4; } Err(OpenErr::Msg(m)) => t.msg = m }
+            match r {
+                Ok(l) => { t.say(Note::Ok, format!("{} open merge/pull requests", l.len())); t.mrs = l; }
+                Err(OpenErr::NeedsToken { host, why }) => { t.say(Note::Error, format!("{why}. Paste an access token for {host} below and press Enter.")); t.token_host = Some(host); t.active = 4; }
+                Err(OpenErr::Msg(m)) => t.say(Note::Error, m),
+            }
             cx.notify(); }); }).detach();
     }
     fn save_token(&mut self, cx: &mut Context<Self>) {
         use perusal_providers::auth::TokenStore;
-        let Some(host) = self.token_host.clone() else { self.msg = "no host is waiting for a token".into(); cx.notify(); return };
-        let tok = self.fields[4].trim().to_string(); if tok.is_empty() { return; }
-        match model::token_store().set(&host, &tok) { Ok(()) => { self.fields[4].clear(); self.token_host = None; self.msg = format!("token saved for {host}"); if let Some(u) = self.retry_url.clone() { self.open_url(u, cx); return; } } Err(e) => self.msg = format!("cannot save token: {e}") }
+        let Some(host) = self.token_host.clone() else { return };
+        let tok = self.f_token.text.trim().to_string(); if tok.is_empty() { return; }
+        match model::token_store().set(&host, &tok) {
+            Ok(()) => { self.f_token.clear(); self.token_host = None; self.active = if self.tab == Tab::Browse { 3 } else { 2 }; self.say(Note::Ok, format!("Token saved for {host}."));
+                if self.tab == Tab::Browse { self.browse(cx); return; }
+                if let Some(u) = self.retry_url.clone() { self.open_url(u, cx); return; } }
+            Err(e) => self.say(Note::Error, format!("Cannot save token: {e}")),
+        }
         cx.notify();
     }
+    fn enter(&mut self, cx: &mut Context<Self>) {
+        match self.active { 0 | 1 => self.open_local(cx), 2 => self.submit_url(cx), 3 => self.browse(cx), _ => self.save_token(cx) }
+    }
+    fn set_tab(&mut self, t: Tab, cx: &mut Context<Self>) { self.tab = t; self.active = self.visible_fields()[0]; cx.notify(); }
     fn home_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         if self.busy { return; }
         let ks = &ev.keystroke;
         match ks.key.as_str() {
-            "tab" => { self.active = if ks.modifiers.shift { (self.active + 4) % 5 } else { (self.active + 1) % 5 }; }
-            "backspace" => { self.fields[self.active].pop(); }
-            "enter" => match self.active { 0 | 1 => self.open_local(cx), 2 => { let u = self.fields[2].trim().to_string(); if !u.is_empty() { self.open_url(u, cx); } } 3 => self.browse(cx), _ => self.save_token(cx) },
-            _ => { if !ks.modifiers.control { if let Some(c) = &ks.key_char { self.fields[self.active].push_str(c); } } else if ks.key == "v" { /* paste is not wired; type or middle-click paste via the terminal */ } }
+            "tab" => { let v = self.visible_fields(); let i = v.iter().position(|x| *x == self.active).unwrap_or(0); self.active = v[if ks.modifiers.shift { (i + v.len() - 1) % v.len() } else { (i + 1) % v.len() }]; }
+            "enter" => { self.enter(cx); return; }
+            _ => { let id = self.active; let f = self.field_mut(id); let mut f2 = std::mem::take(f); kit::field_key(&mut f2, ks, cx); *self.field_mut(id) = f2; }
         }
         cx.notify();
     }
-    fn field(&self, i: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let (fg, border, accent) = (col(&self.theme.ui, "foreground"), col(&self.theme.ui, "border"), col(&self.theme.ui, "accent"));
-        let focused = self.active == i;
-        let shown = if i == 4 { "•".repeat(self.fields[i].chars().count()) } else { self.fields[i].clone() };
-        let text: SharedString = format!("{}{}", shown, if focused { "▏" } else { "" }).into();
-        div().id(("field", i)).flex().flex_col().gap_1().mb_2().cursor_pointer().on_click(cx.listener(move |t, _, _, cx| { t.active = i; cx.notify(); }))
-            .child(div().text_color(col(&self.theme.status, "viewed")).child(LABELS[i]))
-            .child(div().px_2().py_1().border_1().border_color(if focused { accent } else { border }).text_color(fg).min_h(px(26.0)).child(text))
+
+    fn field_view(&self, id: u8, label: &'static str, placeholder: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal; let f = match id { 0 => &self.f_repo, 1 => &self.f_branch, 2 => &self.f_url, 3 => &self.f_browse, _ => &self.f_token };
+        div().id(("field", id as usize)).flex().flex_col().gap_1().on_click(cx.listener(move |t, _, _, cx| { t.active = id; cx.notify(); }))
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(p.fg).child(label))
+            .child(input_box(f, self.active == id, placeholder, &p, id == 4))
     }
-    fn button(&self, label: &'static str, id: &'static str, cx: &mut Context<Self>, f: impl Fn(&mut Self, &mut Context<Self>) + 'static) -> impl IntoElement {
-        let accent: Hsla = col(&self.theme.ui, "accent");
-        div().id(id).px_3().py_1().bg(accent).text_color(col(&self.theme.ui, "background")).cursor_pointer().child(label).on_click(cx.listener(move |t, _, _, cx| if !t.busy { f(t, cx) }))
-    }
-    fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (fg, border, accent, dim) = (col(&self.theme.ui, "foreground"), col(&self.theme.ui, "border"), col(&self.theme.ui, "accent"), col(&self.theme.status, "viewed"));
+
+    fn render_recent(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal;
         let rows: Vec<_> = self.recent.iter().enumerate().map(|(i, r)| {
-            let key = r.key.clone(); let id = r.id; let pinned = r.pinned;
-            let label: SharedString = format!("{}{}  ·  {}/{} viewed  ·  {} drafts  ·  {}", if r.pinned { "★ " } else { "" }, r.title, r.viewed, r.total, r.drafts, if r.key.starts_with("remote:") { r.key.trim_start_matches("remote:").to_string() } else { "local".to_string() }).into();
-            div().id(("recent", i)).flex().justify_between().items_center().px_2().py_1().border_b_1().border_color(border).hover(|d| d.bg(accent.opacity(0.12)))
-                .child(div().id(("open", i)).flex_1().cursor_pointer().child(label).on_click(cx.listener(move |t, _, _, cx| t.open_key(key.clone(), cx))))
-                .child(div().flex().gap_3().text_color(dim)
-                    .child(div().id(("pin", i)).cursor_pointer().child(if pinned { "unpin" } else { "pin" }).on_click(cx.listener(move |t, _, _, cx| { if let Ok(s) = Store::open(&model::db_path()) { let _ = s.set_pinned(id, !pinned); } t.refresh_recent(); cx.notify(); })))
-                    .child(div().id(("del", i)).cursor_pointer().child("delete").on_click(cx.listener(move |t, _, _, cx| { if let Ok(s) = Store::open(&model::db_path()) { let _ = s.discard(id); } t.refresh_recent(); cx.notify(); }))))
+            let (key, id, pinned) = (r.key.clone(), r.id, r.pinned);
+            let remote = r.key.strip_prefix("remote:").map(|s| s.trim_start_matches("https://").to_string());
+            let src: SharedString = remote.clone().unwrap_or_else(|| r.key.trim_start_matches("local:").to_string()).into();
+            let frac = if r.total == 0 { 0.0 } else { r.viewed as f32 / r.total as f32 };
+            let dot = if r.state == "merged" { p.ai } else if remote.is_some() { p.success } else { p.accent };
+            div().id(("recent", i)).group("row").flex().items_center().gap_3().px_4().py_3().border_b_1().border_color(p.border).cursor_pointer().hover(move |s| s.bg(p.hover))
+                .on_click(cx.listener(move |t, _, _, cx| t.open_key(key.clone(), cx)))
+                .child(div().size(px(10.0)).rounded_full().bg(dot).flex_none())
+                .child(div().flex().flex_col().flex_1().min_w_0().gap(px(2.0))
+                    .child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).truncate().child(r.title.clone())).when(pinned, |d| d.child(badge("pinned", p.warn, p.warn.opacity(0.15)))))
+                    .child(div().text_xs().text_color(p.muted).truncate().child(src)))
+                .child(div().flex().flex_col().items_end().gap(px(4.0)).w(px(150.0)).flex_none()
+                    .child(div().flex().items_center().gap_2().when(r.drafts > 0, |d| d.child(badge(format!("{} drafts", r.drafts), p.accent, p.accent.opacity(0.15)))).child(div().text_xs().text_color(p.muted).child(format!("{}/{} viewed", r.viewed, r.total))))
+                    .child(div().w_full().h(px(4.0)).rounded_full().bg(p.border).child(div().h_full().rounded_full().bg(p.success).w(gpui::relative(frac)))))
+                .child(div().flex().gap_1().flex_none()
+                    .child(button(("pin", i), if pinned { "Unpin" } else { "Pin" }, Btn::Ghost, &p).on_click(cx.listener(move |t, _, _, cx| { cx.stop_propagation(); if let Ok(s) = Store::open(&model::db_path()) { let _ = s.set_pinned(id, !pinned); } t.refresh_recent(); cx.notify(); })))
+                    .child(button(("del", i), "Delete", Btn::Ghost, &p).on_click(cx.listener(move |t, _, _, cx| { cx.stop_propagation(); if let Ok(s) = Store::open(&model::db_path()) { let _ = s.discard(id); } t.refresh_recent(); cx.notify(); }))))
         }).collect();
-        let mrs: Vec<_> = self.mrs.iter().enumerate().map(|(i, (n, title, url))| {
-            let url = url.clone(); let label: SharedString = format!("#{n}  {title}").into();
-            div().id(("mr", i)).px_2().py_1().cursor_pointer().hover(|d| d.bg(accent.opacity(0.12))).child(label).on_click(cx.listener(move |t, _, _, cx| t.open_url(url.clone(), cx)))
-        }).collect();
-        let msg: SharedString = if self.msg.is_empty() { "Tab switches fields, Enter runs the focused one. Click works too.".into() } else { self.msg.clone().into() };
-        let open_local = self.button("Open local branch", "b-local", cx, |t, cx| t.open_local(cx));
-        let open_url = self.button("Open URL", "b-url", cx, |t, cx| { let u = t.fields[2].trim().to_string(); if !u.is_empty() { t.open_url(u, cx); } });
-        let browse = self.button("List open MRs", "b-browse", cx, |t, cx| t.browse(cx));
-        let f0 = self.field(0, cx); let f1 = self.field(1, cx); let f2 = self.field(2, cx); let f3 = self.field(3, cx);
-        let tok = self.token_host.is_some().then(|| self.field(4, cx));
-        div().size_full().flex().flex_col().p_4().gap_3().text_color(fg)
-            .child(div().text_xl().child("Perusal"))
-            .child(div().text_color(if self.busy { accent } else { dim }).child(msg))
-            .child(div().flex().flex_1().min_h_0().gap_4()
-                .child(div().flex().flex_col().flex_1().min_w_0().child(div().pb_1().child("Recent reviews")).child(div().id("recent-list").flex_1().overflow_y_scroll().border_1().border_color(border)
-                    .children(if rows.is_empty() { vec![div().id("none").p_2().text_color(dim).child("No reviews yet. Open one on the right.")] } else { rows })))
-                .child(div().flex().flex_col().w(px(520.0)).gap_1()
-                    .child(div().pb_1().child("Open a local branch")).child(f0).child(f1).child(div().mb_3().child(open_local))
-                    .child(div().pb_1().child("Open a merge / pull request")).child(f2).child(div().mb_3().child(open_url))
-                    .child(div().pb_1().child("Browse remote")).child(f3).child(div().mb_2().child(browse))
-                    .children(tok)
-                    .child(div().id("mr-list").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(border).children(mrs))))
+        let empty = rows.is_empty();
+        div().flex().flex_col().flex_1().min_w_0().min_h_0().rounded_lg().border_1().border_color(p.border).bg(p.surface).overflow_hidden()
+            .child(div().flex().items_center().justify_between().px_4().py_3().border_b_1().border_color(p.border).bg(p.surface)
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Recent reviews")).child(badge(format!("{}", self.recent.len()), p.muted, p.hover)))
+            .child(div().id("recent-list").flex_1().min_h_0().overflow_y_scroll().bg(p.bg)
+                .when(empty, |d| d.child(div().flex().flex_col().items_center().justify_center().gap_2().py(px(80.0)).text_color(p.muted)
+                    .child(div().text_xl().child("Nothing here yet")).child(div().text_sm().child("Reviews you open appear here, with progress and drafts saved."))))
+                .children(rows))
+    }
+
+    fn render_open(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal;
+        let tab_btn = |t: Tab, label: &'static str, id: &'static str, cx: &mut Context<Self>| {
+            let on = self.tab == t;
+            div().id(id).px_3().py_2().cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted })
+                .border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).hover(move |s| s.text_color(p.fg)).child(label)
+                .on_click(cx.listener(move |t2, _, _, cx| t2.set_tab(t, cx)))
+        };
+        let tabs = div().flex().border_b_1().border_color(p.border).child(tab_btn(Tab::Url, "Pull / merge request", "t-url", cx)).child(tab_btn(Tab::Local, "Local branch", "t-local", cx)).child(tab_btn(Tab::Browse, "Browse remote", "t-browse", cx));
+        let form = match self.tab {
+            Tab::Url => div().flex().flex_col().gap_3()
+                .child(self.field_view(2, "URL", "https://github.com/owner/repo/pull/123", cx))
+                .child(div().text_xs().text_color(p.muted).child("GitHub, GitHub Enterprise, GitLab and self-hosted GitLab URLs. Paste with Ctrl+V."))
+                .child(button("go-url", "Open review", Btn::Primary, &p).on_click(cx.listener(|t, _, _, cx| { if !t.busy { t.submit_url(cx) } }))),
+            Tab::Local => div().flex().flex_col().gap_3()
+                .child(self.field_view(0, "Repository path", "/path/to/repo", cx)).child(self.field_view(1, "Branch", "my-feature-branch", cx))
+                .child(div().text_xs().text_color(p.muted).child("Reviews the branch against its merge-base with the default branch. Comments stay local."))
+                .child(button("go-local", "Open review", Btn::Primary, &p).on_click(cx.listener(|t, _, _, cx| { if !t.busy { t.open_local(cx) } }))),
+            Tab::Browse => {
+                let mrs: Vec<_> = self.mrs.iter().enumerate().map(|(i, (n, title, url))| {
+                    let url = url.clone();
+                    div().id(("mr", i)).flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(p.border).cursor_pointer().hover(move |s| s.bg(p.hover))
+                        .child(div().size(px(8.0)).rounded_full().bg(p.success).flex_none()).child(div().text_color(p.muted).flex_none().child(format!("#{n}"))).child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                        .on_click(cx.listener(move |t, _, _, cx| { t.f_url.set(&url); t.open_url(url.clone(), cx) }))
+                }).collect();
+                div().flex().flex_col().gap_3()
+                    .child(self.field_view(3, "Repository", "github.com/owner/repo", cx))
+                    .child(button("go-browse", "List open requests", Btn::Secondary, &p).on_click(cx.listener(|t, _, _, cx| { if !t.busy { t.browse(cx) } })))
+                    .child(div().id("mr-list").max_h(px(260.0)).overflow_y_scroll().rounded_md().border_1().border_color(p.border).children(mrs))
+            }
+        };
+        let token = self.token_host.clone().map(|h| div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.warn).bg(p.warn.opacity(0.08))
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Access token for {h}")))
+            .child(self.field_view(4, "Personal access token", "paste token, stored locally with 0600 permissions", cx))
+            .child(button("go-token", "Save token and retry", Btn::Primary, &p).on_click(cx.listener(|t, _, _, cx| t.save_token(cx)))));
+        div().flex().flex_col().w(px(480.0)).flex_none().rounded_lg().border_1().border_color(p.border).bg(p.surface).overflow_hidden()
+            .child(div().px_4().py_3().border_b_1().border_color(p.border).font_weight(FontWeight::SEMIBOLD).child("Open a review"))
+            .child(div().px_2().child(tabs))
+            .child(div().flex().flex_col().gap_4().p_4().child(form).children(token))
+    }
+
+    fn render_home(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.pal;
+        let (bar_fg, bar_bg, bar_border) = match self.note { Note::Info => (p.muted, p.surface, p.border), Note::Busy => (p.accent, p.accent.opacity(0.1), p.accent), Note::Error => (p.danger, p.danger.opacity(0.1), p.danger), Note::Ok => (p.success, p.success.opacity(0.1), p.success) };
+        let msg: SharedString = self.msg.clone().into();
+        let show_note = !self.msg.is_empty();
+        let recent = self.render_recent(cx); let open = self.render_open(cx);
+        div().size_full().flex().flex_col().bg(p.bg).text_color(p.fg)
+            .child(div().flex().items_center().gap_3().px_6().h(px(56.0)).border_b_1().border_color(p.border).bg(p.surface)
+                .child(div().size(px(28.0)).rounded_md().bg(p.accent).flex().items_center().justify_center().text_color(gpui::white()).font_weight(FontWeight::BOLD).child("P"))
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Perusal"))
+                .child(div().text_sm().text_color(p.muted).child("Review pull requests and merge requests, one batch at a time")))
+            .child(div().flex().flex_col().flex_1().min_h_0().items_center().p_6().gap_4()
+                .child(div().flex().flex_col().w_full().max_w(px(1240.0)).flex_1().min_h_0().gap_4()
+                    .when(show_note, |d| d.child(div().px_4().py_2().rounded_md().border_1().border_color(bar_border).bg(bar_bg).text_color(bar_fg).text_sm().child(msg)))
+                    .child(div().flex().flex_1().min_h_0().gap_6().child(recent).child(open))))
     }
 }
 
 impl Render for Root {
     fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg = col(&self.theme.ui, "background");
         let body = if let Some(v) = &self.review { v.clone().into_any_element() } else { self.render_home(cx).into_any_element() };
-        div().size_full().bg(bg).font_family("DejaVu Sans Mono").text_size(px(13.0)).track_focus(&self.focus)
+        div().size_full().bg(self.pal.bg).font_family(self.fonts.ui.clone()).text_size(px(14.0)).track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| { if let Some(v) = this.review.clone() { v.update(cx, |v, cx| v.key(ev, cx)); } else { this.home_key(ev, cx); } }))
             .child(body)
     }
@@ -146,9 +227,10 @@ impl Render for Root {
 
 pub fn run(initial: Initial) {
     gpui_platform::application().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1400.0), px(850.0)), cx);
+        let fonts = pick_fonts(cx);
+        let bounds = Bounds::centered(None, size(px(1480.0), px(900.0)), cx);
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, move |window, cx| {
-            let root = cx.new(|cx| Root::new(initial, cx));
+            let root = cx.new(|cx| Root::new(initial, fonts, cx));
             window.focus(&root.read(cx).focus.clone(), cx);
             root
         }).unwrap();

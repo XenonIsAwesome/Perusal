@@ -6,5 +6,6 @@ pub mod filterbar;
 pub mod graph;
 pub mod keymap;
 pub mod tabs;
+pub mod textfield;
 pub mod theme;
 pub mod vm;

@@ -103,3 +103,19 @@ pub fn list_remote(target: &str) -> Result<Vec<(u64, String, String)>, OpenErr> 
     let list = rt()?.block_on(p.list_open(project)).map_err(|e| map_err(e, host))?;
     Ok(list.into_iter().map(|(n, title)| { let mut rr = r.clone(); rr.number = n; (n, title, canonical(&rr)) }).collect())
 }
+
+/// Makes pasted URLs forgiving: trims whitespace and quotes, adds https:// when no scheme is given.
+pub fn normalize_url_input(s: &str) -> String {
+    let t = s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>').trim();
+    if t.contains("://") { t.to_string() } else if t.is_empty() { String::new() } else { format!("https://{t}") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn url_input_is_forgiving() {
+        assert_eq!(normalize_url_input("  github.com/o/r/pull/1 \n"), "https://github.com/o/r/pull/1");
+        assert_eq!(normalize_url_input("<https://gitlab.com/a/b/-/merge_requests/2>"), "https://gitlab.com/a/b/-/merge_requests/2");
+        assert_eq!(normalize_url_input("http://x/y"), "http://x/y"); assert_eq!(normalize_url_input("   "), "");
+    }
+}

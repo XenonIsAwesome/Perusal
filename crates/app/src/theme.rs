@@ -12,7 +12,7 @@ pub struct Theme {
     pub status: BTreeMap<String, String>,
 }
 
-pub const UI_KEYS: [&str; 4] = ["background", "foreground", "accent", "border"];
+pub const UI_KEYS: [&str; 7] = ["background", "foreground", "accent", "border", "surface", "muted", "hover"];
 pub const DIFF_KEYS: [&str; 4] = ["added", "removed", "added_word", "removed_word"];
 pub const STATUS_KEYS: [&str; 5] = ["ci_running", "ci_passed", "ci_failed", "viewed", "ai"];
 pub const SYNTAX_KEYS: [&str; 6] = ["keyword", "string", "comment", "number", "type", "function"];
