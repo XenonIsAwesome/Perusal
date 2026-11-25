@@ -1,4 +1,4 @@
-//! perusal:// deep links and single-instance hand-off over a Unix socket.
+//! perusal:// deep links and single-instance hand-off (Unix socket; token-checked loopback TCP on Windows).
 use perusal_core::brand::DEEP_LINK_SCHEME;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -35,21 +35,41 @@ mod ipc {
     pub fn accept_one(l: &Listener) -> std::io::Result<String> { let (mut s, _) = l.accept()?; let mut b = String::new(); s.read_to_string(&mut b)?; Ok(b) }
 }
 
-/// Windows has no Unix sockets in std: the running instance listens on a loopback TCP port and records it in the file at `sock`.
+/// Windows has no Unix sockets in std: the running instance listens on a loopback TCP port and records `port token` in the file
+/// at `sock` (in the user's own data folder). A client must send the token first, so another local process (or user) that can
+/// reach the port but cannot read the file is ignored; reads have a size cap and a timeout so a silent client cannot block the listener.
 #[cfg(windows)]
 mod ipc {
     use super::*;
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
-    pub type Listener = TcpListener;
+    use std::time::Duration;
+    const MAX_LEN: u64 = 8 * 1024;
+    pub struct Listener { inner: TcpListener, token: String }
+    fn random_token() -> String {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded from the OS random generator; two independent hashers give 128 bits.
+        (0..2).map(|i| { let mut h = std::collections::hash_map::RandomState::new().build_hasher(); h.write_u32(std::process::id() ^ i); format!("{:016x}", h.finish()) }).collect()
+    }
     pub fn send_to_running(sock: &Path, link: &str) -> std::io::Result<bool> {
-        let Some(port) = std::fs::read_to_string(sock).ok().and_then(|s| s.trim().parse::<u16>().ok()) else { return Ok(false) };
-        match TcpStream::connect((Ipv4Addr::LOCALHOST, port)) { Ok(mut s) => { s.write_all(link.as_bytes())?; Ok(true) } Err(_) => Ok(false) }
+        let Ok(info) = std::fs::read_to_string(sock) else { return Ok(false) };
+        let mut it = info.split_whitespace();
+        let (Some(port), Some(token)) = (it.next().and_then(|p| p.parse::<u16>().ok()), it.next()) else { return Ok(false) };
+        match TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), Duration::from_secs(2)) {
+            Ok(mut s) => { s.set_write_timeout(Some(Duration::from_secs(2)))?; s.write_all(format!("{token}\n{link}").as_bytes())?; Ok(true) }
+            Err(_) => Ok(false),
+        }
     }
     pub fn listen(sock: &Path) -> std::io::Result<Listener> {
-        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        std::fs::write(sock, l.local_addr()?.port().to_string())?; Ok(l)
+        let inner = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?; let token = random_token();
+        std::fs::write(sock, format!("{} {token}", inner.local_addr()?.port()))?; Ok(Listener { inner, token })
     }
-    pub fn accept_one(l: &Listener) -> std::io::Result<String> { let (mut s, _) = l.accept()?; let mut b = String::new(); s.read_to_string(&mut b)?; Ok(b) }
+    /// Accepts one connection and returns its link; a client with the wrong token, an oversized or a stalled message is an error (the caller just accepts again).
+    pub fn accept_one(l: &Listener) -> std::io::Result<String> {
+        let (s, _) = l.inner.accept()?; s.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut b = String::new(); s.take(MAX_LEN + 1).read_to_string(&mut b)?;
+        if b.len() as u64 > MAX_LEN { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "message too long")); }
+        match b.split_once('\n') { Some((t, link)) if t == l.token => Ok(link.to_string()), _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "bad token")) }
+    }
 }
 pub use ipc::{accept_one, listen, send_to_running, Listener};
 
@@ -96,6 +116,18 @@ mod tests { use super::*;
         let c = registry_commands(Path::new(r"C:\Program Files\Perusal\perusal.exe"));
         assert_eq!(c.len(), 3); assert!(c[2].iter().any(|x| x == r#""C:\Program Files\Perusal\perusal.exe" "%1""#));
         assert!(c[0][1].starts_with(r"HKCU\Software\Classes\perusal"));
+    }
+    #[cfg(windows)]
+    #[test] fn windows_handoff_rejects_wrong_token_and_stalls() {
+        use std::io::Write;
+        let sock = std::env::temp_dir().join(format!("perusal-auth-{}.sock", std::process::id()));
+        let l = listen(&sock).unwrap();
+        let port: u16 = std::fs::read_to_string(&sock).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        let h = std::thread::spawn(move || { let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap(); s.write_all(b"wrong\nperusal://open?url=a").unwrap(); });
+        assert!(accept_one(&l).is_err()); h.join().unwrap();
+        let _silent = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap(); // connects and never sends
+        let t = std::time::Instant::now(); assert!(accept_one(&l).is_err()); assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        let _ = std::fs::remove_file(&sock);
     }
     #[test] fn second_launch_hands_over() {
         let sock = std::env::temp_dir().join(format!("perusal-{}.sock", std::process::id()));

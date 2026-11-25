@@ -1,6 +1,5 @@
 //! Per-file stats index, noisy-file rules and grouping. UI-free.
 pub mod text;
-use std::process::Command;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +95,7 @@ pub fn parse_diff_z(raw: &str, numstat: &str) -> Vec<FileStat> {
 /// Computes the stats index for `base..head` in the repo at `repo`, via the git CLI.
 pub fn index_range(repo: &Path, base: &str, head: &str) -> std::io::Result<Vec<FileStat>> {
     let run = |args: &[&str]| -> std::io::Result<String> {
-        let mut c = Command::new("git");
-        #[cfg(windows)] { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+        let mut c = perusal_gitops::git_command();
         let o = c.args(args).arg(format!("{base}...{head}")).current_dir(repo).output()?;
         if !o.status.success() { return Err(std::io::Error::other(String::from_utf8_lossy(&o.stderr).to_string())); }
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
@@ -134,7 +132,7 @@ mod tests {
     fn index_real_repo() {
         let d = std::env::temp_dir().join(format!("perusal-idx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let run = |a: &[&str]| { assert!(Command::new("git").args(["-c","user.name=t","-c","user.email=t@t"]).args(a).current_dir(&d).status().unwrap().success()); };
+        let run = |a: &[&str]| { assert!(std::process::Command::new("git").args(["-c","user.name=t","-c","user.email=t@t"]).args(a).current_dir(&d).status().unwrap().success()); };
         std::fs::create_dir_all(&d).unwrap();
         run(&["init","-q","-b","main"]);
         std::fs::write(d.join("a.txt"), "1\n2\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","a"]);

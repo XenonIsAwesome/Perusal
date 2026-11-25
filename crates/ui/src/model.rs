@@ -193,15 +193,16 @@ pub fn open_url(url: &str) -> Result<(), String> {
 
 /// A Windows toast through PowerShell's WinRT bridge (no extra crate or app registration needed).
 fn windows_toast(title: &str, body: &str) -> std::io::Result<std::process::Output> {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "''");
+    // Title and body travel in environment variables, so nothing needs quoting or XML escaping (CreateTextNode escapes itself).
     // The toast is attributed to "Perusal" through a per-user AppUserModelID registration (no installer needed).
     let script = r#"$id = 'io.github.perusal.Perusal'; $k = "HKCU:\Software\Classes\AppUserModelId\$id"
 if (-not (Test-Path $k)) { New-Item $k -Force | Out-Null }; Set-ItemProperty $k -Name DisplayName -Value 'Perusal'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode('@T@')) | Out-Null; $n.Item(1).AppendChild($x.CreateTextNode('@B@')) | Out-Null
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))"#.replace("@T@", &esc(title)).replace("@B@", &esc(body));
-    let mut c = perusal_gitops::command("powershell"); c.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode($env:PERUSAL_TOAST_TITLE)) | Out-Null; $n.Item(1).AppendChild($x.CreateTextNode($env:PERUSAL_TOAST_BODY)) | Out-Null
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))"#;
+    let mut c = perusal_gitops::command("powershell"); c.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script]);
+    c.env("PERUSAL_TOAST_TITLE", title).env("PERUSAL_TOAST_BODY", body);
     c.output()
 }
 

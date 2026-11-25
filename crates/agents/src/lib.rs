@@ -157,11 +157,12 @@ fn is_executable(p: &std::path::Path) -> bool { p.is_file() }
 
 /// Candidate file names for `program` in a directory: on Windows the usual executable extensions are tried too.
 fn candidates(dir: &std::path::Path, program: &str) -> Vec<std::path::PathBuf> {
-    let mut v = vec![dir.join(program)];
+    // On Windows a bare name has no extension: npm puts a POSIX shell shim (`claude`) next to `claude.cmd`, and spawning
+    // that fails ("not a valid Win32 application"), so only the executable extensions are candidates, in PATHEXT-like order.
     if cfg!(windows) && std::path::Path::new(program).extension().is_none() {
-        for e in ["exe", "cmd", "bat", "com"] { v.push(dir.join(format!("{program}.{e}"))); }
+        return ["exe", "cmd", "bat", "com"].iter().map(|e| dir.join(format!("{program}.{e}"))).collect();
     }
-    v
+    vec![dir.join(program)]
 }
 
 /// Resolves a program name to the executable that would run (absolute paths and names with a slash are checked as they are).
@@ -387,6 +388,7 @@ mod windows_tests {
     #[test] fn resolves_and_runs_cmd_shims() {
         let dir = std::env::temp_dir().join(format!("perusal shim {}", std::process::id())); std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shim-agent-xyz.cmd"), "@echo off\r\necho [] %*\r\n").unwrap();
+        std::fs::write(dir.join("shim-agent-xyz"), "#!/bin/sh\necho posix shim\n").unwrap(); // npm puts this next to the .cmd; it cannot be spawned on Windows
         let old = std::env::var_os("PATH"); let mut p = std::env::split_paths(old.as_ref().unwrap()).collect::<Vec<_>>(); p.insert(0, dir.clone());
         std::env::set_var("PATH", std::env::join_paths(p).unwrap());
         let found = super::find_program("shim-agent-xyz");

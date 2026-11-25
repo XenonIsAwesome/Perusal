@@ -8,8 +8,10 @@ const SECRET_HINTS: [&str; 7] = ["TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTI
 
 /// Minimal environment for an agent: a short allowlist, nothing that looks like a credential.
 pub fn minimal_env(parent: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    parent.iter().filter(|(k, _)| (KEEP.contains(&k.as_str()) || KEEP_PREFIX.iter().any(|p| k.starts_with(p))) && !SECRET_HINTS.iter().any(|h| k.to_uppercase().contains(h))).map(|(k, v)| (k.clone(), v.clone())).collect()
+    parent.iter().filter(|(k, _)| (kept(k) || KEEP_PREFIX.iter().any(|p| k.starts_with(p))) && !SECRET_HINTS.iter().any(|h| k.to_uppercase().contains(h))).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
+/// Windows variable names are case-insensitive and often spelled `Path`, `SystemRoot`, `ComSpec`; elsewhere names match exactly.
+fn kept(k: &str) -> bool { if cfg!(windows) { KEEP.iter().any(|n| n.eq_ignore_ascii_case(k)) } else { KEEP.contains(&k) } }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Access { WebSearch(String), WebFetch(String), RepoRead(String), Denied(String) }
@@ -44,6 +46,12 @@ mod tests {
         let mut e = BTreeMap::new();
         for (k, v) in [("PATH", "/bin"), ("HOME", "/h"), ("GITHUB_TOKEN", "x"), ("PERUSAL_TOKEN", "x"), ("AWS_SECRET_ACCESS_KEY", "x"), ("SSH_AUTH_SOCK", "x"), ("LANG", "C")] { e.insert(k.to_string(), v.to_string()); }
         let m = minimal_env(&e); assert_eq!(m.keys().cloned().collect::<Vec<_>>(), vec!["HOME", "LANG", "PATH"]);
+    }
+    #[cfg(windows)]
+    #[test] fn windows_names_match_case_insensitively() {
+        let mut e = BTreeMap::new();
+        for (k, v) in [("Path", "C:\\x"), ("SystemRoot", "C:\\Windows"), ("ComSpec", "cmd"), ("GitHub_Token", "x")] { e.insert(k.to_string(), v.to_string()); }
+        assert_eq!(minimal_env(&e).keys().cloned().collect::<Vec<_>>(), vec!["ComSpec", "Path", "SystemRoot"]);
     }
     #[test] fn read_only_by_default_and_logged() {
         let mut p = Policy::default(); p.repo_allowlist.push("o/dep".into());
