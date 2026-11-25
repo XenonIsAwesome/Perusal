@@ -37,7 +37,7 @@ struct RLine { line: Line, runs: Vec<(Range<usize>, HighlightStyle)> }
 struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai: bool, resolved: bool, outdated: bool, replies: Vec<(String, String)>, /// the code a suggestion in the body replaces
     orig: Option<String> }
 #[derive(Clone)]
-enum RowKind { FileHeader, Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
+enum RowKind { FileHeader, Rendered(Vec<markdown::Block>), Collapsed(String, bool), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
 #[derive(Clone)]
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32> }
@@ -47,7 +47,7 @@ impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
-    focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
+    focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, list: ListState, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
@@ -95,7 +95,7 @@ impl View {
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        View { pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        View { pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
@@ -146,7 +146,7 @@ impl View {
         let batch = self.m.vm.current_batch().to_vec();
         if batch.is_empty() { self.base.clear(); self.rows.clear(); self.md = None; self.shown = None; self.list.reset(0); return; }
         if self.shown.as_ref() == Some(&batch) { return; }
-        if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.len() == 1 && markdown::is_markdown(&self.m.vm.files[batch[0]].path); self.nav_changed = false; }
+        if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink); self.nav_changed = false; }
         self.shown = Some(batch.clone()); self.md = None; self.sym_target = None; self.sym_path = None;
         let p = self.pal;
         let mut rows: Vec<Row> = Vec::new();
@@ -164,7 +164,14 @@ impl View {
                 rows.push(mk(fi, RowKind::Note(match (old.is_empty(), new.is_empty()) { (true, false) => format!("Symbolic link to {}", t(&new)), (false, true) => format!("Symbolic link to {} was removed", t(&old)), _ => format!("Symbolic link retargeted: {} → {}", t(&old), t(&new)) })));
                 if batch.len() == 1 { let tgt = resolve_link(&f.path, if new.is_empty() { &old } else { &new }); self.sym_path = Some(tgt.clone()); self.sym_target = self.m.vm.files.iter().position(|x| x.path == tgt && !x.symlink); }
             }
-            if f.noisy() && !f.symlink { rows.push(mk(fi, RowKind::Note(format!("{} is collapsed because it is generated, binary or very large.", f.path)))); continue; }
+            if batch.len() > 1 && self.md_rendered && !f.symlink && markdown::is_markdown(&f.path) && !f.noisy() {
+                let src = if new.is_empty() { old.clone() } else { new.clone() };
+                rows.push(mk(fi, RowKind::Rendered(markdown::parse(&src)))); continue;
+            }
+            if f.noisy() && !f.symlink && !self.forced.contains(&fi) {
+                let why = if f.binary { "is a binary file, so there is no text to show" } else if f.generated { "is collapsed because it looks generated or vendored" } else { "is collapsed because it is very large" };
+                rows.push(mk(fi, RowKind::Collapsed(format!("{} {why}.", f.path), !f.binary))); continue;
+            }
             let lang = language_for_ext(f.ext());
             let (old_sp, new_sp) = (kit::line_spans(lang, &old, &p), kit::line_spans(lang, &new, &p));
             let lines = if self.m.vm.hide_whitespace { perusal_diff::text::diff_lines_ws(&old, &new, 3) } else { diff_lines(&old, &new, 3) };
@@ -224,7 +231,7 @@ impl View {
             let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None };
             for r in group {
                 out.push(r.clone());
-                let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_));
+                let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_) | RowKind::Collapsed(..) | RowKind::Rendered(_));
                 if !placed_top && !header_like { placed_top = true; }
                 if header_like && !placed_top {
                     // file-level comments (no line) sit right under the file header
@@ -238,7 +245,11 @@ impl View {
             }
             for (l, mut c) in pending { c.outdated = l.is_some(); out.push(card(c)); }
         }
-        self.rows = out; self.list.reset(self.rows.len()); self.list.scroll_to(top);
+        self.rows = out;
+        // measure every row up front so the scroll range is exact (otherwise it keeps growing as unseen rows are measured); huge diffs stay lazy
+        let all = self.rows.len() <= 4000;
+        if all != self.list_all { self.list = ListState::new(self.rows.len(), ListAlignment::Top, px(600.0)); if all { self.list = self.list.clone().measure_all(); } self.list_all = all; } else { self.list.reset(self.rows.len()); }
+        self.list.scroll_to(top);
     }
     fn toggle_comment(&mut self, key: &str) { if !self.collapsed_c.remove(key) { self.collapsed_c.insert(key.to_string()); } self.rebuild_rows(); }
     /// Collapse (or expand) every comment on the current file(s).
@@ -606,7 +617,7 @@ impl View {
             "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
             "s" => { cx.emit(ViewEvent::OpenSettings); }
             "f" => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
-            "m" => { if let Some(fi) = self.current_file() { if markdown::is_markdown(&self.m.vm.files[fi].path) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } } }
+            "m" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
             "u" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
             "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
             "t" => self.toggle_tree(), "n" => self.step(1), "p" => self.step(-1), "x" => self.clear_scope(),
@@ -937,9 +948,14 @@ impl View {
                     .child(div().flex().gap_2().text_xs().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
                     .on_click(cx.listener(move |this, _, _, cx| { if !this.collapsed_files.remove(&fi) { this.collapsed_files.insert(fi); } this.shown = None; this.load_diff(); cx.notify(); })).into_any_element();
             }
+            RowKind::Collapsed(t, expandable) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::UNFOLD_MORE, 15.0, p.accent)).child(div().flex_1().min_w_0().truncate().child(t.clone()))
+                .when(*expandable, |d| d.child(div().id(("expand", ix)).px_2().rounded_md().border_1().border_color(p.border).cursor_pointer().hover(move |x| x.bg(p.hover)).text_sm().child("Show anyway")
+                    .on_click(cx.listener(move |this, _, _, cx| { this.forced.insert(fi); this.shown = None; this.load_diff(); cx.notify(); })))).into_any_element(),
             RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
             RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()).into_any_element(),
             RowKind::Comment(c) => return self.comment_card(&c.clone(), cx).into_any_element(),
+            RowKind::Rendered(blocks) => return div().id(ix).w_full().px_6().py_3().font_family(self.fonts.ui.clone()).text_size(px(14.0)).child(markdown_view(blocks, &p, &mono))
+                .child(div().pt_2().text_xs().text_color(p.muted).child("Rendered preview. Switch to the source diff (m) to comment on lines, or open this file on its own to comment on blocks.")).into_any_element(),
             RowKind::Uni(rl) => {
                 let l = &rl.line;
                 let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
@@ -1009,7 +1025,7 @@ impl View {
         let p = self.pal; let mono = self.fonts.mono.clone();
         let batch = self.m.vm.current_batch().to_vec();
         let first = batch.first().map(|&i| self.m.vm.files[i].clone());
-        let is_md = first.as_ref().map(|f| batch.len() == 1 && markdown::is_markdown(&f.path) && !f.symlink).unwrap_or(false);
+        let is_md = batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink);
         let viewed_all = !batch.is_empty() && batch.iter().all(|&i| self.m.vm.files[i].viewed);
         let manual = batch.first().map(|&i| self.m.vm.is_manually_grouped(i)).unwrap_or(false);
         let (adds, dels): (u32, u32) = batch.iter().fold((0, 0), |a, &i| (a.0 + self.m.vm.files[i].additions, a.1 + self.m.vm.files[i].deletions));

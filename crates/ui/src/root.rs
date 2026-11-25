@@ -447,6 +447,7 @@ impl Render for Root {
 }
 
 pub fn run(initial: Initial) {
+    std::thread::spawn(|| { let _ = perusal_agents::search_dirs(); }); // warm the login-shell PATH lookup off the UI thread
     gpui_platform::application().run(move |cx: &mut App| {
         let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/MaterialIcons-Regular.ttf").as_slice())]);
         let fonts = pick_fonts(cx);

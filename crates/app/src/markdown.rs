@@ -77,16 +77,31 @@ fn is_block_end(t: &TagEnd) -> bool { matches!(t, TagEnd::Paragraph | TagEnd::He
 pub fn parse_located(src: &str) -> Vec<Located> {
     let blocks = parse(src);
     let line_of = |off: usize| src[..off.min(src.len())].bytes().filter(|b| *b == b'\n').count() as u32 + 1;
-    let mut ranges: Vec<(u32, u32)> = vec![]; let mut depth = 0usize;
+    let mut ranges: Vec<(u32, u32)> = vec![]; let mut depth = 0usize; let mut ldepth = 0usize;
+    // source lines of each item of a top-level list, by block index
+    let mut items: std::collections::HashMap<usize, Vec<(u32, u32)>> = Default::default();
     for (ev, r) in Parser::new_ext(src, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS).into_offset_iter() {
         match &ev {
-            Event::Start(t) if is_block_tag(t) => { if depth == 0 { let end = src[..r.end.min(src.len())].trim_end().len(); ranges.push((line_of(r.start), line_of(end.saturating_sub(1)))); } depth += 1; }
-            Event::End(t) if is_block_end(t) => depth = depth.saturating_sub(1),
+            Event::Start(t) if is_block_tag(t) => { if depth == 0 { let end = src[..r.end.min(src.len())].trim_end().len(); ranges.push((line_of(r.start), line_of(end.saturating_sub(1)))); } depth += 1; if matches!(t, Tag::List(_)) { ldepth += 1; } }
+            Event::End(t) if is_block_end(t) => { depth = depth.saturating_sub(1); if matches!(t, TagEnd::List(_)) { ldepth = ldepth.saturating_sub(1); } }
+            Event::Start(Tag::Item) if ldepth == 1 && depth == 1 => { let end = src[..r.end.min(src.len())].trim_end().len(); items.entry(ranges.len().saturating_sub(1)).or_default().push((line_of(r.start), line_of(end.saturating_sub(1)))); }
             Event::Rule if depth == 0 => ranges.push((line_of(r.start), line_of(r.start))),
             _ => {}
         }
     }
-    blocks.into_iter().enumerate().map(|(i, block)| { let (a, b) = ranges.get(i).copied().unwrap_or((0, 0)); Located { block, first_line: a, last_line: b.max(a) } }).collect()
+    let mut out = Vec::new();
+    for (i, block) in blocks.into_iter().enumerate() {
+        let (a, b) = ranges.get(i).copied().unwrap_or((0, 0));
+        match block {
+            // each bullet or numbered item can be commented on by itself
+            Block::List { ordered, start, items: its } if items.get(&i).map(|r| r.len() == its.len() && its.len() > 1).unwrap_or(false) => {
+                let rs = &items[&i];
+                for (k, it) in its.into_iter().enumerate() { out.push(Located { block: Block::List { ordered, start: start + k as u64, items: vec![it] }, first_line: rs[k].0, last_line: rs[k].1.max(rs[k].0) }); }
+            }
+            block => out.push(Located { block, first_line: a, last_line: b.max(a) }),
+        }
+    }
+    out
 }
 
 pub fn is_markdown(path: &str) -> bool { let l = path.to_lowercase(); l.ends_with(".md") || l.ends_with(".markdown") || l.ends_with(".mdx") }
@@ -115,8 +130,9 @@ mod tests {
         let src = "# Title\n\nfirst para\nsecond line\n\n- a\n- b\n\n```rust\nlet x = 1;\n```\n\n---\n\n> quote\n";
         let l = parse_located(src);
         let got: Vec<(u32, u32)> = l.iter().map(|x| (x.first_line, x.last_line)).collect();
-        assert_eq!(got, vec![(1, 1), (3, 4), (6, 7), (9, 11), (13, 13), (15, 15)]);
-        assert!(matches!(l[1].block, Block::Para(_)) && matches!(l[5].block, Block::Quote(_)));
+        // the two bullets are separate, individually commentable blocks
+        assert_eq!(got, vec![(1, 1), (3, 4), (6, 6), (7, 7), (9, 11), (13, 13), (15, 15)]);
+        assert!(matches!(l[1].block, Block::Para(_)) && matches!(l[6].block, Block::Quote(_)));
     }
     #[test] fn robust_on_garbage() { for s in ["", "***", "```", "| x", "> > >", "[a](", "# \n#"] { let _ = parse(s); } assert!(is_markdown("a/README.MD") && !is_markdown("a.rs")); }
 }

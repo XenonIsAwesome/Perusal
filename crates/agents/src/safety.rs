@@ -1,12 +1,14 @@
 //! Agent safety: minimal environment, per-review repo allowlist, visible access log, read-only permissions.
 use std::collections::BTreeMap;
 
-const KEEP: [&str; 6] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR", "XDG_RUNTIME_DIR"];
+const KEEP: [&str; 9] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL", "NODE_PATH"];
+/// Variables that only describe where tools live (version managers, XDG dirs, locale); launchers and shims of agent CLIs need them to find themselves.
+const KEEP_PREFIX: [&str; 16] = ["XDG_", "LC_", "VOLTA_", "ASDF_", "MISE_", "NVM_", "FNM_", "PNPM_", "BUN_", "NPM_CONFIG_PREFIX", "CARGO_HOME", "RUSTUP_HOME", "HOMEBREW_", "PYENV", "SDKMAN", "NODENV"];
 const SECRET_HINTS: [&str; 7] = ["TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "COOKIE", "AUTH"];
 
 /// Minimal environment for an agent: a short allowlist, nothing that looks like a credential.
 pub fn minimal_env(parent: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    parent.iter().filter(|(k, _)| KEEP.contains(&k.as_str()) && !SECRET_HINTS.iter().any(|h| k.to_uppercase().contains(h))).map(|(k, v)| (k.clone(), v.clone())).collect()
+    parent.iter().filter(|(k, _)| (KEEP.contains(&k.as_str()) || KEEP_PREFIX.iter().any(|p| k.starts_with(p))) && !SECRET_HINTS.iter().any(|h| k.to_uppercase().contains(h))).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]

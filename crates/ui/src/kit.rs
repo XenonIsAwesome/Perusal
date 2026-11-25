@@ -36,10 +36,29 @@ impl Pal {
 pub struct Fonts { pub ui: SharedString, pub mono: SharedString }
 
 /// Picks installed fonts: a pleasant UI font if present, else the platform UI font; a good monospace if present.
+/// Families to use for bold and italic text. Normally the UI font itself; when the UI font has no such face installed
+/// (the weight/style silently falls back to regular), another installed family that does is used so the difference is visible.
+static VARIANTS: std::sync::OnceLock<(Option<SharedString>, Option<SharedString>)> = std::sync::OnceLock::new();
+fn variant_families(cx: &App, ui: &str) -> (Option<SharedString>, Option<SharedString>) {
+    let ts = cx.text_system(); let names = ts.all_font_names();
+    let has_face = |fam: &str, bold: bool| {
+        let reg = gpui::font(fam.to_string()); let mut v = reg.clone();
+        if bold { v.weight = FontWeight::BOLD; } else { v.style = gpui::FontStyle::Italic; }
+        ts.resolve_font(&v) != ts.resolve_font(&reg)
+    };
+    let alt = |bold: bool| -> Option<SharedString> {
+        if has_face(ui, bold) { return None; }
+        ["Noto Sans", "DejaVu Sans", "Liberation Sans", "Roboto", "Cantarell", "Arial", "Helvetica", "Segoe UI", "SF Pro Text", "Inter"].iter().find(|f| names.iter().any(|n| n == *f) && has_face(f, bold)).map(|f| SharedString::from(f.to_string()))
+    };
+    (alt(true), alt(false))
+}
+
 pub fn pick_fonts(cx: &App) -> Fonts {
     let names = cx.text_system().all_font_names();
     let has = |n: &str| names.iter().any(|x| x == n);
     let pick = |c: &[&str], fallback: &str| c.iter().find(|n| has(n)).map(|s| s.to_string()).unwrap_or_else(|| fallback.to_string());
+    let ui = pick(&["Inter", "Segoe UI", "SF Pro Text", "Cantarell", "Noto Sans", "Roboto"], ".SystemUIFont");
+    let _ = VARIANTS.set(variant_families(cx, &ui));
     Fonts { ui: pick(&["Inter", "Segoe UI", "SF Pro Text", "Cantarell", "Noto Sans", "Roboto"], ".SystemUIFont").into(),
         mono: pick(&["JetBrains Mono", "Fira Code", "Cascadia Mono", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono"], "monospace").into() }
 }
@@ -76,12 +95,19 @@ pub fn hit_char(window: &Window, text: &str, family: &SharedString, size: Pixels
 }
 
 /// Mouse down in a field: caret placement, Shift extends, double-click selects a word, triple-click everything.
+fn scrolled(f: &TextField, window: &Window, bounds: &gpui::Bounds<Pixels>, family: &SharedString, size: Pixels) -> gpui::Bounds<Pixels> {
+    let start = f.selection().map(|s| s.0).unwrap_or(f.cursor);
+    let x0 = line_scroll(window, &f.text, start, family, size, bounds.size.width.into());
+    let mut b = *bounds; b.origin.x -= px(x0); b
+}
 pub fn field_mouse_down(f: &mut TextField, window: &Window, bounds: &gpui::Bounds<Pixels>, family: &SharedString, size: Pixels, ev: &gpui::MouseDownEvent) {
+    let bounds = &scrolled(f, window, bounds, family, size);
     let i = hit_char(window, &f.text, family, size, bounds, ev.position.x);
     match ev.click_count { 2 => f.select_word(i), 3.. => f.select_all(), _ => f.set_cursor(i, ev.modifiers.shift) }
 }
 /// Mouse drag in a field: extends the selection from where it started.
 pub fn field_mouse_drag(f: &mut TextField, window: &Window, bounds: &gpui::Bounds<Pixels>, family: &SharedString, size: Pixels, x: Pixels) {
+    let bounds = &scrolled(f, window, bounds, family, size);
     let i = hit_char(window, &f.text, family, size, bounds, x);
     if f.anchor.is_none() { f.anchor = Some(f.cursor); }
     f.cursor = i;
@@ -150,15 +176,35 @@ pub fn bounds_probe(b: &FieldBounds) -> impl IntoElement {
 /// Renders a text field's text with selection and caret.
 pub fn field_text(f: &TextField, focused: bool, placeholder: &str, p: &Pal) -> Div {
     let (before, sel, after) = f.parts();
-    let caret = || div().w(px(1.5)).h(px(15.0)).bg(p.accent).flex_none();
     if f.is_empty() {
+        let caret = || div().w(px(1.5)).h(px(15.0)).bg(p.accent).flex_none();
         return div().flex().items_center().when(focused, |d| d.child(caret())).child(div().text_color(p.muted).child(placeholder.to_string()));
     }
-    div().flex().items_center().whitespace_nowrap().overflow_hidden()
-        .child(before)
-        .when(!sel.is_empty(), |d| d.child(div().bg(p.accent.opacity(0.35)).child(sel.clone())))
+    scrolling_line(before, sel, after, focused, p)
+}
+
+/// One line of text with its caret or selection. When the line is wider than the field, the end of the text before the caret stays
+/// visible (the line scrolls as you type): the part before the caret shrinks from its left edge, the rest keeps its size.
+fn scrolling_line(before: String, sel: String, after: String, focused: bool, p: &Pal) -> Div {
+    let caret = || div().w(px(1.5)).h(px(15.0)).bg(p.accent).flex_none();
+    div().flex().items_center().whitespace_nowrap().overflow_hidden().w_full()
+        .child(div().flex().flex_shrink(1.0).min_w_0().overflow_hidden().justify_end().child(div().flex_none().child(before)))
+        .when(!sel.is_empty(), |d| d.child(div().flex_none().bg(p.accent.opacity(0.35)).child(sel.clone())))
         .when(focused && sel.is_empty(), |d| d.child(caret()))
-        .child(after)
+        .child(div().flex_none().child(after))
+}
+
+fn text_w(window: &Window, s: &str, family: &SharedString, size: Pixels) -> f32 {
+    if s.is_empty() { return 0.0; }
+    let run = gpui::TextRun { len: s.len(), font: gpui::font(family.clone()), color: gpui::white(), background_color: None, underline: None, strikethrough: None };
+    window.text_system().shape_line(s.to_string().into(), size, &[run], None).width.into()
+}
+/// How far a single line of text is scrolled left inside its field (matches [`scrolling_line`]).
+fn line_scroll(window: &Window, line: &str, caret_or_sel_start: usize, family: &SharedString, size: Pixels, avail: f32) -> f32 {
+    let w = text_w(window, line, family, size);
+    if w <= avail { return 0.0; }
+    let before: String = line.chars().take(caret_or_sel_start).collect();
+    text_w(window, &before, family, size).min(w - avail).max(0.0)
 }
 
 /// On/off switch visual (wrap in an element with an on_click).
@@ -277,8 +323,12 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -
             n += 1;
             let t = tok.trim_end_matches('\n').to_string();
             let mut el = div().id(("md-t", n)).whitespace_nowrap();
+            let (bold_alt, italic_alt) = VARIANTS.get().cloned().unwrap_or((None, None));
             if s.bold { el = el.font_weight(FontWeight::BOLD); }
             if s.italic { el = el.italic(); }
+            // no real bold/italic face in the UI font: borrow one from another family, else tint so the emphasis is still visible
+            if s.bold { if let Some(f) = &bold_alt { el = el.font_family(f.clone()); } }
+            if s.italic { if let Some(f) = &italic_alt { el = el.font_family(f.clone()); } }
             if s.strike { el = el.line_through(); }
             let el = match &s.link {
                 Some(u) => { let u = u.clone(); el.text_color(p.accent).underline().cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)) }
@@ -309,9 +359,9 @@ pub fn field_multi(f: &TextField, focused: bool, placeholder: &str, p: &Pal, min
         let caret_here = focused && sel.is_none() && f.cursor >= start && f.cursor <= end;
         let caret_at = f.cursor.saturating_sub(start).min(n);
         let row = if s1 > s0 {
-            div().flex().items_center().h(lh).whitespace_nowrap().child(cut(0, s0)).child(div().bg(p.accent.opacity(0.35)).child(cut(s0, s1))).child(cut(s1, n))
+            scrolling_line(cut(0, s0), cut(s0, s1), cut(s1, n), false, p).h(lh)
         } else if caret_here {
-            div().flex().items_center().h(lh).whitespace_nowrap().child(cut(0, caret_at)).child(div().w(px(1.5)).h(px(15.0)).bg(p.accent).flex_none()).child(cut(caret_at, n))
+            scrolling_line(cut(0, caret_at), String::new(), cut(caret_at, n), true, p).h(lh)
         } else { div().flex().items_center().h(lh).whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() }) };
         rows.push(row); start = end + 1;
     }
@@ -322,7 +372,10 @@ pub fn field_multi(f: &TextField, focused: bool, placeholder: &str, p: &Pal, min
 pub fn hit_multi(window: &Window, f: &TextField, family: &SharedString, size: Pixels, bounds: &gpui::Bounds<Pixels>, pos: gpui::Point<Pixels>) -> usize {
     let lines = f.lines(); let rel: f32 = (pos.y - bounds.origin.y).into();
     let li = ((rel / LINE_H).floor().max(0.0) as usize).min(lines.len().saturating_sub(1));
-    let col = hit_char(window, lines[li], family, size, bounds, pos.x);
+    let (cl, cc) = f.line_col(f.selection().map(|s| s.0).unwrap_or(f.cursor));
+    let x0 = if cl == li { line_scroll(window, lines[li], cc, family, size, bounds.size.width.into()) } else { 0.0 };
+    let mut sb = *bounds; sb.origin.x -= px(x0);
+    let col = hit_char(window, lines[li], family, size, &sb, pos.x);
     f.index_of(li, col)
 }
 

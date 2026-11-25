@@ -10,7 +10,7 @@ pub struct Client { child: Child, stdin: ChildStdin, out: BufReader<std::process
 impl Client {
     /// Starts the agent in `cwd` (the checked-out MR tree) with a minimal environment.
     pub fn spawn(program: &str, args: &[String], cwd: &std::path::Path, env: &BTreeMap<String, String>) -> std::io::Result<Self> {
-        let mut c = Command::new(program).args(args).current_dir(cwd).env_clear().envs(env).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+        let mut c = Command::new(crate::find_program(program).unwrap_or_else(|| program.into())).args(args).current_dir(cwd).env_clear().envs(env).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
         let stdin = c.stdin.take().unwrap(); let out = BufReader::new(c.stdout.take().unwrap());
         Ok(Client { child: c, stdin, out, next: 1 })
     }

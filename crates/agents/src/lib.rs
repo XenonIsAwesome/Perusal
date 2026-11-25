@@ -96,9 +96,46 @@ pub fn effort_suggestions(agent: &str) -> &'static [&'static str] {
 pub fn supports_effort(agent: &str) -> bool { matches!(agent, "claude" | "codex" | "opencode") }
 
 /// True if `program` resolves on PATH.
-pub fn on_path(program: &str) -> bool {
-    std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file())).unwrap_or(false)
+/// The user's login-shell PATH (cached). A GUI launched from a desktop launcher or dock gets a bare PATH, while the same app started
+/// from a terminal sees the full one, so agent CLIs installed under ~/.bun, ~/.opencode, nvm and the like would come and go.
+fn login_path() -> &'static Vec<std::path::PathBuf> {
+    static P: std::sync::OnceLock<Vec<std::path::PathBuf>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let child = std::process::Command::new(&shell).args(["-ilc", "printf %s \"$PATH\""]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn();
+        let Ok(child) = child else { return vec![] };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
+        match rx.recv_timeout(std::time::Duration::from_secs(4)) { Ok(Ok(o)) => std::env::split_paths(String::from_utf8_lossy(&o.stdout).trim()).collect(), _ => vec![] }
+    })
 }
+
+/// Every directory searched for agent programs: this process's PATH, the login shell's PATH, then usual user install locations. Existing, de-duplicated, in that order.
+pub fn search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    dirs.extend(login_path().iter().cloned());
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for d in [".local/bin", ".opencode/bin", ".bun/bin", ".cargo/bin", ".volta/bin", ".npm-global/bin", ".claude/local", "go/bin", ".deno/bin"] { dirs.push(home.join(d)); }
+        if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) { for e in rd.flatten() { dirs.push(e.path().join("bin")); } }
+    }
+    for d in ["/usr/local/bin", "/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin", "/snap/bin", "/usr/bin", "/bin"] { dirs.push(d.into()); }
+    let mut out: Vec<std::path::PathBuf> = vec![];
+    for d in dirs { if d.is_dir() && !out.contains(&d) { out.push(d); } }
+    out
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// Resolves a program name to the executable that would run (absolute paths and names with a slash are checked as they are).
+pub fn find_program(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') { let p = std::path::PathBuf::from(program); return is_executable(&p).then_some(p); }
+    search_dirs().into_iter().map(|d| d.join(program)).find(|p| is_executable(p))
+}
+
+pub fn on_path(program: &str) -> bool { find_program(program).is_some() }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection { pub file: String, pub start: u32, pub end: u32, pub snippet: String }
@@ -143,7 +180,7 @@ pub fn draft_body(c: &AiComment) -> String { format!("[{}] {}", c.severity, c.bo
 /// Headless CLI fallback: runs the agent once in `cwd` with a minimal environment and returns stdout.
 /// The process is killed if it runs longer than `timeout`.
 pub fn run_headless(l: &Launch, cwd: &std::path::Path, env: &std::collections::BTreeMap<String, String>, timeout: std::time::Duration) -> std::io::Result<String> {
-    let child = std::process::Command::new(&l.program).args(&l.args).current_dir(cwd).env_clear().envs(env).stdin(std::process::Stdio::null())
+    let child = std::process::Command::new(find_program(&l.program).unwrap_or_else(|| l.program.clone().into())).args(&l.args).current_dir(cwd).env_clear().envs(env).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -245,5 +282,19 @@ mod gen_tests {
         assert_eq!(parse_generated("ok\n```json\n{\"sort\": \" changed desc \"}\n```", &["sort"]).unwrap(), vec!["changed desc"]);
         assert_eq!(parse_generated("{\"label\":\"l\",\"pattern\":\"p\"}", &["label", "pattern"]).unwrap(), vec!["l", "p"]);
         assert!(parse_generated("nothing", &["x"]).is_err()); assert!(parse_generated("{\"a\":1}", &["x"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    #[test] fn finds_programs_outside_the_process_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("perusal-home-{}", std::process::id())); let bin = home.join(".opencode/bin"); std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("opencode-test-xyz"); std::fs::write(&exe, "#!/bin/sh\n").unwrap(); std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old = std::env::var_os("HOME"); std::env::set_var("HOME", &home);
+        let found = super::find_program("opencode-test-xyz");
+        if let Some(h) = old { std::env::set_var("HOME", h); }
+        assert_eq!(found, Some(exe)); assert!(!super::on_path("definitely-not-installed-xyz"));
+        let _ = std::fs::remove_dir_all(home);
     }
 }
