@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ pub fn parse_claude_line(line: &str) -> Vec<AgentEvent> {
 /// Runs the agent in `cwd` with a minimal environment (plus the launch's own extras). Calls `on_event` as output
 /// arrives. Returns the final answer. Setting `cancel` kills the process.
 pub fn run_streaming(l: &Launch, cwd: &Path, env: &BTreeMap<String, String>, timeout: Duration, cancel: &AtomicBool, mut on_event: impl FnMut(AgentEvent)) -> Result<String, RunError> {
-    let mut child = Command::new(crate::find_program(&l.program).unwrap_or_else(|| l.program.clone().into())).args(&l.args).current_dir(cwd).env_clear().envs(env).envs(l.env.iter().cloned())
+    let mut child = perusal_gitops::command(crate::find_program(&l.program).unwrap_or_else(|| l.program.clone().into())).args(&l.args).current_dir(cwd).env_clear().envs(env).envs(l.env.iter().cloned())
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| RunError::Failed(format!("cannot start {}: {e}", l.program)))?;
     let (tx, rx) = mpsc::channel::<String>();
     let out = child.stdout.take().unwrap();

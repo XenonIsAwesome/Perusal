@@ -96,7 +96,9 @@ pub fn parse_diff_z(raw: &str, numstat: &str) -> Vec<FileStat> {
 /// Computes the stats index for `base..head` in the repo at `repo`, via the git CLI.
 pub fn index_range(repo: &Path, base: &str, head: &str) -> std::io::Result<Vec<FileStat>> {
     let run = |args: &[&str]| -> std::io::Result<String> {
-        let o = Command::new("git").args(args).arg(format!("{base}...{head}")).current_dir(repo).output()?;
+        let mut c = Command::new("git");
+        #[cfg(windows)] { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+        let o = c.args(args).arg(format!("{base}...{head}")).current_dir(repo).output()?;
         if !o.status.success() { return Err(std::io::Error::other(String::from_utf8_lossy(&o.stderr).to_string())); }
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
     };

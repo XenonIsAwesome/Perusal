@@ -4176,6 +4176,7 @@ name = "perusal-agents"
 version = "0.1.0"
 dependencies = [
  "perusal-core",
+ "perusal-gitops",
  "serde",
  "serde_json",
 ]

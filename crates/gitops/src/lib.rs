@@ -4,8 +4,38 @@ use std::process::Command;
 
 pub type Result<T> = std::result::Result<T, String>;
 
+/// A command that does not flash a console window when started from the GUI on Windows.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)] let mut c = Command::new(program);
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+    c
+}
+
+/// The git executable: `git` from PATH, else the usual Git for Windows install locations (a GUI may start without them on PATH).
+fn git_program() -> std::ffi::OsString {
+    #[cfg(windows)] {
+        static P: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+        P.get_or_init(|| {
+            let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("git.exe").is_file()));
+            if on_path { return "git".into(); }
+            let mut roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"].iter().filter_map(|k| std::env::var_os(k).map(PathBuf::from)).collect();
+            roots.dedup();
+            for r in roots { for sub in ["Git/cmd/git.exe", "Programs/Git/cmd/git.exe"] { let p = r.join(sub); if p.is_file() { return p.into_os_string(); } } }
+            "git".into()
+        }).clone()
+    }
+    #[cfg(not(windows))] { "git".into() }
+}
+
+/// `git` with long paths enabled (Windows only; the setting is harmless elsewhere).
+pub fn git_command() -> Command {
+    let mut c = command(git_program());
+    if cfg!(windows) { c.args(["-c", "core.longpaths=true"]); }
+    c
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let o = Command::new("git").args(args).current_dir(dir).output().map_err(|e| e.to_string())?;
+    let o = git_command().args(args).current_dir(dir).output().map_err(|e| e.to_string())?;
     if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()) }
     else { Err(redact(&String::from_utf8_lossy(&o.stderr))) }
 }
@@ -124,8 +154,8 @@ pub fn local_base(dir: &Path, branch: &str, override_base: Option<&str>) -> Resu
 /// Exports the tree at `rev` into `dest` (a plain read-only snapshot without .git), for agents to read.
 pub fn export_tree(dir: &Path, rev: &str, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let mut a = Command::new("git").args(["archive", "--format=tar", rev]).current_dir(dir).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let t = Command::new("tar").args(["-x", "-f", "-", "-C"]).arg(dest).stdin(a.stdout.take().unwrap()).output().map_err(|e| e.to_string())?;
+    let mut a = git_command().args(["archive", "--format=tar", rev]).current_dir(dir).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let t = command("tar").args(["-x", "-f", "-", "-C"]).arg(dest).stdin(a.stdout.take().unwrap()).output().map_err(|e| e.to_string())?;
     let o = a.wait_with_output().map_err(|e| e.to_string())?;
     if !o.status.success() { return Err(redact(&String::from_utf8_lossy(&o.stderr))); }
     if !t.status.success() { return Err(String::from_utf8_lossy(&t.stderr).to_string()); }
@@ -134,13 +164,13 @@ pub fn export_tree(dir: &Path, rev: &str, dest: &Path) -> Result<()> {
 
 /// Unified patch for `base..head` (three-dot), for review prompts.
 pub fn patch(dir: &Path, base: &str, head: &str) -> Result<String> {
-    let o = Command::new("git").args(["diff", "--no-color", "-U2", &format!("{base}...{head}")]).current_dir(dir).output().map_err(|e| e.to_string())?;
+    let o = git_command().args(["diff", "--no-color", "-U2", &format!("{base}...{head}")]).current_dir(dir).output().map_err(|e| e.to_string())?;
     if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(redact(&String::from_utf8_lossy(&o.stderr))) }
 }
 
 /// File content at a revision, if present. Exact bytes as text (no trimming: line diffs depend on the final newline).
 pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> {
-    let o = Command::new("git").args(["show", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;
+    let o = git_command().args(["show", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 

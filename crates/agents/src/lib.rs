@@ -214,14 +214,14 @@ pub fn parse_review(output: &str) -> Result<Vec<AiComment>, String> {
 pub fn draft_body(c: &AiComment) -> String { format!("[{}] {}", c.severity, c.body) }
 
 fn kill_pid(pid: u32) {
-    let _ = if cfg!(windows) { std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output() }
+    let _ = if cfg!(windows) { perusal_gitops::command("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).output() }
         else { std::process::Command::new("kill").arg("-9").arg(pid.to_string()).output() };
 }
 
 /// Headless CLI fallback: runs the agent once in `cwd` with a minimal environment and returns stdout.
 /// The process is killed if it runs longer than `timeout`.
 pub fn run_headless(l: &Launch, cwd: &std::path::Path, env: &std::collections::BTreeMap<String, String>, timeout: std::time::Duration) -> std::io::Result<String> {
-    let child = std::process::Command::new(find_program(&l.program).unwrap_or_else(|| l.program.clone().into())).args(&l.args).current_dir(cwd).env_clear().envs(env).stdin(std::process::Stdio::null())
+    let child = perusal_gitops::command(find_program(&l.program).unwrap_or_else(|| l.program.clone().into())).args(&l.args).current_dir(cwd).env_clear().envs(env).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -339,5 +339,31 @@ mod find_tests {
         if let Some(h) = old { std::env::set_var("HOME", h); }
         assert_eq!(found, Some(exe)); assert!(!super::on_path("definitely-not-installed-xyz"));
         let _ = std::fs::remove_dir_all(home);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    /// npm-installed agent CLIs are `.cmd` shims: they must resolve without the extension, from a directory with spaces, and run.
+    #[test] fn resolves_and_runs_cmd_shims() {
+        let dir = std::env::temp_dir().join(format!("perusal shim {}", std::process::id())); std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shim-agent-xyz.cmd"), "@echo off\r\necho [] %*\r\n").unwrap();
+        let old = std::env::var_os("PATH"); let mut p = std::env::split_paths(old.as_ref().unwrap()).collect::<Vec<_>>(); p.insert(0, dir.clone());
+        std::env::set_var("PATH", std::env::join_paths(p).unwrap());
+        let found = super::find_program("shim-agent-xyz");
+        let l = super::Launch { program: "shim-agent-xyz".into(), args: vec!["hello".into()], acp: false, ..Default::default() };
+        let env = [("PATH".to_string(), std::env::var("PATH").unwrap()), ("SYSTEMROOT".to_string(), std::env::var("SYSTEMROOT").unwrap())].into();
+        let out = super::run_headless(&l, &dir, &env, std::time::Duration::from_secs(20));
+        std::env::set_var("PATH", old.unwrap());
+        assert_eq!(found, Some(dir.join("shim-agent-xyz.cmd")));
+        assert_eq!(out.unwrap().trim(), "[] hello");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test] fn timeout_kills_a_running_process() {
+        let l = super::Launch { program: "ping".into(), args: vec!["-n".into(), "30".into(), "127.0.0.1".into()], acp: false, ..Default::default() };
+        let env = [("PATH".to_string(), std::env::var("PATH").unwrap()), ("SYSTEMROOT".to_string(), std::env::var("SYSTEMROOT").unwrap())].into();
+        let t = std::time::Instant::now();
+        let e = super::run_headless(&l, &std::env::temp_dir(), &env, std::time::Duration::from_millis(500)).unwrap_err();
+        assert!(e.to_string().contains("did not finish") && t.elapsed().as_secs() < 5);
     }
 }

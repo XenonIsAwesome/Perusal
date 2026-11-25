@@ -17,6 +17,7 @@ fn attach_console() {}
 
 fn main() {
     attach_console();
+    if cfg!(windows) { std::thread::spawn(|| { let _ = deeplink::register_scheme(); }); }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["theme", "check", file] => {
