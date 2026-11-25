@@ -59,7 +59,7 @@ pub struct View {
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, list: ListState, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>, hx: f32, hx_text: std::rc::Rc<std::cell::Cell<f32>>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>, hx: f32, hb_drag: Option<f32>, hx_text: std::rc::Rc<std::cell::Cell<f32>>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
@@ -105,7 +105,7 @@ impl View {
         View { pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
-            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hx_text: Default::default(),
+            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
@@ -730,6 +730,7 @@ impl Render for View {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen] { i.dragging = false; }
                 if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
+                this.hb_drag = None;
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
                 cx.notify();
             }))
@@ -737,6 +738,10 @@ impl Render for View {
                 if ev.pressed_button != Some(MouseButton::Left) { return; }
                 let zoom = this.zoom; let vw: f32 = w.viewport_size().width.into(); let x: f32 = ev.position.x.into(); let y: f32 = ev.position.y.into();
                 match this.resizing { Some(Side::Left) => { this.left_w = (x / zoom).clamp(200.0, 700.0); cx.notify(); } Some(Side::Right) => { this.right_w = ((vw - x) / zoom).clamp(220.0, 700.0); cx.notify(); } None => {} }
+                if let (Some(grab), Some((ox, tw, max))) = (this.hb_drag, this.hbar_geom()) {
+                    let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0);
+                    this.hx = ((x - ox - grab) / travel).clamp(0.0, 1.0) * max; cx.notify();
+                }
                 if let Some(grab) = this.sb_drag {
                     let vp = this.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let oy: f32 = vp.origin.y.into(); let max: f32 = this.list.max_offset_for_scrollbar().y.into();
                     let thumb = (vh * vh / (vh + max)).max(28.0); let travel = (vh - thumb).max(1.0);
@@ -779,7 +784,7 @@ impl View {
         let title: AnyElement = if renaming {
             self.winp(Fid::Rename, div().id("rename-box").flex().items_center().px_3().py(px(4.0)).w(px(360.0)).rounded_md().border_1().border_color(p.accent).bg(p.bg).child(input_text(&self.rename, true, "Name this review", &p, false, 1)), cx).into_any_element()
         } else {
-            div().flex().items_center().gap_1().min_w_0().child(div().id("title-text").text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().cursor_text().child(SharedString::from(self.m.title.clone()))
+            div().flex().items_center().gap_1().min_w_0().child(div().id("title-text").text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().px_2().py(px(2.0)).rounded_md().border_1().border_color(gpui::transparent_black()).cursor_text().hover(move |x| x.bg(p.hover).border_color(p.accent)).child(SharedString::from(self.m.title.clone()))
                 .on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); })))
                 .child(icon_btn("rename", ic::EDIT, "Rename this review", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); }))).into_any_element()
         };
@@ -1079,6 +1084,27 @@ impl View {
         ).id(id)
     }
 
+    /// Horizontal scrollbar geometry: (track left x, track width, max offset); None when nothing overflows.
+    fn hbar_geom(&self) -> Option<(f32, f32, f32)> {
+        let b = self.b_body.get(); let (ox, w): (f32, f32) = (b.origin.x.into(), b.size.width.into());
+        let cols = if self.diff_mode == DiffMode::Split { 2.0 } else { 1.0 };
+        let max = (self.hx_text.get() - (w - 130.0) / cols).max(0.0);
+        (max > 1.0 && w > 60.0 && self.md.is_none()).then_some((ox, w - 12.0, max))
+    }
+
+    fn hscrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.pal; let (ox, tw, max) = self.hbar_geom()?;
+        let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0); let left = (self.hx / max).clamp(0.0, 1.0) * travel;
+        let dragging = self.hb_drag.is_some();
+        Some(div().id("hb-track").absolute().bottom(px(70.0)).left_0().w(px(tw)).h(px(12.0)).cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                let x: f32 = ev.position.x.into(); let rel = x - ox;
+                let grab = if rel >= left && rel <= left + thumb { rel - left } else { thumb / 2.0 };
+                this.hb_drag = Some(grab); this.hx = ((rel - grab) / travel).clamp(0.0, 1.0) * max; cx.stop_propagation(); cx.notify();
+            }))
+            .child(div().absolute().left(px(left)).bottom(px(2.0)).h(px(8.0)).w(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
+    }
+
     fn scrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.pal;
         let vp = self.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let max: f32 = self.list.max_offset_for_scrollbar().y.into();
@@ -1206,15 +1232,14 @@ impl View {
                 .on_scroll_wheel(cx.listener(|this, ev: &gpui::ScrollWheelEvent, _, cx| {
                     let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
                     if dx != 0.0 {
-                        let vw: f32 = this.list.viewport_bounds().size.width.into();
-                        let cols = if this.diff_mode == DiffMode::Split { 2.0 } else { 1.0 };
-                        let max = (this.hx_text.get() - (vw - 130.0) / cols).max(0.0);
+                        let max = this.hbar_geom().map(|g| g.2).unwrap_or(0.0);
                         let n = (this.hx - dx).clamp(0.0, max); if n != this.hx { this.hx = n; cx.notify(); }
                     }
                 }))
                 .child(list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| this.render_row(ix, cx))).size_full()).into_any_element()
         };
         let scrollbar = if self.md.is_none() { self.scrollbar(cx) } else { None };
+        let hscrollbar = self.hscrollbar(cx);
 
         // toolbar that floats above the selected lines
         let sel = self.selection();
@@ -1248,7 +1273,7 @@ impl View {
                 .children((!self.instant()).then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
 
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
-        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(toolbar).child(bar);
+        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(hscrollbar).children(toolbar).child(bar);
         div().relative().flex().flex_col().flex_1().min_w_0().min_h_0().children(header).child(wrap).children(composer)
     }
 
