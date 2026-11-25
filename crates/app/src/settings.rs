@@ -43,6 +43,8 @@ pub struct Settings {
     pub model: String,
     /// Reasoning effort / variant: empty (default), low, medium or high.
     pub effort: String,
+    /// Minutes an AI agent run may take before it is stopped; 0 = no limit.
+    pub agent_timeout_mins: u32,
     /// File grouping rules (built-in plus custom).
     pub group_rules: Vec<perusal_diff::GroupRule>,
     /// Hosts the user can sign in to (github.com and gitlab.com are always present).
@@ -68,7 +70,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
+            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
 impl Settings {
@@ -80,6 +82,8 @@ impl Settings {
         st
     }
     pub fn to_toml(&self) -> String { toml::to_string_pretty(self).unwrap_or_default() }
+    /// Agent run limit; `None` when the user chose no timeout.
+    pub fn agent_timeout(&self) -> Option<std::time::Duration> { (self.agent_timeout_mins > 0).then(|| std::time::Duration::from_secs(self.agent_timeout_mins as u64 * 60)) }
     pub fn agent_label(&self) -> &'static str { AGENTS.iter().find(|(k, _)| *k == self.agent).map(|(_, l)| *l).unwrap_or("Claude Code") }
     /// Theme to use now: the chosen one, or the light/dark pair when following the OS.
     pub fn effective_theme(&self, os_dark: bool) -> &str { if self.follow_os { if os_dark { &self.theme_dark } else { &self.theme_light } } else { &self.theme } }
@@ -112,6 +116,11 @@ mod tests { use super::*;
     #[test] fn theme_choice() {
         let mut s = Settings::default(); assert_eq!(s.effective_theme(false), "dark");
         s.follow_os = true; assert_eq!(s.effective_theme(false), "github-light"); assert_eq!(s.effective_theme(true), "dark");
+    }
+    #[test] fn agent_timeout_setting() {
+        assert_eq!(Settings::default().agent_timeout(), Some(std::time::Duration::from_secs(900)));
+        assert_eq!(Settings::from_toml("agent_timeout_mins = 0\n").agent_timeout(), None);
+        assert_eq!(Settings::from_toml("agent_timeout_mins = 2\n").agent_timeout(), Some(std::time::Duration::from_secs(120)));
     }
     #[test] fn agent_cycle() { let mut s = Settings::default(); assert_eq!(s.agent_label(), "Claude Code"); for _ in 0..4 { s.next_agent(); } assert_eq!(s.agent, "claude"); s.next_agent(); assert_eq!(s.agent_label(), "Gemini CLI"); }
 }

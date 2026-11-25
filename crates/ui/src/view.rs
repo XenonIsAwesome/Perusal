@@ -35,12 +35,16 @@ struct Comp { editing: Option<i64>, global: bool, preview: bool }
 struct RLine { line: Line, runs: Vec<(Range<usize>, HighlightStyle)> }
 #[derive(Clone)]
 struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai: bool, resolved: bool, outdated: bool, replies: Vec<(String, String)>, /// the code a suggestion in the body replaces
-    orig: Option<String> }
+    orig: Option<String>, /// new-file lines the comment is about
+    range: Option<(u32, u32)> }
+/// A collapsed comment: drawn as an icon in the line-number gutter of the line it belongs to.
+#[derive(Clone)]
+struct Mark { key: String, draft: bool, resolved: bool, range: Option<(u32, u32)> }
 #[derive(Clone)]
 enum RowKind { FileHeader, Rendered(Vec<markdown::Block>), Collapsed(String, bool), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
 #[derive(Clone)]
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
-    ord: Option<usize>, new_line: Option<u32> }
+    ord: Option<usize>, new_line: Option<u32>, marks: Vec<Mark> }
 
 pub enum ViewEvent { Home, OpenSettings, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
 impl gpui::EventEmitter<ViewEvent> for View {}
@@ -55,7 +59,7 @@ pub struct View {
     sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
-    left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool,
+    left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool, overview_open: bool, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
     tab: RightTab, chat: Vec<(String, String)>, ai_ctx: Option<Selection>, ai_notice: Option<String>,
     ai_job: Option<Job>, ai_events: Arc<Mutex<Vec<AgentEvent>>>, ai_cancel: Arc<AtomicBool>, ai_started: Option<Instant>, ai_activity: Vec<String>, ai_partial: String,
     verdict: Verdict, submit_busy: bool, submit_msg: Option<(bool, String)>,
@@ -100,7 +104,7 @@ impl View {
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
-            left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true,
+            left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true, overview_open: true, info: None, hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
             verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
     }
@@ -150,7 +154,7 @@ impl View {
         self.shown = Some(batch.clone()); self.md = None; self.sym_target = None; self.sym_path = None;
         let p = self.pal;
         let mut rows: Vec<Row> = Vec::new();
-        let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None };
+        let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None, marks: vec![] };
         for &fi in &batch {
             let f = self.m.vm.files[fi].clone();
             let old = perusal_gitops::show(&self.m.repo, &self.m.base_sha, &f.path).unwrap_or_default();
@@ -182,7 +186,7 @@ impl View {
             let (mut last_old, mut last_new, mut first) = (0u32, 0u32, true);
             let mut hunk = |rows: &mut Vec<Row>, o: u32, n: u32| {
                 let jump = (o > 0 && o > last_old + 1) || (n > 0 && n > last_new + 1) || (first && (o > 1 || n > 1));
-                if jump { rows.push(Row { fi, kind: RowKind::Hunk(format!("@@ -{} +{} @@", o.max(1), n.max(1))), ord: None, new_line: None }); }
+                if jump { rows.push(Row { fi, kind: RowKind::Hunk(format!("@@ -{} +{} @@", o.max(1), n.max(1))), ord: None, new_line: None, marks: vec![] }); }
                 first = false;
                 if o > 0 { last_old = o; }
                 if n > 0 { last_new = n; }
@@ -190,11 +194,11 @@ impl View {
             // added or deleted files have nothing on one side, so they always use a single column
             let split = self.diff_mode == DiffMode::Split && !matches!(f.status, Status::Added | Status::Deleted);
             if !split {
-                for l in &lines { hunk(&mut rows, l.old_no.unwrap_or(0), l.new_no.unwrap_or(0)); rows.push(Row { fi, kind: RowKind::Uni(rl(l)), ord: None, new_line: l.new_no }); }
+                for l in &lines { hunk(&mut rows, l.old_no.unwrap_or(0), l.new_no.unwrap_or(0)); rows.push(Row { fi, kind: RowKind::Uni(rl(l)), ord: None, new_line: l.new_no, marks: vec![] }); }
             } else {
                 for (a, b) in split_pairs(&lines) {
                     hunk(&mut rows, a.and_then(|i| lines[i].old_no).unwrap_or(0), b.and_then(|i| lines[i].new_no).unwrap_or(0));
-                    rows.push(Row { fi, kind: RowKind::Split(a.map(|i| rl(&lines[i])), b.map(|i| rl(&lines[i]))), ord: None, new_line: b.and_then(|i| lines[i].new_no).or_else(|| a.and_then(|i| lines[i].new_no)) });
+                    rows.push(Row { fi, kind: RowKind::Split(a.map(|i| rl(&lines[i])), b.map(|i| rl(&lines[i]))), ord: None, new_line: b.and_then(|i| lines[i].new_no).or_else(|| a.and_then(|i| lines[i].new_no)), marks: vec![] });
                 }
             }
         }
@@ -207,14 +211,14 @@ impl View {
         let path = &self.m.vm.files[fi].path; let mut out = vec![];
         for t in self.threads.iter().filter(|t| t.path.as_deref() == Some(path.as_str())) {
             let (author, body) = t.comments.first().cloned().unwrap_or_default();
-            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect(), orig: None }));
+            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect(), orig: None, range: t.line.map(|l| (l, l)) }));
         }
         for d in self.m.store.drafts(self.m.vm.review).unwrap_or_default().into_iter().filter(|d| d.file.as_deref() == Some(path.as_str())) {
             let orig = (d.body.contains("```suggestion")).then(|| d.start_line.zip(d.end_line).and_then(|(a, b)| {
                 let t = perusal_gitops::show(&self.m.repo, &self.m.branch, path)?;
                 let v: Vec<&str> = t.lines().skip(a.saturating_sub(1) as usize).take((b + 1).saturating_sub(a) as usize).collect(); (!v.is_empty()).then(|| v.join("\n"))
             })).flatten();
-            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![], orig }));
+            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![], orig, range: d.end_line.or(d.start_line).map(|e| (d.start_line.unwrap_or(e).min(e), e)) }));
         }
         out
     }
@@ -225,10 +229,12 @@ impl View {
         let files: Vec<usize> = { let mut f: Vec<usize> = vec![]; for r in &self.base { if !f.contains(&r.fi) { f.push(r.fi); } } f };
         for fi in files {
             let mut pending = self.comments_for(fi);
+            // resolved threads start collapsed (once; expanding one by hand sticks)
+            for (_, c) in &pending { if c.resolved && self.auto_c.insert(c.key.clone()) { self.collapsed_c.insert(c.key.clone()); } }
             let group: Vec<&Row> = self.base.iter().filter(|r| r.fi == fi).collect();
             if self.collapsed_files.contains(&fi) { out.extend(group.into_iter().cloned()); continue; }
             let mut placed_top = false;
-            let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None };
+            let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None, marks: vec![] };
             for r in group {
                 out.push(r.clone());
                 let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_) | RowKind::Collapsed(..) | RowKind::Rendered(_));
@@ -240,7 +246,10 @@ impl View {
                 }
                 if let (Some(n), true) = (r.new_line, matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))) {
                     let (here, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| *l == Some(n)); pending = rest;
-                    for (_, c) in here { out.push(card(c)); }
+                    for (_, c) in here {
+                        if self.collapsed_c.contains(&c.key) { if let Some(last) = out.last_mut() { last.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); continue; } }
+                        out.push(card(c));
+                    }
                 }
             }
             for (l, mut c) in pending { c.outdated = l.is_some(); out.push(card(c)); }
@@ -457,7 +466,7 @@ impl View {
         self.m.mr_state = now.state.clone(); let _ = self.m.store.set_mr_state(self.m.vm.review, &now.state);
         let ci = now.ci.clone().unwrap_or_default();
         if ci != self.ci { self.ci = ci.clone(); cx.emit(ViewEvent::Ci(ci)); }
-        self.snap = now;
+        self.snap = now; self.info = Some(s.info.clone());
         if s.threads.len() != self.threads.len() || s.threads.iter().zip(&self.threads).any(|(a, b)| a.comments.len() != b.comments.len() || a.resolved != b.resolved) { self.threads = s.threads; self.rebuild_rows(); } else { self.threads = s.threads; }
     }
     fn ci_url(&self) -> Option<String> { let w = self.m.web_url.clone()?; Some(perusal_providers::ci_page(&self.m.mr.as_ref()?.kind, &w)) }
@@ -473,6 +482,7 @@ impl View {
         let sel = self.ai_ctx.clone();
         let (repo, rev, base, review) = (self.m.repo.clone(), self.m.branch.clone(), self.m.base_sha.clone(), self.m.vm.review);
         let (agent, custom) = (self.settings.agent.clone(), self.settings.agent_command.clone());
+        let timeout = self.settings.agent_timeout().unwrap_or(std::time::Duration::MAX);
         let changed: Vec<String> = self.m.vm.files.iter().map(|f| f.path.clone()).collect();
         let prompt_chat = chat_prompt(sel.as_ref(), &self.chat, &question);
         if let Job::Chat = job { self.chat.push(("user".into(), question.clone())); let _ = self.m.store.add_message(review, "user", &question); }
@@ -488,7 +498,7 @@ impl View {
             let prompt = if is_review { push(AgentEvent::Activity("Collecting the patch".into())); let patch = perusal_gitops::patch(&repo, &base, &rev).map_err(RunError::Failed)?; review_prompt(REVIEW_SKILL, &changed, &patch) } else { prompt_chat };
             let l = launch_with(&agent, &custom, &prompt, &opts).ok_or_else(|| RunError::Failed("no agent configured".into()))?;
             push(AgentEvent::Activity(format!("Starting {}", l.program)));
-            run_streaming(&l, &dest, &agent_env(), std::time::Duration::from_secs(900), &cancel, push)
+            run_streaming(&l, &dest, &agent_env(), timeout, &cancel, push)
         });
         cx.spawn(async move |this, cx| { let r: Result<String, RunError> = task.await; let _ = this.update(cx, |t, cx| t.finish_ai(job, r, cx)); }).detach();
         cx.spawn(async move |this, cx| {
@@ -953,7 +963,7 @@ impl View {
                     .on_click(cx.listener(move |this, _, _, cx| { this.forced.insert(fi); this.shown = None; this.load_diff(); cx.notify(); })))).into_any_element(),
             RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
             RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()).into_any_element(),
-            RowKind::Comment(c) => return self.comment_card(&c.clone(), cx).into_any_element(),
+            RowKind::Comment(c) => return self.comment_card(fi, &c.clone(), cx).into_any_element(),
             RowKind::Rendered(blocks) => return div().id(ix).w_full().px_6().py_3().font_family(self.fonts.ui.clone()).text_size(px(14.0)).child(markdown_view(blocks, &p, &mono))
                 .child(div().pt_2().text_xs().text_color(p.muted).child("Rendered preview. Switch to the source diff (m) to comment on lines, or open this file on its own to comment on blocks.")).into_any_element(),
             RowKind::Uni(rl) => {
@@ -970,6 +980,19 @@ impl View {
             RowKind::Split(a, b) => base.child(cell(a.as_ref(), true)).child(div().w(px(1.0)).h_full().bg(p.border)).child(cell(b.as_ref(), false)),
         };
         let ord = r.ord.unwrap_or(0);
+        let hl = self.hover_c.map(|(hf, a, b)| hf == fi && r.new_line.map(|n| n >= a && n <= b).unwrap_or(false)).unwrap_or(false);
+        let marks: Vec<AnyElement> = r.marks.iter().enumerate().map(|(i, m)| {
+            let k = m.key.clone(); let range = m.range;
+            let color = if m.draft { p.warn } else if m.resolved { p.success } else { p.accent };
+            let el = div().id(("mk", ix * 8 + i)).flex_none().size(px(16.0)).flex().items_center().justify_center().rounded_sm().cursor_pointer().bg(p.surface).border_1().border_color(color.opacity(0.6)).hover(move |x| x.bg(p.hover))
+                .child(icon(ic::COMMENT, 12.0, color))
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = range.map(|(a, b)| (fi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == range).unwrap_or(false) { this.hover_c = None; } cx.notify(); }))
+                .on_click(cx.listener(move |this, _, _, cx| { this.hover_c = None; this.toggle_comment(&k); cx.stop_propagation(); cx.notify(); }));
+            tip(el, "Show this comment", &p).into_any_element()
+        }).collect();
+        let inner = inner.when(hl, |d| d.relative().child(div().absolute().inset_0().bg(p.warn.opacity(0.20)).border_l_2().border_color(p.warn)))
+            .when(!marks.is_empty(), |d| d.relative().child(div().absolute().top(px(2.0)).left(if matches!(r.kind, RowKind::Split(..)) { relative(0.5) } else { px(2.0).into() }).ml(px(2.0)).flex().gap(px(2.0)).children(marks)));
         inner.when(selected, |d| d.border_l_2().border_color(p.accent)).cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| { this.row_hit(ord, ev.modifiers.shift); let y: f32 = ev.position.y.into(); this.row_y.insert(ord, y); this.sel_x = ev.position.x.into(); cx.stop_propagation(); cx.notify(); }))
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
@@ -978,7 +1001,8 @@ impl View {
     }
 
     /// A comment on the diff, GitLab style: collapsible, rich or raw, with edit and delete for your own drafts.
-    fn comment_card(&mut self, c: &CItem, cx: &mut Context<Self>) -> impl IntoElement {
+    fn comment_card(&mut self, fi: usize, c: &CItem, cx: &mut Context<Self>) -> impl IntoElement {
+        let (cfi, hv) = (fi, c.range);
         let p = self.pal; let mono = self.fonts.mono.clone();
         let collapsed = self.collapsed_c.contains(&c.key); let raw = self.raw_c.contains(&c.key);
         let (k1, k2) = (c.key.clone(), c.key.clone()); let id = SharedString::from(c.key.clone());
@@ -987,7 +1011,8 @@ impl View {
         let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(text), &p, &mono, orig.as_deref()).text_sm().into_any_element() } };
         let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
         div().flex().w_full().pl(px(110.0)).pr_3().py(px(4.0)).child(
-            div().id(SharedString::from(format!("card-{}", c.key))).flex().flex_col().flex_1().min_w_0().rounded_md().border_1().border_color(p.border).border_l_4().border_color(accent).bg(p.surface).overflow_hidden()
+            div().id(SharedString::from(format!("card-{}", c.key))).flex().flex_col().flex_1().min_w_0().rounded_md()
+                .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = hv.map(|(a, b)| (cfi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == hv).unwrap_or(false) { this.hover_c = None; } cx.notify(); })).border_1().border_color(p.border).border_l_4().border_color(accent).bg(p.surface).overflow_hidden()
                 .child(div().flex().items_center().gap_2().px_3().py(px(5.0)).bg(p.hover.opacity(0.5))
                     .child(div().id(SharedString::from(format!("cc-{}", c.key))).flex().items_center().gap_1().cursor_pointer().on_click(cx.listener(move |this, _, _, cx| { this.toggle_comment(&k1); cx.notify(); }))
                         .child(icon(if collapsed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted)).child(icon(ic::COMMENT, 15.0, accent)))
@@ -1188,7 +1213,38 @@ impl View {
         }).collect();
         let n = drafts.len();
         let (co, dro) = (self.commits_open, self.drafts_open);
+        // overview: what the MR is about, plus the conversation that is not tied to a line
+        let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
+        let global_drafts: Vec<&perusal_core::store::Draft> = drafts.iter().filter(|d| d.file.is_none()).collect();
+        let n_global = global_threads.len() + global_drafts.len();
+        let oo = self.overview_open && self.info.is_some();
+        let overview: Option<gpui::AnyElement> = self.info.clone().filter(|_| oo).map(|info| {
+            let card = |who: String, body: &str, tag: Option<gpui::AnyElement>| div().flex().flex_col().gap_1().p_2().rounded_md().border_1().border_color(p.border).bg(p.bg)
+                .child(div().flex().items_center().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
+            let mut list: Vec<AnyElement> = vec![];
+            for t in &global_threads {
+                for (i, (a, b)) in t.comments.iter().enumerate() { list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
+            }
+            for d in &global_drafts {
+                let id = d.id;
+                list.push(card("You".into(), &d.body, Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
+                    .child(div().flex().justify_end().child(icon_btn(("ovde", id as usize), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
+                        .child(icon_btn(("ovdd", id as usize), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))).into_any_element());
+            }
+            div().id("overview").flex().flex_col().gap_2().p_3().max_h(px(340.0)).overflow_y_scroll().border_b_1().border_color(p.border)
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(info.title.clone()))
+                .child(div().flex().flex_wrap().items_center().gap_2().text_xs().text_color(p.muted)
+                    .child(badge(model::norm_state(&info.state), p.muted, p.hover)).child(div().child(format!("by {}", info.author)))
+                    .when(!info.source_ref.is_empty(), |d| d.child(div().font_family(mono.clone()).truncate().child(format!("{} → {}", info.source_ref, info.base_ref)))))
+                .child(if info.description.trim().is_empty() { div().text_sm().text_color(p.muted).child("No description.").into_any_element() } else { markdown_view(&markdown::parse(&info.description), &p, &mono).text_sm().into_any_element() })
+                .child(div().flex().items_center().justify_between().pt_2().border_t_1().border_color(p.border).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Conversation"))
+                    .child(icon_text_btn("ov-add", ic::COMMENT, "Comment", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); }))))
+                .when(list.is_empty(), |d| d.child(div().text_sm().text_color(p.muted).child("No general comments yet.")))
+                .children(list).into_any_element()
+        });
         div().flex().flex_col().flex_1().min_h_0()
+            .when(self.info.is_some(), |d| d.child(self.section_header("sec-overview", "Overview", Some(n_global), self.overview_open, cx, |v| v.overview_open = !v.overview_open)))
+            .children(overview)
             .child(self.section_header("sec-commits", "Commits", Some(self.m.graph.rows.len()), co, cx, |v| v.commits_open = !v.commits_open))
             .when(co, |d| d.child(div().id("commits").max_h(px(260.0)).overflow_y_scroll().children(commit_rows)))
             .child(self.section_header("sec-drafts", "Drafts", Some(n), dro, cx, |v| v.drafts_open = !v.drafts_open))

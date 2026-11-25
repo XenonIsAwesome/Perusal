@@ -67,7 +67,7 @@ Agents run headless in a read-only snapshot of the reviewed head, with a minimal
 - **Markdown preview** supports commenting: click a block (Shift+click to extend) and press `c`. The comment anchors to the block's source lines.
 - **Filters:** `ai` lists files with AI drafts and `comments > 0` files with any draft.
 - **Text fields** support mouse selection: click to place the caret, drag to select, double-click for a word, triple-click for all.
-- **AI:** while an agent works you see a loading indicator, the elapsed time and what it is doing (for Claude Code: files read, searches, web lookups). **Stop** ends it immediately. Settings has the agent, model and effort/variant.
+- **AI:** while an agent works you see a loading indicator, the elapsed time and what it is doing (for Claude Code: files read, searches, web lookups). **Stop** ends it immediately. Settings has the agent, model, effort/variant and the response timeout (15 minutes by default, or No limit).
 
 ## Grouping rules
 Settings has the built-in rules (C/C++ headers and sources, TS/JS tests, Python tests, Rust tests, Protobuf with generated files) with an on/off switch each, and lets you add your own: a regular expression with a named `(?P<stem>...)` group. Files matching the same rule with the same stem, even in different folders, are batched. The first matching rule wins and very generic names (main, lib, index...) are ignored.
@@ -81,7 +81,7 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 - **Open a review:** URL, local branch (with an optional base branch or commit), or browse a repository. Public repositories work without a token.
 - **Accounts and setup:** Settings > Accounts, or the first-run setup. Sign in with a pasted token, your `gh`/`glab` login, or the browser (OAuth device flow; needs an OAuth app client ID for the host). Settings is also available from Home.
 - **Sort and presets:** next to the filter there is a sort field (`additions + deletions desc, name asc`) with autocomplete, and a presets menu to save filter+sort per project or globally and make one the default.
-- **Comments:** a Markdown editor (bold, italic, code, quote, list, link, suggestions, Preview tab). Comments, including other people's, appear under their line in the diff; collapse one or all of them, and switch a comment between rich and raw. Edit your own drafts, including AI ones, from the card or the Drafts list.
+- **Comments:** a Markdown editor (bold, italic, code, quote, list, link, suggestions, Preview tab). Comments, including other people's, appear under their line in the diff; collapse one or all of them, and switch a comment between rich and raw. Hovering a comment highlights the lines it is about. A collapsed comment shrinks to a comment icon in the line-number gutter (click it to expand), and resolved threads start collapsed. Edit your own drafts, including AI ones, from the card or the Drafts list.
 - **Next vs viewed:** Next no longer marks files viewed. The eye box in the floating bar does.
 - **CI and updates:** a CI icon in the header (click for the checks page). Merged, closed, new commits and CI results appear as in-app notifications and as desktop notifications (Settings > Notifications).
 
@@ -100,3 +100,5 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 
 ## Releases
 Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak bundle, a tarball, both browser extensions and `SHA256SUMS`. The package version is the tag without the `v`. Pull requests run the test suite and clippy.
+
+- **Overview:** the Review tab opens with the merge/pull request overview: title, state, branches, description and the general conversation (comments not tied to a line, plus your own global drafts), with a button to add a global comment.
