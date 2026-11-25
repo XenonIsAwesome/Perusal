@@ -37,6 +37,8 @@ pub struct Settings {
     pub theme_dark: String,
     /// Optional custom command (program and arguments); the prompt is appended as the last argument.
     pub agent_command: String,
+    /// Full path of the agent executable (empty = find it on the PATH).
+    pub agent_path: String,
     /// Model passed to the agent (empty = the agent's default).
     pub model: String,
     /// Reasoning effort / variant: empty (default), low, medium or high.
@@ -65,7 +67,7 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
+    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
             model: String::new(), effort: String::new(), hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 

@@ -48,7 +48,8 @@ pub fn launch_for(agent: &str, custom: &str, prompt: &str) -> Option<Launch> {
 
 /// Model and effort selection passed to the agent.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Options { pub model: String, pub effort: String }
+pub struct Options { pub model: String, pub effort: String, /// Full path of the agent executable; empty = look the program up on the PATH.
+    pub path: String }
 
 /// Like `launch_for`, adding the model and effort/variant where the agent supports them:
 /// claude `--model` and a thinking budget (MAX_THINKING_TOKENS), codex `-m` and reasoning effort,
@@ -79,7 +80,8 @@ pub fn launch_with(agent: &str, custom: &str, prompt: &str, o: &Options) -> Opti
         }
         _ => return None,
     };
-    Some(Launch { program: program.into(), args, acp: false, env, stream_json: stream })
+    let program = if o.path.trim().is_empty() { program.to_string() } else { o.path.trim().to_string() };
+    Some(Launch { program, args, acp: false, env, stream_json: stream })
 }
 
 /// Model names worth offering as one-click choices for an agent (a custom model can always be typed).
@@ -230,16 +232,17 @@ mod tests {
         assert!(on_path("sh") && !on_path("definitely-not-installed-xyz"));
     }
     #[test] fn model_and_effort_flags() {
-        let o = Options { model: "sonnet".into(), effort: "high".into() };
+        let o = Options { model: "sonnet".into(), effort: "high".into(), path: String::new() };
         let c = launch_with("claude", "", "q", &o).unwrap(); assert!(c.stream_json && c.args.windows(2).any(|w| w == ["--model", "sonnet"]) && c.env == vec![("MAX_THINKING_TOKENS".to_string(), "31999".to_string())]);
         let x = launch_with("codex", "", "q", &o).unwrap(); assert!(x.args.contains(&"model_reasoning_effort=\"high\"".to_string()) && x.args.last().unwrap() == "q");
         let g = launch_with("gemini", "", "q", &o).unwrap(); assert!(g.args.windows(2).any(|w| w == ["-m", "sonnet"]) && g.env.is_empty());
         let op = launch_with("opencode", "", "q", &o).unwrap(); assert!(op.args.windows(2).any(|w| w == ["--variant", "high"]));
         let d = launch_with("claude", "", "q", &Options::default()).unwrap(); assert!(!d.args.contains(&"--model".to_string()) && d.env.is_empty());
         assert!(launch_with("nope", "", "q", &o).is_none()); assert_eq!(launch_with("x", "my-agent -v", "q", &o).unwrap().program, "my-agent");
-        let n = launch_with("claude", "", "q", &Options { model: String::new(), effort: "20000".into() }).unwrap(); assert_eq!(n.env, vec![("MAX_THINKING_TOKENS".to_string(), "20000".to_string())]); assert!(effort_suggestions("codex").contains(&"minimal"));
+        let n = launch_with("claude", "", "q", &Options { model: String::new(), effort: "20000".into(), path: String::new() }).unwrap(); assert_eq!(n.env, vec![("MAX_THINKING_TOKENS".to_string(), "20000".to_string())]); assert!(effort_suggestions("codex").contains(&"minimal"));
         assert!(supports_effort("codex") && !supports_effort("gemini") && !model_suggestions("claude").is_empty());
     }
+    #[test] fn explicit_executable_path_wins() { let l = launch_with("opencode", "", "q", &Options { path: "/opt/x/opencode".into(), ..Default::default() }).unwrap(); assert_eq!(l.program, "/opt/x/opencode"); }
     #[test] fn skill_ships() { assert!(REVIEW_SKILL.contains("high-signal") && REVIEW_SKILL.contains("untrusted")); }
 }
 

@@ -273,7 +273,7 @@ pub fn run_gen(s: &perusal_app::settings::Settings, kind: perusal_agents::GenKin
     if request.trim().is_empty() { return Err("Describe what you want first.".into()); }
     let reference = if kind == GenKind::GroupRule { String::new() } else { perusal_filter::reference() };
     let prompt = gen_prompt(kind, request.trim(), &reference);
-    let l = launch_with(&s.agent, &s.agent_command, &prompt, &Options { model: s.model.clone(), effort: s.effort.clone() }).ok_or("No agent configured. Choose one in Settings.")?;
+    let l = launch_with(&s.agent, &s.agent_command, &prompt, &Options { model: s.model.clone(), effort: s.effort.clone(), path: s.agent_path.clone() }).ok_or("No agent configured. Choose one in Settings.")?;
     if !on_path(&l.program) { return Err(format!("`{}` was not found on your PATH. Install it or pick another agent in Settings.", l.program)); }
     let dir = std::env::temp_dir().join("perusal-gen"); let _ = std::fs::create_dir_all(&dir);
     let out = perusal_agents::run::run_streaming(&l, &dir, &perusal_agents::run::agent_env(), std::time::Duration::from_secs(180), cancel, |_| {}).map_err(|e| e.to_string())?;

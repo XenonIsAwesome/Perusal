@@ -463,7 +463,7 @@ impl View {
     fn ci_url(&self) -> Option<String> { let w = self.m.web_url.clone()?; Some(perusal_providers::ci_page(&self.m.mr.as_ref()?.kind, &w)) }
 
     // ---------- AI
-    fn ai_options(&self) -> Options { Options { model: self.settings.model.clone(), effort: self.settings.effort.clone() } }
+    fn ai_options(&self) -> Options { Options { model: self.settings.model.clone(), effort: self.settings.effort.clone(), path: self.settings.agent_path.clone() } }
     fn start_ai(&mut self, job: Job, question: String, cx: &mut Context<Self>) {
         if self.busy() { return; }
         let opts = self.ai_options();
