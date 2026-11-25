@@ -6,8 +6,8 @@
     <SummaryInformation Description="Perusal: review pull requests and merge requests" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of Perusal is already installed." />
     <MediaTemplate EmbedCab="yes" />
-    <Icon Id="AppIcon" SourceFile="$(IconFile)" />
-    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Icon Id="perusal.ico" SourceFile="$(IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="perusal.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/XenonIsAwesome/Perusal" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -18,7 +18,7 @@
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Component Id="MainExe">
         <File Id="PerusalExe" Source="$(BinDir)\perusal.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Perusal" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="yes" />
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Perusal" WorkingDirectory="INSTALLFOLDER" />
         </File>
       </Component>
       <Component Id="CliExe">
