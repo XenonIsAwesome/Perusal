@@ -45,7 +45,7 @@ State on disk: settings in `~/.config/perusal/settings.toml`, presets in `preset
 
 - Work autonomously end to end. Do not ask for approval or confirmation of decisions; decide, record a one-line decision and reason in `DECISIONS.md`, and keep going. Stop only when truly blocked (for example a real credential is needed), and then continue with fixtures and mocks.
 - Develop on the session branch, commit in logical steps, push there; open a pull request only when asked.
-- The product spec is the Claude Docs document "Perusal — Product and Technical Spec" (https://claude.ai/artifact/GGpC5ERECBrhWYTBrJy4AB); its decisions below are final unless the owner changes them.
+- The product spec is `docs/SPEC.md` (exported from the Claude Docs original, https://claude.ai/artifact/GGpC5ERECBrhWYTBrJy4AB); its decisions below are final unless the owner changes them.
 - Sandbox limits: real GitHub/GitLab hosts are unreachable (develop against mock servers/fixtures, see `crates/providers/tests`), there is no `notify-send`, and the GUI is only checkable on a headless X display.
 
 ## Product spec essentials
