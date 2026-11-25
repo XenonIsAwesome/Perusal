@@ -97,3 +97,6 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 - Comments render bold, italic, mono code, clickable links and highlighted code blocks; suggestions are shown as a diff against the original lines.
 - Settings > AI has an Agent executable field (full path) that overrides the PATH lookup, with a line showing which executable will be used.
 - With opencode selected, the Model dropdown lists the models from `opencode models` (free opencode/ ones first); Custom still lets you type any name.
+
+## Releases
+Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak bundle, a tarball, both browser extensions and `SHA256SUMS`. The package version is the tag without the `v`. Pull requests run the test suite and clippy.

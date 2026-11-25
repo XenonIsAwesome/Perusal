@@ -1,5 +1,5 @@
 Name:           perusal
-Version:        0.1.0
+Version:        %{?pversion}%{!?pversion:0.1.0}
 Release:        1%{?dist}
 Summary:        Fast merge-request and pull-request reviewer
 License:        MIT OR Apache-2.0

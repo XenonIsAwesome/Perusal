@@ -1,0 +1,92 @@
+name: Release
+
+# Tag a commit vX.Y.Z (or vX.Y.Z-rc.1) to build every package type and publish a GitHub release.
+# The package version is taken from the tag: v1.2.3 -> perusal 1.2.3. Cargo.toml in the repository is not changed.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build packages and publish
+    runs-on: ubuntu-22.04   # oldest glibc we support, so the binaries run on newer distributions too
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: v
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          V="${TAG#v}"
+          if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::tag '$TAG' is not of the form vX.Y.Z or vX.Y.Z-suffix"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "core=${V%%-*}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ "$V" == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # the workspace version feeds the binary, the deb and the rpm
+          sed -i "s/^version = \".*\"/version = \"$V\"/" Cargo.toml
+          grep -m1 '^version' Cargo.toml
+          # browser extension versions must be plain numbers
+          jq --arg v "${V%%-*}" '.version = $v' extension/manifest.base.json > /tmp/m.json && mv /tmp/m.json extension/manifest.base.json
+
+      - name: System libraries and packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git pkg-config build-essential cmake zip rpm dpkg-dev fakeroot desktop-file-utils \
+            flatpak flatpak-builder \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev libasound2-dev libvulkan-dev libfuse2
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool && sudo mv appimagetool /usr/local/bin/appimagetool
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test before publishing
+        run: cargo test --workspace
+
+      - name: Build the release binaries
+        run: cargo build --release -p perusal-ui -p perusal-cli
+
+      - name: Package (deb, rpm, AppImage, Flatpak, tarball, browser extensions)
+        run: |
+          V='${{ steps.v.outputs.version }}'
+          mkdir -p dist
+          bash packaging/build-deb.sh
+          bash packaging/build-rpm.sh
+          bash packaging/build-appimage.sh
+          bash packaging/build-flatpak.sh
+          bash extension/build.sh
+
+          cp target/perusal_*_amd64.deb dist/
+          cp target/*.rpm dist/
+          cp target/Perusal-x86_64.AppImage "dist/Perusal-${V}-x86_64.AppImage"
+          cp target/perusal.flatpak "dist/perusal-${V}.flatpak"
+          cp extension/dist/perusal-chromium.zip "dist/perusal-extension-chromium-${V}.zip"
+          cp extension/dist/perusal-firefox.zip "dist/perusal-extension-firefox-${V}.zip"
+
+          T="perusal-${V}-linux-x86_64"
+          mkdir -p "$T"
+          cp target/release/perusal target/release/perusal-cli LICENSE-MIT LICENSE-APACHE README.md "$T/"
+          tar -czf "dist/${T}.tar.gz" "$T"
+
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ steps.v.outputs.prerelease }}
+          fail_on_unmatched_files: true

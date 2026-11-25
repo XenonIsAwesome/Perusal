@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build, test and lint
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries for the GUI build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git pkg-config build-essential cmake \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev libasound2-dev libvulkan-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests (headless crates and the UI crate's unit tests)
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Browser extension tests
+        run: |
+          if [ -f extension/detect.test.js ]; then node --test extension/detect.test.js; fi
+
+      - name: Packaging scripts parse
+        run: for f in packaging/*.sh extension/build.sh; do bash -n "$f"; done

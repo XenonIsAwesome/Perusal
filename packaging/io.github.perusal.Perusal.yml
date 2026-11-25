@@ -14,9 +14,13 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 perusal /app/bin/perusal
+      - install -Dm644 perusal.svg /app/share/icons/hicolor/scalable/apps/io.github.perusal.Perusal.svg
+      - sed -i 's/^Icon=.*/Icon=io.github.perusal.Perusal/' perusal.desktop
       - install -Dm644 perusal.desktop /app/share/applications/io.github.perusal.Perusal.desktop
     sources:
       - type: file
         path: ../target/release/perusal
       - type: file
         path: perusal.desktop
+      - type: file
+        path: ../assets/perusal.svg
