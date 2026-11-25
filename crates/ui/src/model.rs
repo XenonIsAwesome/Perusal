@@ -63,6 +63,8 @@ impl Model {
         let files = perusal_diff::index_range(&repo, &base_sha, &rev).map_err(|e| e.to_string())?;
         let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
         let review = store.open_review(key, &title, &rev, files.len() as u32).map_err(|e| e.to_string())?;
+        // a name the user gave the review wins over the one derived from the branch or MR
+        let title = store.review_title(review).ok().filter(|t| !t.is_empty()).unwrap_or(title);
         let vm = ReviewVm::new(&store, review, files);
         let graph = GraphVm::load(&repo, &base_sha, &rev, 6)?;
         Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new() })
