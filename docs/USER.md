@@ -24,7 +24,7 @@ Keymap overrides go in `keymap.toml` under `[keys]`. Themes: see `crates/app/the
 
 ## Hosts and tokens
 GitHub/GitLab (cloud and self-hosted). Tokens are stored outside the database: in the Windows Credential Manager on Windows (an older token file is migrated on first use), otherwise in a mode-0600 file (keychain support pending).
-Custom CA files per host. SSH keys only cover git transport; commenting needs a token.
+Self-hosted hosts with a private CA work once the CA is in the system trust store (on Windows the certificate store, so a company CA that Windows already trusts just works; on Linux `update-ca-certificates`, or `SSL_CERT_FILE`/`SSL_CERT_DIR`); `PERUSAL_CA_FILE` adds one more. SSH keys only cover git transport; commenting needs a token.
 
 ## Agents
 Agents run read-only in a checkout of the reviewed head, with a minimal environment (no tokens). Their output is only ever
