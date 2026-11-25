@@ -18,7 +18,7 @@
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Component Id="MainExe">
         <File Id="PerusalExe" Source="$(BinDir)\perusal.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Perusal" WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Perusal" WorkingDirectory="INSTALLFOLDER" Icon="perusal.ico" />
         </File>
       </Component>
       <Component Id="CliExe">
