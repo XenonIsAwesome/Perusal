@@ -23,7 +23,7 @@ Presets are TOML (global and per project, keyed by normalized remote URL); a pro
 Keymap overrides go in `keymap.toml` under `[keys]`. Themes: see `crates/app/themes/AGENTS.md`; check with `perusal theme check`.
 
 ## Hosts and tokens
-GitHub/GitLab (cloud and self-hosted). Tokens are stored in a mode-0600 file outside the database (keychain support pending).
+GitHub/GitLab (cloud and self-hosted). Tokens are stored outside the database: in the Windows Credential Manager on Windows (an older token file is migrated on first use), otherwise in a mode-0600 file (keychain support pending).
 Custom CA files per host. SSH keys only cover git transport; commenting needs a token.
 
 ## Agents

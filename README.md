@@ -23,7 +23,7 @@ Remote reviews need a token for private repos (the app asks and stores it under 
 Data lives in `~/.local/share/perusal` (`%LOCALAPPDATA%\perusal` on Windows, config in `%APPDATA%\perusal`; override with `PERUSAL_HOME`; `PERUSAL_CA_FILE` adds a CA certificate).
 Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl +/-/0` zoom.
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
-and `libwayland-dev` to build. `perusal-cli` is the headless harness. On Windows you need the Rust MSVC toolchain, Visual Studio Build Tools (C++) and Git for Windows; the GUI needs a Direct3D 11 capable display adapter. Windows builds are in the release zip.
+and `libwayland-dev` to build. `perusal-cli` is the headless harness. On Windows you need the Rust MSVC toolchain, Visual Studio Build Tools (C++) and Git for Windows; the GUI needs a Direct3D 11 capable display adapter. Windows releases ship an MSI, an MSIX (self-signed: import `Perusal-test-signing.cer` into Trusted People first) and a zip; build them with `packaging/windows/build-msi.ps1` and `build-msix.ps1`. Tokens are kept in the Windows Credential Manager.
 
 ## Roadmap
 
@@ -31,7 +31,6 @@ Planned, roughly in this order of interest:
 
 | Area | Item | Notes |
 | --- | --- | --- |
-| Platforms | **Windows** support | GPUI runs on Windows; the work is paths, the agent/CLI lookup, tokens storage and an installer. |
 | Platforms | **macOS** support | Same, plus an app bundle, signing and notarisation. |
 | Hosts | **Gitea** and **Forgejo** | New provider next to GitHub and GitLab (pull requests, review comments, CI status). |
 

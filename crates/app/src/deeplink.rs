@@ -70,6 +70,8 @@ pub fn registry_commands(exe: &Path) -> Vec<Vec<String>> {
 pub fn register_scheme() -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe()?;
+    // An MSIX install declares the protocol in its manifest; do not write a second registration pointing into the package.
+    if exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps")) { return Ok(()); }
     let run = |args: &[String]| std::process::Command::new("reg").args(args).creation_flags(0x0800_0000).output();
     let key = format!(r"HKCU\Software\Classes\{DEEP_LINK_SCHEME}\shell\open\command");
     let current = run(&["query".into(), key, "/ve".into()])?;

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v5 source of the Perusal MSI. Built by build-msi.ps1 (variables: Version, BinDir, IconFile, LicenseDir). -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Perusal" Manufacturer="Perusal contributors" Version="$(Version)" Language="1033"
+           UpgradeCode="6B1E5C32-9A4D-4F0B-8D7A-3C2E91F5A8D4" Scope="perMachine" InstallerVersion="500">
+    <SummaryInformation Description="Perusal: review pull requests and merge requests" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Perusal is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="$(IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/XenonIsAwesome/Perusal" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Perusal" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component Id="MainExe">
+        <File Id="PerusalExe" Source="$(BinDir)\perusal.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Perusal" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="yes" />
+        </File>
+      </Component>
+      <Component Id="CliExe">
+        <File Id="PerusalCliExe" Source="$(BinDir)\perusal-cli.exe" KeyPath="yes" />
+        <!-- perusal-cli on the PATH -->
+        <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" />
+      </Component>
+      <Component Id="LicenseMit"><File Id="LicMit" Source="$(LicenseDir)\LICENSE-MIT" KeyPath="yes" /></Component>
+      <Component Id="LicenseApache"><File Id="LicApache" Source="$(LicenseDir)\LICENSE-APACHE" KeyPath="yes" /></Component>
+      <!-- perusal:// deep links (the app also registers itself per user if this entry is missing) -->
+      <Component Id="UrlScheme">
+        <RegistryKey Root="HKLM" Key="Software\Classes\perusal">
+          <RegistryValue Type="string" Value="URL:Perusal link" KeyPath="yes" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryKey Key="DefaultIcon"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]perusal.exe&quot;,0" /></RegistryKey>
+          <RegistryKey Key="shell\open\command"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]perusal.exe&quot; &quot;%1&quot;" /></RegistryKey>
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Perusal" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+  </Package>
+</Wix>

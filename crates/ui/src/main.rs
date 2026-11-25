@@ -25,6 +25,7 @@ fn main() {
             let errs = theme::validate(&src);
             if errs.is_empty() { println!("{file}: ok"); } else { for e in &errs { eprintln!("{file}: {e}"); } std::process::exit(1); }
         }
+        ["notify-test", title, body] => { model::desktop_notify(title, body); std::thread::sleep(std::time::Duration::from_secs(3)); }
         [] => root::run(root::Initial::Home),
         [link] if link.starts_with("perusal://") => match deeplink::parse(link) {
             Ok(url) => root::run(root::Initial::Url(url)),

@@ -2,7 +2,7 @@
 use perusal_app::{graph::GraphVm, vm::ReviewVm};
 use perusal_core::store::Store;
 use perusal_app::settings::HostCfg;
-use perusal_providers::{auth::{FileStore, TokenStore}, github::GitHub, gitlab::GitLab, Ci, Kind, MrRef, Provider, RemoteMr, Role, StateFilter, Thread};
+use perusal_providers::{auth::{DefaultStore, TokenStore}, github::GitHub, gitlab::GitLab, Ci, Kind, MrRef, Provider, RemoteMr, Role, StateFilter, Thread};
 use std::path::{Path, PathBuf};
 
 pub struct Model {
@@ -41,7 +41,7 @@ pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::cre
 /// Where the read-only code snapshot for agents lives, per review and head.
 pub fn snapshot_dir(review: i64, rev: &str) -> PathBuf { data_dir().join("snapshots").join(format!("{review}-{}", rev[..rev.len().min(12)].replace('/', "_"))) }
 pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
-pub fn token_store() -> FileStore { FileStore { dir: config_dir().join("tokens") } }
+pub fn token_store() -> DefaultStore { DefaultStore::new(config_dir().join("tokens")) }
 pub fn token_for(host: &str) -> Option<String> { token_store().get(host).or_else(|| std::env::var("PERUSAL_TOKEN").ok().filter(|t| !t.is_empty())) }
 
 fn provider(r: &MrRef, token: String) -> Result<Box<dyn Provider>, String> {
@@ -184,11 +184,13 @@ pub fn open_url(url: &str) -> Result<(), String> {
 /// A Windows toast through PowerShell's WinRT bridge (no extra crate or app registration needed).
 fn windows_toast(title: &str, body: &str) -> std::io::Result<std::process::Output> {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "''");
-    let script = r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    // The toast is attributed to "Perusal" through a per-user AppUserModelID registration (no installer needed).
+    let script = r#"$id = 'io.github.perusal.Perusal'; $k = "HKCU:\Software\Classes\AppUserModelId\$id"
+if (-not (Test-Path $k)) { New-Item $k -Force | Out-Null }; Set-ItemProperty $k -Name DisplayName -Value 'Perusal'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode('Perusal: @T@')) | Out-Null; $n.Item(1).AppendChild($x.CreateTextNode('@B@')) | Out-Null
-$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell1.0\powershell.exe'
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($x))"#.replace("@T@", &esc(title)).replace("@B@", &esc(body));
+$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode('@T@')) | Out-Null; $n.Item(1).AppendChild($x.CreateTextNode('@B@')) | Out-Null
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))"#.replace("@T@", &esc(title)).replace("@B@", &esc(body));
     let mut c = perusal_gitops::command("powershell"); c.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
     c.output()
 }
