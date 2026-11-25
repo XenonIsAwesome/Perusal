@@ -103,9 +103,12 @@ impl Provider for GitLab {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/merge_requests?{who}{scope}&state={st}&order_by=updated_at&sort=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v.iter().map(|m| {
             let web = m["web_url"].as_str().unwrap_or("");
-            let project = web.split("https://").nth(1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
+            let project = web.split_once("://").map(|x| x.1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
             let state = match m["state"].as_str() { Some("opened") => "open", Some("merged") => "merged", _ => "closed" };
-            RemoteMr { url: web.into(), title: m["title"].as_str().unwrap_or("").into(), project, number: m["iid"].as_u64().unwrap_or(0), author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
+            // Some instances report http:// web_urls (TLS terminated by a proxy); always use the https host the user connected to.
+            let number = m["iid"].as_u64().unwrap_or(0);
+            let url = if project.is_empty() { web.to_string() } else { format!("https://{host}/{project}/-/merge_requests/{number}") };
+            RemoteMr { url, title: m["title"].as_str().unwrap_or("").into(), project, number, author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
                 state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab }
         }).collect())
     }
