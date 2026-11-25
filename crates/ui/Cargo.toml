@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 perusal-core.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 perusal-diff.workspace = true
 perusal-filter.workspace = true
 perusal-gitops.workspace = true

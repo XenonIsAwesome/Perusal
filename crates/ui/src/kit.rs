@@ -63,6 +63,18 @@ pub fn pick_fonts(cx: &App) -> Fonts {
         mono: pick(&["JetBrains Mono", "Fira Code", "Cascadia Mono", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono"], "monospace").into() }
 }
 
+const LOGO_PNG: &[u8] = include_bytes!("../assets/perusal-256.png");
+/// The Perusal icon at `size` px.
+pub fn logo(size: f32) -> gpui::Img {
+    static IMG: std::sync::OnceLock<std::sync::Arc<gpui::Image>> = std::sync::OnceLock::new();
+    let im = IMG.get_or_init(|| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, LOGO_PNG.to_vec()))).clone();
+    gpui::img(gpui::ImageSource::Image(im)).size(px(size)).flex_none()
+}
+/// The icon as the window icon (X11 only; Wayland takes it from the desktop entry).
+pub fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    image::load_from_memory_with_format(LOGO_PNG, image::ImageFormat::Png).ok().map(|i| std::sync::Arc::new(i.to_rgba8()))
+}
+
 pub fn badge(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> Div { div().px_2().rounded_full().text_xs().font_weight(FontWeight::MEDIUM).text_color(fg).bg(bg).child(text.into()) }
 pub fn kbd(text: &'static str, p: &Pal) -> Div { div().px(px(5.0)).rounded_sm().border_1().border_color(p.border).bg(p.surface).text_xs().text_color(p.fg).child(text) }
 

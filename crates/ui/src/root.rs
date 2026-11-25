@@ -389,7 +389,7 @@ impl Root {
         let open = self.render_open_card(cx);
         div().flex().flex_col().flex_1().min_h_0().bg(p.bg).text_color(p.fg)
             .child(div().flex().items_center().gap_3().px_6().h(px(52.0)).border_b_1().border_color(p.border).bg(p.surface)
-                .child(div().size(px(28.0)).rounded_md().bg(p.accent).flex().items_center().justify_center().text_color(gpui::white()).font_weight(FontWeight::BOLD).child("P"))
+                .child(kit::logo(32.0))
                 .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Perusal")).child(div().flex_1().text_sm().text_color(p.muted).child("Review pull requests and merge requests, one batch at a time"))
                 .child(icon_btn("home-settings", ic::SETTINGS, "Settings", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_settings(false, cx); }))))
             .child(div().flex().flex_1().min_h_0().justify_center().p_6().child(div().flex().flex_1().min_h_0().max_w(px(1240.0)).gap_6()
@@ -455,7 +455,7 @@ pub fn run(initial: Initial) {
         let custom = model::load_settings().custom_titlebar;
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), window_min_size: Some(size(px(900.0), px(560.0))),
             window_decorations: Some(if custom { WindowDecorations::Client } else { WindowDecorations::Server }),
-            titlebar: Some(TitlebarOptions { title: Some("Perusal".into()), appears_transparent: true, ..Default::default() }), ..Default::default() }, move |window, cx| {
+            icon: kit::window_icon(), titlebar: Some(TitlebarOptions { title: Some("Perusal".into()), appears_transparent: true, ..Default::default() }), ..Default::default() }, move |window, cx| {
             let root = cx.new(|cx| Root::new(initial, fonts, cx));
             window.focus(&root.read(cx).focus.clone(), cx);
             root

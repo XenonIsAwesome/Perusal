@@ -353,7 +353,7 @@ impl gpui::Render for SettingsView {
             let content = match step {
                 0 => div().flex().flex_col().gap_5().py_5()
                     .child(div().flex().items_center().gap_4()
-                        .child(div().size(px(56.0)).rounded_xl().bg(p.accent).flex().items_center().justify_center().text_color(gpui::white()).text_size(px(28.0)).font_weight(FontWeight::BOLD).child("P"))
+                        .child(kit::logo(64.0))
                         .child(div().flex().flex_col().flex_1().min_w_0().gap(px(2.0)).child(div().text_size(px(26.0)).font_weight(FontWeight::BOLD).text_color(p.fg).child("Welcome to Perusal")).child(div().text_color(p.muted).child("Review pull requests and merge requests quickly."))))
                     .child(div().flex().flex_col().gap_4()
                         .child(feature(ic::FILTER_LIST, "Filter and sort like a search", "Expressions such as additions > 50 && !viewed, with autocomplete and saved presets."))

@@ -1,7 +1,11 @@
+<img src="assets/perusal.svg" alt="Perusal icon" width="96" align="left">
+
 # Perusal
 
 A native desktop reviewer for GitLab merge requests and GitHub pull requests, built around filtering, batching and a
 commit graph instead of one long scrolling page. Licensed MIT OR Apache-2.0. No telemetry.
+
+<br clear="left">
 
 ## Status
 

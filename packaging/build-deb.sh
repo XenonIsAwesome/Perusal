@@ -7,6 +7,7 @@ V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2); R=target/deb-root; rm -rf $
 install -Dm755 target/release/perusal $R/usr/bin/perusal
 install -Dm755 target/release/perusal-cli $R/usr/bin/perusal-cli
 install -Dm644 packaging/perusal.desktop $R/usr/share/applications/perusal.desktop
+install -Dm644 assets/perusal.svg $R/usr/share/icons/hicolor/scalable/apps/perusal.svg
 install -Dm644 crates/app/themes/AGENTS.md $R/usr/share/perusal/themes/AGENTS.md
 install -Dm644 skills/review.md $R/usr/share/perusal/skills/review.md
 install -Dm644 LICENSE-MIT $R/usr/share/doc/perusal/LICENSE-MIT
