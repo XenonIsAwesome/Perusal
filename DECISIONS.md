@@ -70,3 +70,4 @@
 =======
 - TLS trust: reqwest uses `rustls-tls-native-roots`, so the system trust store (`SSL_CERT_FILE`/`SSL_CERT_DIR`, else /etc/ssl/certs etc.) is honoured and self-hosted GitLab/GitHub Enterprise with a company CA works without extra setup. The bundled webpki roots are no longer used; `PERUSAL_CA_FILE` still adds one extra CA on top. Reason: the old build only trusted public CAs plus `PERUSAL_CA_FILE`, unlike git, which already used the system store.
 >>>>>>> origin/main
+- Windows and the system CA store: `rustls-tls-native-roots` reads the Windows certificate store through schannel, so a company CA that Windows trusts needs no setup. Checked in the VM against a local HTTPS server signed by a private CA: rejected before the CA is trusted, accepted once imported into `LocalMachine\Root`, rejected again after removal; `PERUSAL_CA_FILE` (GUI only, the CLI harness never read it) also works. No code change was needed.
