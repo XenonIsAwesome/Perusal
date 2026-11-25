@@ -96,3 +96,4 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 - Files in a grouped batch can be collapsed from their header. Next wraps from the last batch to the first. A symlink always shows "Go to the original" (it says so when the target is not part of the change). The merge request link in the header opens it in the browser.
 - Comments render bold, italic, mono code, clickable links and highlighted code blocks; suggestions are shown as a diff against the original lines.
 - Settings > AI has an Agent executable field (full path) that overrides the PATH lookup, with a line showing which executable will be used.
+- With opencode selected, the Model dropdown lists the models from `opencode models` (free opencode/ ones first); Custom still lets you type any name.

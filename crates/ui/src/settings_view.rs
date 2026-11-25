@@ -22,7 +22,7 @@ enum Acc { Unknown, Out, In(String), Bad(String) }
 pub struct SettingsView {
     pub settings: Settings, pal: Pal, fonts: Fonts,
     agent_path: Input, cmd: Input, model: Input, label: Input, pat: Input, host_in: Input, token: Input, client: Input, rule_gen: Input, pname: Input, pfilter: Input, psort: Input, effort_in: Input,
-    model_custom: bool, effort_custom: bool, stab: u8, editing_rule: Option<String>, presets: perusal_core::presets::Presets, pscope: Option<String>, pedit: bool, gen_busy: bool, gen_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    model_custom: bool, effort_custom: bool, agent_models: Vec<String>, models_for: String, stab: u8, editing_rule: Option<String>, presets: perusal_core::presets::Presets, pscope: Option<String>, pedit: bool, gen_busy: bool, gen_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     focus: Option<F>, rules_open: bool, dd: Option<u8>, rule_err: Option<String>, new_kind: &'static str,
     accounts: Vec<(String, String, Acc)>, token_host: Option<String>, client_host: Option<String>, device: Option<(String, DeviceCode)>, msg: Option<(bool, String)>, busy: bool,
     /// First-run setup: the step shown (0 welcome, 1 accounts, 2 agent, 3 done). `None` is the normal Settings panel.
@@ -33,9 +33,19 @@ impl SettingsView {
     pub fn new(settings: Settings, fonts: Fonts, onboarding: bool, cx: &mut Context<Self>) -> Self {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
-            model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
+            model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
             focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), settings };
         v.refresh_accounts(cx); v
+    }
+    /// Loads the model list of the selected agent (opencode only) in the background.
+    fn fetch_models(&mut self, cx: &mut Context<Self>) {
+        let key = format!("{}|{}", self.settings.agent, self.settings.agent_path);
+        if self.models_for == key { return; }
+        self.models_for = key; self.agent_models.clear();
+        let (agent, path) = (self.settings.agent.clone(), self.settings.agent_path.clone());
+        if agent != "opencode" { return; }
+        let task = cx.background_executor().spawn(async move { perusal_agents::list_models(&agent, &path) });
+        cx.spawn(async move |this, cx| { let r = task.await; let _ = this.update(cx, |t, cx| { match r { Ok(v) => t.agent_models = v, Err(e) => t.say(false, format!("Could not list opencode's models: {e}")) } cx.notify(); }); }).detach();
     }
     pub fn set_pal(&mut self, p: Pal) { self.pal = p; }
     fn changed(&mut self, cx: &mut Context<Self>) { model::save_settings(&self.settings); cx.emit(SettingsEvent::Changed); cx.notify(); }
@@ -227,7 +237,7 @@ impl SettingsView {
         div().relative().child(dd_button(("pk", id as usize), current.to_string(), open, &p)
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; cx.notify(); })))
-            .children(open.then(|| deferred(div().absolute().top(px(36.0)).right_0().min_w(px(220.0)).max_h(px(260.0)).overflow_hidden().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(items)).with_priority(30))).into_any_element()
+            .children(open.then(|| deferred(div().id(("pk-list", id as usize)).absolute().top(px(36.0)).right_0().min_w(px(260.0)).max_h(px(320.0)).overflow_y_scroll().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(items)).with_priority(30))).into_any_element()
     }
 
     fn accounts_section(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -265,12 +275,13 @@ impl SettingsView {
     }
 
     fn ai_section(&mut self, cx: &mut Context<Self>, row: &dyn Fn(&'static str, &'static str, gpui::AnyElement) -> gpui::Div) -> gpui::Div {
+        self.fetch_models(cx);
         let p = self.pal; let s = self.settings.clone();
         let chip = |id: (&'static str, usize), label: String, on: bool| div().id(id).px_3().py(px(4.0)).rounded_md().border_1().border_color(if on { p.accent } else { p.border }).bg(if on { p.accent.opacity(0.12) } else { gpui::transparent_black() }).cursor_pointer().text_sm().hover(move |x| x.bg(p.hover)).child(label);
         let agent_chips: Vec<_> = AGENTS.iter().enumerate().map(|(i, (k, l))| { let kk = k.to_string(); let installed = on_path(match *k { "claude" => "claude", "gemini" => "gemini", "codex" => "codex", _ => "opencode" });
             chip(("ag", i), format!("{l}{}", if installed { "  ✓" } else { "" }), s.agent == *k).on_click(cx.listener(move |this, _, _, cx| {
                 this.settings.agent = kk.clone(); this.model_custom = false; this.effort_custom = false; this.settings.model.clear(); this.settings.effort.clear(); this.model.f.clear(); this.effort_in.f.clear(); this.changed(cx); })) }).collect();
-        let mut model_opts: Vec<(String, String)> = vec![("Default".into(), String::new())]; model_opts.extend(model_suggestions(&s.agent).iter().map(|m| (m.to_string(), m.to_string()))); model_opts.push(("Custom…".into(), "\u{0}custom".into()));
+        let mut model_opts: Vec<(String, String)> = vec![("Default".into(), String::new())]; if self.agent_models.is_empty() { model_opts.extend(model_suggestions(&s.agent).iter().map(|m| (m.to_string(), m.to_string()))); } else { model_opts.extend(self.agent_models.iter().map(|m| (m.clone(), m.clone()))); } model_opts.push(("Custom…".into(), "\u{0}custom".into()));
         let model_label = if self.model_custom { "Custom…".to_string() } else if s.model.is_empty() { "Default".into() } else { s.model.clone() };
         let model_dd = self.pick(3, &model_label, model_opts, cx, |this, v, cx| {
             if v == "\u{0}custom" { this.model_custom = true; this.focus = Some(F::Model); } else { this.model_custom = false; this.model.f.set(&v); this.settings.model = v; this.changed(cx); } cx.notify(); });
@@ -286,8 +297,8 @@ impl SettingsView {
             .child(row("Agent", "Runs the CLI you already have installed (a check mark means it was found on your PATH); no keys are stored here", div().flex().flex_wrap().gap_2().max_w(px(380.0)).justify_end().children(agent_chips).into_any_element()))
             .child(row("Model", "Pick one, or choose Custom to type any model name the agent accepts", model_ctl))
             .child(row("Effort / variant", if effort_ok { "How hard the model thinks (Claude: thinking budget, Codex: reasoning effort, opencode: variant)" } else { "Not supported by this agent" }, eff_ctl))
-            .child(row("Agent executable", "Full path to the program, for when it is not on the PATH or you want a specific install. Leave empty to find it automatically", div().flex().flex_col().items_end().gap_1().child(div().w(px(300.0)).child(self.field_box("f-apath", F::AgentPath, "e.g. /home/me/.opencode/bin/opencode", cx, false)))
-                .child(div().text_xs().text_color(if found.is_some() { p.success } else { p.danger }).child(match &found { Some(f) => format!("Using {}", f.display()), None => "Not found. Enter its full path above".to_string() })).into_any_element()))
+            .child(row("Agent executable", "Full path to the program, for when it is not on the PATH or you want a specific install. Leave empty to find it automatically", div().flex().flex_col().flex_none().w(px(300.0)).gap_1().child(div().w_full().child(self.field_box("f-apath", F::AgentPath, "e.g. /home/me/.opencode/bin/opencode", cx, false)))
+                .child(div().text_xs().w_full().truncate().text_color(if found.is_some() { p.success } else { p.danger }).child(match &found { Some(f) => format!("Using {}", f.display()), None => "Not found. Enter its full path above".to_string() })).into_any_element()))
             .child(row("Custom command", "Optional. Program and arguments; the prompt is added as the last argument", div().w(px(300.0)).child(self.field_box("f-cmd", F::Cmd, "e.g. my-agent --read-only", cx, false)).into_any_element()))
     }
 }

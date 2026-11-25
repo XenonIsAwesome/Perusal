@@ -89,6 +89,23 @@ pub fn model_suggestions(agent: &str) -> &'static [&'static str] {
     match agent { "claude" => &["opus", "sonnet", "haiku"], "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"], "codex" => &["gpt-5", "gpt-5-codex"], _ => &[] }
 }
 
+/// Models the agent itself knows about. opencode lists every configured provider's models (`opencode models`, one `provider/model` per line);
+/// the other agents have no such command, so this is empty for them and `model_suggestions` is used.
+pub fn list_models(agent: &str, path: &str) -> Result<Vec<String>, String> {
+    if agent != "opencode" { return Ok(vec![]); }
+    let program = if path.trim().is_empty() { "opencode".to_string() } else { path.trim().to_string() };
+    let l = Launch { program, args: vec!["models".into()], acp: false, ..Default::default() };
+    let out = run_headless(&l, &std::env::temp_dir(), &run::agent_env(), std::time::Duration::from_secs(20)).map_err(|e| e.to_string())?;
+    Ok(parse_model_list(&out))
+}
+/// One model per line; keeps `provider/model` shaped tokens, free `opencode/` ones first, de-duplicated.
+pub fn parse_model_list(out: &str) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for l in out.lines() { let t = l.trim(); if t.contains('/') && !t.contains(' ') && !v.iter().any(|x| x == t) { v.push(t.to_string()); } }
+    v.sort_by_key(|m| (!m.starts_with("opencode/"), m.clone()));
+    v
+}
+
 /// Effort / variant names offered in the dropdown (a custom value can always be typed; for Claude it is a thinking-token budget).
 pub fn effort_suggestions(agent: &str) -> &'static [&'static str] {
     match agent { "claude" | "codex" | "opencode" => match agent { "codex" => &["minimal", "low", "medium", "high"], "opencode" => &["minimal", "low", "medium", "high", "max"], _ => &["low", "medium", "high"] }, _ => &[] }
@@ -243,6 +260,7 @@ mod tests {
         assert!(supports_effort("codex") && !supports_effort("gemini") && !model_suggestions("claude").is_empty());
     }
     #[test] fn explicit_executable_path_wins() { let l = launch_with("opencode", "", "q", &Options { path: "/opt/x/opencode".into(), ..Default::default() }).unwrap(); assert_eq!(l.program, "/opt/x/opencode"); }
+    #[test] fn model_list_parsing() { assert_eq!(parse_model_list("anthropic/claude-x\nnoise line\nopencode/big-pickle\nanthropic/claude-x\n"), vec!["opencode/big-pickle", "anthropic/claude-x"]); }
     #[test] fn skill_ships() { assert!(REVIEW_SKILL.contains("high-signal") && REVIEW_SKILL.contains("untrusted")); }
 }
 
