@@ -25,6 +25,18 @@ Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
 and `libwayland-dev` to build. `perusal-cli` is the headless harness.
 
+## Roadmap
+
+Planned, roughly in this order of interest:
+
+| Area | Item | Notes |
+| --- | --- | --- |
+| Platforms | **Windows** support | GPUI runs on Windows; the work is paths, the agent/CLI lookup, tokens storage and an installer. |
+| Platforms | **macOS** support | Same, plus an app bundle, signing and notarisation. |
+| Hosts | **Gitea** and **Forgejo** | New provider next to GitHub and GitLab (pull requests, review comments, CI status). |
+
+Linux (X11 and Wayland) is the supported platform today. Suggestions are welcome as issues.
+
 ## Build and test
 
 ```bash
