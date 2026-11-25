@@ -244,7 +244,7 @@ impl Root {
         };
         // the empty part of the strip drags the window; double click maximizes
         let drag = div().id("strip-drag").flex_1().h(px(36.0)).when(custom, |d| d.on_mouse_down(MouseButton::Left, cx.listener(|_, ev: &gpui::MouseDownEvent, w, _| { if ev.click_count >= 2 { w.zoom_window(); } else { w.start_window_move(); } })));
-        div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(drag)
+        div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(div().flex().items_center().h(px(36.0)).pl_3().pr_1().child(kit::logo(20.0))).child(home).children(tabs).child(drag)
             .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |w| w.minimize_window()))
                 .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |w| w.zoom_window()))
                 .child(ctl("win-close", ic::CLOSE, "Close", true, cx, |w| w.remove_window())))
