@@ -2,7 +2,7 @@
 use perusal_app::{graph::GraphVm, vm::ReviewVm};
 use perusal_core::store::Store;
 use perusal_app::settings::HostCfg;
-use perusal_providers::{auth::{FileStore, TokenStore}, github::GitHub, gitlab::GitLab, Ci, Kind, MrRef, Provider, RemoteMr, Role, StateFilter, Thread};
+use perusal_providers::{auth::{DefaultStore, TokenStore}, github::GitHub, gitlab::GitLab, Ci, Kind, MrRef, Provider, RemoteMr, Role, StateFilter, Thread};
 use std::path::{Path, PathBuf};
 
 pub struct Model {
@@ -25,15 +25,17 @@ impl std::fmt::Display for OpenErr {
 }
 impl From<String> for OpenErr { fn from(s: String) -> Self { OpenErr::Msg(s) } }
 
+fn home_dir() -> Option<PathBuf> { std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from) }
 pub fn data_dir() -> PathBuf {
     let d = std::env::var_os("PERUSAL_HOME").map(PathBuf::from)
         .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|p| PathBuf::from(p).join("perusal")))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/perusal")))
+        .or_else(|| if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("perusal")) } else { None })
+        .or_else(|| home_dir().map(|h| h.join(".local/share/perusal")))
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&d); d
 }
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| if cfg!(windows) { std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("perusal")) } else { None }).or_else(|| home_dir().map(|h| h.join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
 pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
 /// Editable prompt templates (`~/.config/perusal/prompts`); the defaults and an AGENTS.md are written there on first use.
@@ -49,7 +51,7 @@ pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::cre
 /// Where the read-only code snapshot for agents lives, per review and head.
 pub fn snapshot_dir(review: i64, rev: &str) -> PathBuf { data_dir().join("snapshots").join(format!("{review}-{}", rev[..rev.len().min(12)].replace('/', "_"))) }
 pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
-pub fn token_store() -> FileStore { FileStore { dir: config_dir().join("tokens") } }
+pub fn token_store() -> DefaultStore { DefaultStore::new(config_dir().join("tokens")) }
 pub fn token_for(host: &str) -> Option<String> { token_store().get(host).or_else(|| std::env::var("PERUSAL_TOKEN").ok().filter(|t| !t.is_empty())) }
 
 fn provider(r: &MrRef, token: String) -> Result<Box<dyn Provider>, String> {
@@ -151,7 +153,7 @@ pub fn submit_review(mr: &MrRef, sub: &perusal_providers::Submission) -> Result<
 pub fn open_dir(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
     let (prog, args): (&str, Vec<&std::ffi::OsStr>) = if cfg!(target_os = "macos") { ("open", vec![path.as_os_str()]) } else if cfg!(target_os = "windows") { ("explorer", vec![path.as_os_str()]) } else { ("xdg-open", vec![path.as_os_str()]) };
-    std::process::Command::new(prog).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("cannot start {prog}: {e}"))
+    perusal_gitops::command(prog).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("cannot start {prog}: {e}"))
 }
 
 /// Writes the AGENTS.md that explains the theme format to an AI agent, if the folder does not have one yet.
@@ -186,7 +188,22 @@ pub fn project_of(m: &Model) -> String {
 pub fn open_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") { return Err("only web links can be opened".into()); }
     let prog = if cfg!(target_os = "macos") { "open" } else if cfg!(target_os = "windows") { "explorer" } else { "xdg-open" };
-    std::process::Command::new(prog).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("cannot start {prog}: {e}"))
+    perusal_gitops::command(prog).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("cannot start {prog}: {e}"))
+}
+
+/// A Windows toast through PowerShell's WinRT bridge (no extra crate or app registration needed).
+fn windows_toast(title: &str, body: &str) -> std::io::Result<std::process::Output> {
+    // Title and body travel in environment variables, so nothing needs quoting or XML escaping (CreateTextNode escapes itself).
+    // The toast is attributed to "Perusal" through a per-user AppUserModelID registration (no installer needed).
+    let script = r#"$id = 'io.github.perusal.Perusal'; $k = "HKCU:\Software\Classes\AppUserModelId\$id"
+if (-not (Test-Path $k)) { New-Item $k -Force | Out-Null }; Set-ItemProperty $k -Name DisplayName -Value 'Perusal'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode($env:PERUSAL_TOAST_TITLE)) | Out-Null; $n.Item(1).AppendChild($x.CreateTextNode($env:PERUSAL_TOAST_BODY)) | Out-Null
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))"#;
+    let mut c = perusal_gitops::command("powershell"); c.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script]);
+    c.env("PERUSAL_TOAST_TITLE", title).env("PERUSAL_TOAST_BODY", body);
+    c.output()
 }
 
 /// Best-effort desktop notification (notify-send on Linux, osascript on macOS). Never blocks or fails the caller.
@@ -195,7 +212,7 @@ pub fn desktop_notify(title: &str, body: &str) {
     std::thread::spawn(move || {
         let _ = if cfg!(target_os = "macos") {
             std::process::Command::new("osascript").args(["-e", &format!("display notification {:?} with title {:?}", b, format!("Perusal: {t}"))]).output()
-        } else if cfg!(target_os = "windows") { Ok(std::process::Output { status: Default::default(), stdout: vec![], stderr: vec![] }) }
+        } else if cfg!(target_os = "windows") { windows_toast(&t, &b) }
         else { std::process::Command::new("notify-send").args(["--app-name=Perusal", &format!("Perusal: {t}"), &b]).output() };
     });
 }
@@ -238,7 +255,7 @@ pub fn account_user(host: &str, kind: &str) -> Result<String, String> {
 /// Reads a token from the `gh` / `glab` CLI login, if installed and logged in.
 pub fn import_cli_token(host: &str, kind: &str) -> Result<String, String> {
     let (prog, args): (&str, Vec<&str>) = if kind == "gitlab" { ("glab", vec!["auth", "status", "--show-token", "--hostname", host]) } else { ("gh", vec!["auth", "token", "--hostname", host]) };
-    let o = std::process::Command::new(prog).args(&args).stdin(std::process::Stdio::null()).output().map_err(|_| format!("`{prog}` is not installed"))?;
+    let o = perusal_gitops::command(prog).args(&args).stdin(std::process::Stdio::null()).output().map_err(|_| format!("`{prog}` is not installed"))?;
     let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
     let tok = if kind == "gitlab" { perusal_app::hosts::token_from_glab(&text) } else { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|t| !t.is_empty() && o.status.success()) };
     tok.ok_or_else(|| format!("`{prog}` has no login for {host}. Run `{prog} auth login` first."))
@@ -303,7 +320,7 @@ pub fn run_gen(s: &perusal_app::settings::Settings, kind: perusal_agents::GenKin
 pub fn import_all_cli() -> Vec<(String, String, String)> {
     let mut out = vec![];
     for (prog, kind, args) in [("gh", "github", vec!["auth", "status"]), ("glab", "gitlab", vec!["auth", "status"])] {
-        let Ok(o) = std::process::Command::new(prog).args(&args).stdin(std::process::Stdio::null()).output() else { continue };
+        let Ok(o) = perusal_gitops::command(prog).args(&args).stdin(std::process::Stdio::null()).output() else { continue };
         let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
         for host in perusal_app::hosts::hosts_from_status(&text) {
             if let Ok(tok) = import_cli_token(&host, kind) { out.push((host, kind.to_string(), tok)); }

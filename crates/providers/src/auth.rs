@@ -30,6 +30,66 @@ impl TokenStore for FileStore {
     fn delete(&self, host: &str) { let _ = std::fs::remove_file(self.path(host)); }
 }
 
+/// Windows Credential Manager (generic credentials, one per host, target `Perusal/<host>`). Tokens never touch the disk.
+#[cfg(windows)]
+pub mod wincred {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND, FALSE};
+    use windows_sys::Win32::Security::Credentials::{CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
+
+    fn target(host: &str) -> Vec<u16> { format!("Perusal/{host}").encode_utf16().chain(Some(0)).collect() }
+
+    pub fn read(host: &str) -> Option<String> {
+        let t = target(host); let mut p: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `t` is NUL terminated; on success `p` points to a credential we free with CredFree after copying the blob out.
+        unsafe {
+            if CredReadW(t.as_ptr(), CRED_TYPE_GENERIC, 0, &mut p) == FALSE { return None; }
+            let c = &*p; let s = if c.CredentialBlob.is_null() { Vec::new() } else { std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec() };
+            CredFree(p as *const _); String::from_utf8(s).ok()
+        }
+    }
+    pub fn write(host: &str, token: &str) -> std::io::Result<()> {
+        let mut t = target(host); let mut user: Vec<u16> = host.encode_utf16().chain(Some(0)).collect(); let mut blob = token.as_bytes().to_vec();
+        // SAFETY: a zeroed CREDENTIALW is valid; the pointers stay alive for the call.
+        unsafe {
+            let mut c: CREDENTIALW = std::mem::zeroed();
+            c.Type = CRED_TYPE_GENERIC; c.TargetName = t.as_mut_ptr(); c.UserName = user.as_mut_ptr();
+            c.CredentialBlobSize = blob.len() as u32; c.CredentialBlob = blob.as_mut_ptr(); c.Persist = CRED_PERSIST_LOCAL_MACHINE;
+            if CredWriteW(&c, 0) == FALSE { return Err(std::io::Error::from_raw_os_error(GetLastError() as i32)); }
+        }
+        Ok(())
+    }
+    pub fn delete(host: &str) -> bool {
+        let t = target(host);
+        // SAFETY: `t` is NUL terminated.
+        unsafe { CredDeleteW(t.as_ptr(), CRED_TYPE_GENERIC, 0) != FALSE || GetLastError() == ERROR_NOT_FOUND }
+    }
+}
+
+/// The store the app uses: the OS credential store where there is one (Windows Credential Manager), else 0600 files.
+/// On Windows an older token file is moved into the Credential Manager the first time it is read.
+pub struct DefaultStore { pub files: FileStore }
+impl DefaultStore { pub fn new(dir: PathBuf) -> Self { Self { files: FileStore { dir } } } }
+#[cfg(windows)]
+impl TokenStore for DefaultStore {
+    fn get(&self, host: &str) -> Option<String> {
+        if let Some(t) = wincred::read(host) { return Some(t); }
+        let t = self.files.get(host)?; // migrate a token saved by an earlier version
+        if wincred::write(host, &t).is_ok() { self.files.delete(host); }
+        Some(t)
+    }
+    fn set(&self, host: &str, token: &str) -> std::io::Result<()> {
+        // No credential store (for example a service session without a logon session): fall back to the token file.
+        match wincred::write(host, token) { Ok(()) => { self.files.delete(host); Ok(()) } Err(_) => self.files.set(host, token) }
+    }
+    fn delete(&self, host: &str) { wincred::delete(host); self.files.delete(host); }
+}
+#[cfg(not(windows))]
+impl TokenStore for DefaultStore {
+    fn get(&self, host: &str) -> Option<String> { self.files.get(host) }
+    fn set(&self, host: &str, token: &str) -> std::io::Result<()> { self.files.set(host, token) }
+    fn delete(&self, host: &str) { self.files.delete(host) }
+}
+
 /// Redacts a token for logs.
 pub fn redact(s: &str, token: &str) -> String { if token.is_empty() { s.into() } else { s.replace(token, "***") } }
 
@@ -64,6 +124,18 @@ mod tests {
         s.set("git.corp:8443", "sekret").unwrap(); assert_eq!(s.get("git.corp:8443").unwrap(), "sekret");
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(s.path("git.corp:8443")).unwrap().permissions().mode() & 0o777, 0o600); }
         s.delete("git.corp:8443"); assert!(s.get("git.corp:8443").is_none()); let _ = std::fs::remove_dir_all(d);
+    }
+    #[cfg(windows)] #[test] fn credential_manager_roundtrip_and_migration() {
+        let host = format!("perusal-test-{}.example", std::process::id());
+        let d = std::env::temp_dir().join(format!("perusal-cm-{}", std::process::id())); let s = DefaultStore::new(d.clone());
+        assert!(s.get(&host).is_none());
+        if wincred::write(&host, "probe").is_err() { eprintln!("no Credential Manager in this session; skipped"); return; } wincred::delete(&host);
+        s.set(&host, "tok-ü-1").unwrap(); assert_eq!(s.get(&host).as_deref(), Some("tok-ü-1")); assert!(s.files.get(&host).is_none(), "no file on disk");
+        s.set(&host, "tok2").unwrap(); assert_eq!(s.get(&host).as_deref(), Some("tok2"));
+        s.delete(&host); assert!(s.get(&host).is_none());
+        // a token file from an older version is moved into the Credential Manager
+        s.files.set(&host, "old").unwrap(); assert_eq!(s.get(&host).as_deref(), Some("old")); assert!(s.files.get(&host).is_none()); assert_eq!(wincred::read(&host).as_deref(), Some("old"));
+        s.delete(&host); let _ = std::fs::remove_dir_all(d);
     }
     #[test] fn redaction() { assert_eq!(redact("Bearer abc123 x", "abc123"), "Bearer *** x"); }
 }

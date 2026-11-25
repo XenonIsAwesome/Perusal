@@ -255,7 +255,7 @@ impl Root {
         };
         // the empty part of the strip drags the window; double click maximizes
         let drag = div().id("strip-drag").flex_1().h(px(36.0)).when(custom, |d| d.on_mouse_down(MouseButton::Left, cx.listener(|_, ev: &gpui::MouseDownEvent, w, _| { if ev.click_count >= 2 { w.zoom_window(); } else { w.start_window_move(); } })));
-        div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(drag)
+        div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(div().flex().items_center().h(px(36.0)).pl_3().pr_1().child(kit::logo(20.0))).child(home).children(tabs).child(drag)
             .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |w| w.minimize_window()))
                 .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |w| w.zoom_window()))
                 .child(ctl("win-close", ic::CLOSE, "Close", true, cx, |w| w.remove_window())))
@@ -382,7 +382,7 @@ impl Root {
         };
         let token = self.token_host.clone().map(|h| div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.warn).bg(p.warn.opacity(0.08))
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Access token for {h}")))
-            .child(self.finput("f-token", Hf::Token, "Personal access token", "paste token, stored locally with 0600 permissions", cx))
+            .child(self.finput("f-token", Hf::Token, "Personal access token", if cfg!(windows) { "paste token, stored in the Windows Credential Manager" } else { "paste token, stored locally with 0600 permissions" }, cx))
             .child(div().flex().gap_2().child(icon_text_btn("go-token", ic::CHECK, "Save and retry", Btn::Primary, &p).on_click(cx.listener(|t, _, _, cx| t.save_token(cx))))
                 .child(icon_text_btn("go-signin", ic::KEY, "More sign-in options", Btn::Secondary, &p).on_click(cx.listener(|t, _, _, cx| t.open_settings(false, cx))))));
         let msg = self.msg.clone().map(|(k, m)| { let (c, i) = match k { NKind::Error => (p.danger, ic::ERROR_OUTLINE), NKind::Success => (p.success, ic::CHECK_CIRCLE), _ => (p.accent, ic::INFO) }; (c, i, m) });

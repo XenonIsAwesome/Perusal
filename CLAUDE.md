@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Perusal is a native Rust + GPUI desktop reviewer for GitHub pull requests and GitLab merge requests. Linux (X11/Wayland) is the only supported platform today.
+Perusal is a native Rust + GPUI desktop reviewer for GitHub pull requests and GitLab merge requests. Linux (X11/Wayland) is the primary platform; Windows 10/11 x86_64 also works (see the Windows section of `DECISIONS.md`).
 
 ## Commands
 
@@ -46,6 +46,7 @@ State on disk: settings in `~/.config/perusal/settings.toml`, presets in `preset
 - Work autonomously end to end. Do not ask for approval or confirmation of decisions; decide, record a one-line decision and reason in `DECISIONS.md`, and keep going. Stop only when truly blocked (for example a real credential is needed), and then continue with fixtures and mocks.
 - Develop on the session branch, commit in logical steps, push there; open a pull request only when asked.
 - The product spec is `docs/SPEC.md` (exported from the Claude Docs original, https://claude.ai/artifact/GGpC5ERECBrhWYTBrJy4AB); its decisions below are final unless the owner changes them.
+- Windows: spawn subprocesses through `perusal_gitops::command` (no console flash), use `find_program` for agents (`.cmd` shims), and gate Unix-only code and tests with `cfg(unix)`. The GUI needs an interactive desktop session; over a service/SSH shell run it through a scheduled task with `/IT`.
 - Sandbox limits: real GitHub/GitLab hosts are unreachable (develop against mock servers/fixtures, see `crates/providers/tests`), there is no `notify-send`, and the GUI is only checkable on a headless X display.
 
 ## Product spec essentials

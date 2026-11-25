@@ -90,3 +90,62 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ steps.v.outputs.prerelease }}
           fail_on_unmatched_files: true
+
+  windows:
+    name: Build the Windows zip
+    runs-on: windows-2022
+    # Runs after the Linux job so the release (and its generated notes) already exists: two jobs creating the same
+    # release at once can fail or duplicate the notes.
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: v
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ "$V" == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          sed -i "s/^version = \".*\"/version = \"$V\"/" Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test before publishing
+        run: cargo test --workspace
+
+      - name: Build the release binaries
+        run: cargo build --release -p perusal-ui -p perusal-cli
+
+      - name: Installers (MSI and MSIX)
+        shell: pwsh
+        run: |
+          # MSI/MSIX versions are numeric: v1.2.3-rc.1 builds as 1.2.3
+          $V = "${{ steps.v.outputs.version }}" -replace '-.*$', ''
+          dotnet tool install --global wix --version 5.0.2
+          ./packaging/windows/build-msi.ps1 -Version $V
+          ./packaging/windows/build-msix.ps1 -Version $V
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/Perusal-$V-x64.msi" "dist/Perusal-${{ steps.v.outputs.version }}-x64.msi"
+          Copy-Item "target/Perusal-$V-x64.msix" "dist/Perusal-${{ steps.v.outputs.version }}-x64.msix"
+          Copy-Item target/Perusal.cer dist/Perusal-test-signing.cer
+          Copy-Item packaging/windows/install-msix.ps1 dist/install-msix.ps1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $T = "perusal-${{ steps.v.outputs.version }}-windows-x86_64"
+          New-Item -ItemType Directory -Force $T, dist | Out-Null
+          Copy-Item target/release/perusal.exe, target/release/perusal-cli.exe, LICENSE-MIT, LICENSE-APACHE, README.md $T
+          Compress-Archive -Path $T -DestinationPath "dist/$T.zip"
+          # The Linux job's SHA256SUMS cannot cover these files, so the Windows assets get their own list.
+          Get-ChildItem dist -File | Where-Object Name -ne 'SHA256SUMS-windows' | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $_.Name } | Set-Content dist/SHA256SUMS-windows
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: false
+          prerelease: ${{ steps.v.outputs.prerelease }}
+          fail_on_unmatched_files: true

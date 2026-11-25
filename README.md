@@ -20,10 +20,12 @@ target/release/perusal https://github.com/o/r/pull/1  # straight into a remote r
 ```
 Home: click the tabs (pull request URL, local branch, browse remote), paste with Ctrl+V, Enter opens. Tab / Shift+Tab move between fields. Esc in a review returns Home.
 Remote reviews need a token for private repos (the app asks and stores it under `~/.config/perusal/tokens`, mode 0600).
-Data lives in `~/.local/share/perusal` (override with `PERUSAL_HOME`; the system CA store is trusted; `PERUSAL_CA_FILE` adds one more CA certificate).
+Data lives in `~/.local/share/perusal` (`%LOCALAPPDATA%\perusal` on Windows, config in `%APPDATA%\perusal`; override with `PERUSAL_HOME`; the system CA store is trusted, on Windows the Windows certificate store; `PERUSAL_CA_FILE` adds one more CA certificate).
 Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl +/-/0` zoom.
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
-and `libwayland-dev` to build. `perusal-cli` is the headless harness.
+and `libwayland-dev` to build. `perusal-cli` is the headless harness. On Windows you need the Rust MSVC toolchain, Visual Studio Build Tools (C++) and Git for Windows; the GUI needs a Direct3D 11 capable display adapter. Windows releases ship an MSI, an MSIX (self-signed: import `Perusal-test-signing.cer` into Trusted People first) and a zip; build them with `packaging/windows/build-msi.ps1` and `build-msix.ps1`. Tokens are kept in the Windows Credential Manager.
+
+Windows packages: the MSI installs without extra steps. The MSIX is test-signed, so Windows rejects it with `0x800B010A` until its certificate is trusted: from an elevated PowerShell run `install-msix.ps1 -Package Perusal-<version>-x64.msix -Cert Perusal-test-signing.cer` (both files and the script are release assets).
 
 ## Roadmap
 
@@ -31,11 +33,10 @@ Planned, roughly in this order of interest:
 
 | Area | Item | Notes |
 | --- | --- | --- |
-| Platforms | **Windows** support | GPUI runs on Windows; the work is paths, the agent/CLI lookup, tokens storage and an installer. |
 | Platforms | **macOS** support | Same, plus an app bundle, signing and notarisation. |
 | Hosts | **Gitea** and **Forgejo** | New provider next to GitHub and GitLab (pull requests, review comments, CI status). |
 
-Linux (X11 and Wayland) is the supported platform today. Suggestions are welcome as issues.
+Linux (X11 and Wayland) and Windows 10/11 (x86_64) are supported today. Suggestions are welcome as issues.
 
 ## Build and test
 
