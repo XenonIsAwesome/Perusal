@@ -29,6 +29,8 @@ Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
 and `libwayland-dev` to build. `perusal-cli` is the headless harness. On Windows you need the Rust MSVC toolchain, Visual Studio Build Tools (C++) and Git for Windows; the GUI needs a Direct3D 11 capable display adapter. Windows releases ship an MSI, an MSIX (self-signed: import `Perusal-test-signing.cer` into Trusted People first) and a zip; build them with `packaging/windows/build-msi.ps1` and `build-msix.ps1`. Tokens are kept in the Windows Credential Manager.
 
+Windows packages: the MSI installs without extra steps. The MSIX is test-signed, so Windows rejects it with `0x800B010A` until its certificate is trusted: from an elevated PowerShell run `install-msix.ps1 -Package Perusal-<version>-x64.msix -Cert Perusal-test-signing.cer` (both files and the script are release assets).
+
 ## Roadmap
 
 Planned, roughly in this order of interest:

@@ -127,6 +127,7 @@ jobs:
           Copy-Item "target/Perusal-$V-x64.msi" "dist/Perusal-${{ steps.v.outputs.version }}-x64.msi"
           Copy-Item "target/Perusal-$V-x64.msix" "dist/Perusal-${{ steps.v.outputs.version }}-x64.msix"
           Copy-Item target/Perusal.cer dist/Perusal-test-signing.cer
+          Copy-Item packaging/windows/install-msix.ps1 dist/install-msix.ps1
 
       - name: Package
         shell: pwsh

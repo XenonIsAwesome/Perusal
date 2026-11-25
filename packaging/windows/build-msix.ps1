@@ -1,7 +1,8 @@
 # Builds and signs target\Perusal-<version>-x64.msix from the release binaries (needs the Windows SDK: makeappx and signtool).
 #   -CertPfx/-CertPassword  sign with your own code-signing certificate (its subject must equal -Publisher)
 #   otherwise a self-signed test certificate is created; Perusal.cer is written next to the package and must be trusted
-#   (Cert:\LocalMachine\TrustedPeople) on the machine installing it. The Microsoft Store signs packages itself.
+#   (Cert:\LocalMachine\TrustedPeople) on the machine installing it
+#   (install-msix.ps1 does that; without it Windows fails with 0x800B010A). The Microsoft Store signs packages itself.
 param([string]$Version = "", [string]$BinDir = "target\release", [string]$Publisher = "CN=Perusal", [string]$CertPfx = "", [string]$CertPassword = "")
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path "$PSScriptRoot\..\.."
