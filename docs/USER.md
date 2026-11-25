@@ -101,6 +101,6 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 ## Releases
 Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak bundle, a tarball, both browser extensions and `SHA256SUMS`. The package version is the tag without the `v`. Pull requests run the test suite and clippy.
 
-- **Overview:** the Review tab opens with the merge/pull request overview: title, state, branches, description and the general conversation (comments not tied to a line, plus your own global drafts), with a button to add a global comment.
+- **Overview:** pull/merge request reviews have two screens in the centre pane, switched with the Overview / Changes tabs or the `O` key. The Overview shows title, state, branches, the Markdown description and the general conversation (comments not tied to a line, plus your own global drafts), with a button to add a global comment and one to jump to the changes. It is the first screen by default; Settings > Review > First screen can open on the code instead. Selecting a file, `n`/`p`, `Enter` and the like jump to the code. Local branch reviews have no overview.
 
 - **Search on Home:** Recent reviews and My reviews each have a search box above the filters. Every word you type must match (case-insensitive) the title, repository/branch or host, project, number, author or state, and it combines with the Remote and State chips. The clear button empties it.

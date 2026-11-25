@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum DiffMode { #[default] Unified, Split }
 
+/// What a pull/merge request review opens on: the overview (description and conversation) or the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FirstView { #[default] Overview, Code }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MdMode { #[default] Source, Rendered }
@@ -25,6 +30,8 @@ pub struct Settings {
     pub files_tree: bool,
     /// Default diff layout for every file.
     pub diff_mode: DiffMode,
+    /// Screen a pull/merge request review opens on (local branch reviews have no overview and always open on the code).
+    pub first_view: FirstView,
     /// Markdown files open as rendered text or as a source diff.
     pub markdown: MdMode,
     /// Agent CLI used for Ask AI and AI review: claude, gemini, codex or opencode.
@@ -69,7 +76,7 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
+    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
             model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
@@ -116,6 +123,11 @@ mod tests { use super::*;
     #[test] fn theme_choice() {
         let mut s = Settings::default(); assert_eq!(s.effective_theme(false), "dark");
         s.follow_os = true; assert_eq!(s.effective_theme(false), "github-light"); assert_eq!(s.effective_theme(true), "dark");
+    }
+    #[test] fn first_view_defaults_to_overview() {
+        assert_eq!(Settings::default().first_view, FirstView::Overview);
+        assert_eq!(Settings::from_toml("first_view = \"code\"\n").first_view, FirstView::Code);
+        assert_eq!(Settings::from_toml("first_view = \"bogus\"\n").first_view, FirstView::Overview);
     }
     #[test] fn agent_timeout_setting() {
         assert_eq!(Settings::default().agent_timeout(), Some(std::time::Duration::from_secs(900)));

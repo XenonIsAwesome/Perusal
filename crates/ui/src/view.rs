@@ -29,6 +29,9 @@ enum RightTab { Review, Ai }
 enum Side { Left, Right }
 #[derive(Clone, Copy)]
 enum Job { Chat, Review }
+/// The centre pane: the MR overview or the code (files and diff).
+#[derive(Clone, Copy, PartialEq)]
+enum Page { Overview, Code }
 struct Comp { editing: Option<i64>, global: bool, preview: bool }
 
 #[derive(Clone)]
@@ -59,7 +62,7 @@ pub struct View {
     sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
-    left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool, overview_open: bool, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
+    left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
     tab: RightTab, chat: Vec<(String, String)>, ai_ctx: Option<Selection>, ai_notice: Option<String>,
     ai_job: Option<Job>, ai_events: Arc<Mutex<Vec<AgentEvent>>>, ai_cancel: Arc<AtomicBool>, ai_started: Option<Instant>, ai_activity: Vec<String>, ai_partial: String,
     verdict: Verdict, submit_busy: bool, submit_msg: Option<(bool, String)>,
@@ -104,7 +107,7 @@ impl View {
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
-            left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true, overview_open: true, info: None, hover_c: None, auto_c: HashSet::new(),
+            left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
             verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
     }
@@ -394,7 +397,7 @@ impl View {
     fn back(&mut self) { self.m.vm.back(); self.reload(); }
     fn step(&mut self, d: i32) { let n = self.m.vm.batch_count() as i32; if n > 0 { self.m.vm.cursor = (self.m.vm.cursor as i32 + d).rem_euclid(n) as usize; self.reload(); } }
     fn clear_scope(&mut self) { self.m.graph.clear(); self.m.vm.commit_scope = None; let _ = self.m.vm.refresh(); self.reload(); }
-    fn pick_commit(&mut self, i: usize) {
+    fn pick_commit(&mut self, i: usize) { self.page = Page::Code;
         if self.m.graph.selection == Some((i, i)) { self.clear_scope(); return; }
         self.m.graph.click(i); self.m.vm.commit_scope = self.m.graph.scope(&self.m.repo).ok().flatten(); let _ = self.m.vm.refresh(); self.reload();
     }
@@ -406,7 +409,7 @@ impl View {
         } else if mods.shift {
             let order = self.display_order(); let from = self.last_clicked.or_else(|| self.current_file()).unwrap_or(fi);
             if let (Some(a), Some(b)) = (order.iter().position(|x| *x == from), order.iter().position(|x| *x == fi)) { for x in &order[a.min(b)..=a.max(b)] { self.multi.insert(*x); } }
-        } else { self.multi.clear(); self.last_clicked = Some(fi); self.m.vm.select_file(fi); self.reload(); }
+        } else { self.multi.clear(); self.last_clicked = Some(fi); self.m.vm.select_file(fi); self.page = Page::Code; self.reload(); }
     }
     fn group_multi(&mut self) {
         let order = self.display_order(); let mut members: Vec<usize> = order.into_iter().filter(|i| self.multi.contains(i)).collect();
@@ -429,7 +432,7 @@ impl View {
         self.focus = None; self.sug.clear(); self.presets_open = false; self.error = None; self.sort_open = false; if !self.gen_busy { self.gen_for = None; }
     }
     fn goto_symlink_target(&mut self, cx: &mut Context<Self>) {
-        if let Some(t) = self.sym_target { self.m.vm.select_file(t); self.reload(); }
+        if let Some(t) = self.sym_target { self.m.vm.select_file(t); self.page = Page::Code; self.reload(); }
         else if let Some(p) = self.sym_path.clone() { self.note(NKind::Info, format!("The original, {p}, is not changed in this merge request, so there is nothing to show."), None); self.flush(cx); }
     }
 
@@ -620,10 +623,13 @@ impl View {
             self.flush(cx); cx.notify(); return;
         }
         if ctrl { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), "0" => self.zoom = theme::zoom(self.zoom, 0), _ => {} } cx.notify(); return; }
+        // pages: O switches; any code-navigation key from the overview goes to the code first
+        if key == "o" && self.info.is_some() { self.page = if self.page == Page::Overview { Page::Code } else { Page::Overview }; cx.notify(); return; }
+        if self.page == Page::Overview && matches!(key, "n" | "p" | "enter" | "backspace" | "v" | "u" | "m" | "x") { self.page = Page::Code; }
         match key {
             "escape" => { if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; } }
             "/" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
-            "c" => { self.open_composer(false, None); }
+            "c" => { self.open_composer(self.page == Page::Overview && self.info.is_some(), None); }
             "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
             "s" => { cx.emit(ViewEvent::OpenSettings); }
             "f" => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
@@ -669,7 +675,7 @@ impl Render for View {
         let (lw, rw) = (self.left_w * z, self.right_w * z);
 
         let footer = div().flex().items_center().gap_4().px_4().py(px(5.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
-            .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("s", "settings"), ("Esc", "home")]
+            .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("o", "overview"), ("s", "settings"), ("Esc", "home")]
                 .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l)));
         let overlay = self.finish_open.then(|| self.finish_overlay(cx));
 
@@ -1046,7 +1052,65 @@ impl View {
             .child(div().absolute().top(px(top)).right(px(2.0)).w(px(8.0)).h(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
     }
 
-    fn center(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Centre pane: a switch between Overview and Changes (remote reviews only), then the chosen page.
+    fn center(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.pal;
+        let tabs = self.info.is_some().then(|| {
+            let tab = |id: &'static str, label: &'static str, i: ic::Icon, on: bool, to: Page, cx: &mut Context<Self>| div().id(id).flex().items_center().gap_2().px_4().py(px(7.0)).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted })
+                .border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).hover(move |s| s.text_color(p.fg)).child(icon(i, 16.0, if on { p.accent } else { p.muted })).child(label)
+                .on_click(cx.listener(move |this, _, _, cx| { this.page = to; cx.notify(); }));
+            let on = self.page == Page::Overview;
+            div().flex().items_center().gap_1().border_b_1().border_color(p.border).bg(p.surface)
+                .child(tab("pg-overview", "Overview", ic::DESCRIPTION, on, Page::Overview, cx)).child(tab("pg-code", "Changes", ic::DIFFERENCE, !on, Page::Code, cx))
+                .child(div().flex_1()).child(div().pr_3().text_xs().text_color(p.muted).child("O switches between them"))
+        });
+        let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
+        let inner = if self.page == Page::Overview && self.info.is_some() { self.overview_page(&drafts, cx) } else { self.code_center(cx).into_any_element() };
+        div().flex().flex_col().flex_1().min_w_0().h_full().children(tabs).child(inner).into_any_element()
+    }
+
+    /// The overview page: what the MR is about and the conversation that is not tied to a line.
+    fn overview_page(&mut self, drafts: &[perusal_core::store::Draft], cx: &mut Context<Self>) -> AnyElement {
+        let p = self.pal; let mono = self.fonts.mono.clone();
+        let Some(info) = self.info.clone() else { return div().into_any_element() };
+        let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
+        let global_drafts: Vec<&perusal_core::store::Draft> = drafts.iter().filter(|d| d.file.is_none()).collect();
+        let card = |who: String, body: &str, tag: Option<AnyElement>| div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
+            .child(div().flex().items_center().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
+        let mut list: Vec<AnyElement> = vec![];
+        for t in &global_threads {
+            for (i, (a, b)) in t.comments.iter().enumerate() { list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
+        }
+        for d in &global_drafts {
+            let id = d.id;
+            list.push(card("You".into(), &d.body, Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
+                .child(div().flex().justify_end().child(icon_btn(("ovde", id as usize), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
+                    .child(icon_btn(("ovdd", id as usize), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))).into_any_element());
+        }
+        let state = model::norm_state(&info.state); let dot = match state.as_str() { "merged" => p.ai, "closed" => p.danger, _ => p.success };
+        let page = div().id("overview").flex_1().min_h_0().overflow_y_scroll().child(div().flex().flex_col().gap_4().max_w(px(900.0)).mx_auto().px_6().pt_6().pb(px(100.0))
+            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(info.title.clone()))
+            .child(div().flex().flex_wrap().items_center().gap_3().text_sm().text_color(p.muted)
+                .child(badge(match state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15))).child(div().child(format!("by {}", info.author)))
+                .when(!info.source_ref.is_empty(), |d| d.child(div().flex().items_center().gap_1().font_family(mono.clone()).child(info.source_ref.clone()).child(icon(ic::ARROW_FORWARD, 14.0, p.muted)).child(info.base_ref.clone()))))
+            .child(div().flex().flex_col().gap_2().p_4().rounded_md().border_1().border_color(p.border).bg(p.surface)
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("Description"))
+                .child(if info.description.trim().is_empty() { div().text_color(p.muted).child("No description.").into_any_element() } else { markdown_view(&markdown::parse(&info.description), &p, &mono).into_any_element() }))
+            .child(div().flex().items_center().justify_between().child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child("Conversation")).child(badge(format!("{}", list.len()), p.muted, p.hover)))
+                .child(icon_text_btn("ov-add", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); }))))
+            .when(list.is_empty(), |d| d.child(div().text_sm().text_color(p.muted).child("No general comments yet.")))
+            .children(list)
+            .child(div().text_xs().text_color(p.muted).child("Open Changes (O) to review the files. Comments on specific lines are in the diff."))).into_any_element();
+        let bar = div().absolute().bottom(px(16.0)).left_0().right_0().flex().justify_center().child(
+            div().flex().items_center().gap_2().px_3().py_2().rounded_lg().bg(p.surface).border_1().border_color(p.border).shadow_lg()
+                .child(icon_text_btn("ov-code", ic::DIFFERENCE, "Review the changes", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.page = Page::Code; cx.notify(); })))
+                .child(icon_btn("ov-gcomment", ic::ADD_COMMENT, "Comment on the whole merge request (c)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))
+                .child(icon_text_btn("ov-finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); }))));
+        let composer = self.composer.is_some().then(|| self.composer_panel(cx));
+        div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(page).child(bar).children(composer).into_any_element()
+    }
+
+    fn code_center(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal; let mono = self.fonts.mono.clone();
         let batch = self.m.vm.current_batch().to_vec();
         let first = batch.first().map(|&i| self.m.vm.files[i].clone());
@@ -1129,7 +1193,7 @@ impl View {
 
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
         let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(toolbar).child(bar);
-        div().relative().flex().flex_col().flex_1().min_w_0().h_full().children(header).child(wrap).children(composer)
+        div().relative().flex().flex_col().flex_1().min_w_0().min_h_0().children(header).child(wrap).children(composer)
     }
 
     /// The rich comment editor: Markdown toolbar, Write and Preview tabs, suggestions.
@@ -1213,38 +1277,7 @@ impl View {
         }).collect();
         let n = drafts.len();
         let (co, dro) = (self.commits_open, self.drafts_open);
-        // overview: what the MR is about, plus the conversation that is not tied to a line
-        let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
-        let global_drafts: Vec<&perusal_core::store::Draft> = drafts.iter().filter(|d| d.file.is_none()).collect();
-        let n_global = global_threads.len() + global_drafts.len();
-        let oo = self.overview_open && self.info.is_some();
-        let overview: Option<gpui::AnyElement> = self.info.clone().filter(|_| oo).map(|info| {
-            let card = |who: String, body: &str, tag: Option<gpui::AnyElement>| div().flex().flex_col().gap_1().p_2().rounded_md().border_1().border_color(p.border).bg(p.bg)
-                .child(div().flex().items_center().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
-            let mut list: Vec<AnyElement> = vec![];
-            for t in &global_threads {
-                for (i, (a, b)) in t.comments.iter().enumerate() { list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
-            }
-            for d in &global_drafts {
-                let id = d.id;
-                list.push(card("You".into(), &d.body, Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
-                    .child(div().flex().justify_end().child(icon_btn(("ovde", id as usize), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
-                        .child(icon_btn(("ovdd", id as usize), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))).into_any_element());
-            }
-            div().id("overview").flex().flex_col().gap_2().p_3().max_h(px(340.0)).overflow_y_scroll().border_b_1().border_color(p.border)
-                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(info.title.clone()))
-                .child(div().flex().flex_wrap().items_center().gap_2().text_xs().text_color(p.muted)
-                    .child(badge(model::norm_state(&info.state), p.muted, p.hover)).child(div().child(format!("by {}", info.author)))
-                    .when(!info.source_ref.is_empty(), |d| d.child(div().font_family(mono.clone()).truncate().child(format!("{} → {}", info.source_ref, info.base_ref)))))
-                .child(if info.description.trim().is_empty() { div().text_sm().text_color(p.muted).child("No description.").into_any_element() } else { markdown_view(&markdown::parse(&info.description), &p, &mono).text_sm().into_any_element() })
-                .child(div().flex().items_center().justify_between().pt_2().border_t_1().border_color(p.border).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Conversation"))
-                    .child(icon_text_btn("ov-add", ic::COMMENT, "Comment", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); }))))
-                .when(list.is_empty(), |d| d.child(div().text_sm().text_color(p.muted).child("No general comments yet.")))
-                .children(list).into_any_element()
-        });
         div().flex().flex_col().flex_1().min_h_0()
-            .when(self.info.is_some(), |d| d.child(self.section_header("sec-overview", "Overview", Some(n_global), self.overview_open, cx, |v| v.overview_open = !v.overview_open)))
-            .children(overview)
             .child(self.section_header("sec-commits", "Commits", Some(self.m.graph.rows.len()), co, cx, |v| v.commits_open = !v.commits_open))
             .when(co, |d| d.child(div().id("commits").max_h(px(260.0)).overflow_y_scroll().children(commit_rows)))
             .child(self.section_header("sec-drafts", "Drafts", Some(n), dro, cx, |v| v.drafts_open = !v.drafts_open))
