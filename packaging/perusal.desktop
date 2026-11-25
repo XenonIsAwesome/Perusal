@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Perusal
+Comment=Review merge requests and pull requests quickly
+Exec=perusal %u
+Icon=perusal
+Categories=Development;
+MimeType=x-scheme-handler/perusal;
+Terminal=false

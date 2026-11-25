@@ -1,0 +1,2 @@
+Material Icons (c) Google, Apache License 2.0. See assets/LICENSE-MaterialIcons.txt.
+The bundled font file was converted from the WOFF in the npm package material-icons 1.13.12.

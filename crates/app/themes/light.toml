@@ -1,0 +1,32 @@
+name = "Perusal Light"
+dark = false
+
+[ui]
+background = "#ffffff"
+foreground = "#1f2328"
+accent = "#0969da"
+border = "#d0d7de"
+surface = "#f6f8fa"
+muted = "#59636e"
+hover = "#eaeef2"
+
+[syntax]
+keyword = "#cf222e"
+string = "#0a3069"
+comment = "#59636e"
+number = "#0550ae"
+type = "#953800"
+function = "#8250df"
+
+[diff]
+added = "#dafbe1"
+removed = "#ffebe9"
+added_word = "#aceebb"
+removed_word = "#ffcecb"
+
+[status]
+ci_running = "#9a6700"
+ci_passed = "#1a7f37"
+ci_failed = "#cf222e"
+viewed = "#59636e"
+ai = "#8250df"

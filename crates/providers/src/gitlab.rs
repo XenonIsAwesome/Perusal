@@ -1,0 +1,112 @@
+use crate::*;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use serde_json::{json, Value};
+
+pub struct GitLab { pub http: reqwest::Client, pub api: String, pub token: String }
+
+impl GitLab {
+    pub fn api_base(host: &str) -> String { format!("https://{host}/api/v4") }
+    fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder { let r = self.http.request(m, format!("{}{path}", self.api)); if self.token.is_empty() { r } else { r.header("PRIVATE-TOKEN", &self.token) } }
+    fn mr(r: &MrRef) -> String { format!("/projects/{}/merge_requests/{}", utf8_percent_encode(&r.project, NON_ALPHANUMERIC), r.number) }
+}
+
+#[async_trait::async_trait]
+impl Provider for GitLab {
+    async fn mr_info(&self, r: &MrRef) -> Result<MrInfo> {
+        let v: Value = check(self.req(reqwest::Method::GET, &Self::mr(r)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        Ok(MrInfo { title: s("/title"), state: s("/state"), author: s("/author/username"), head_sha: s("/sha"), base_ref: s("/target_branch"), web_url: s("/web_url") })
+    }
+    async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("{}/discussions", Self::mr(r))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.iter().filter(|d| d["individual_note"].as_bool() != Some(true)).map(|d| {
+            let notes = d["notes"].as_array().cloned().unwrap_or_default();
+            let first = notes.first().cloned().unwrap_or(Value::Null);
+            Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
+                line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: notes.iter().any(|n| n["resolved"].as_bool() == Some(true)),
+                comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect() }
+        }).collect())
+    }
+    /// Draft notes then bulk publish. If any step fails, drafts already created are deleted: nothing half-posted.
+    async fn submit(&self, r: &MrRef, s: &Submission) -> Result<()> {
+        if s.verdict == Verdict::RequestChanges { return Err(Error::Unsupported("request changes")); }
+        let base = Self::mr(r);
+        let mut created: Vec<u64> = Vec::new();
+        // Inline positions need the MR's diff_refs; without real SHAs GitLab files the note as a plain MR thread.
+        let mr: Value = check(self.req(reqwest::Method::GET, &base).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let refs = |k: &str| mr.pointer(&format!("/diff_refs/{k}")).and_then(|x| x.as_str()).map(String::from);
+        let head = refs("head_sha").unwrap_or_else(|| s.head_sha.clone());
+        let (base_sha, start_sha) = (refs("base_sha"), refs("start_sha"));
+        let mut bodies: Vec<Value> = s.comments.iter().map(|c| json!({"note": c.body, "position": {"position_type": "text", "old_path": c.path, "new_path": c.path, "new_line": c.end_line, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha}})).collect();
+        if !s.summary.is_empty() { bodies.push(json!({"note": s.summary})); }
+        let res: Result<()> = async {
+            for b in &bodies {
+                let v: Value = check(self.req(reqwest::Method::POST, &format!("{base}/draft_notes")).json(b).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                if let Some(id) = v["id"].as_u64() { created.push(id); }
+            }
+            check(self.req(reqwest::Method::POST, &format!("{base}/draft_notes/bulk_publish")).send().await).await?;
+            if s.verdict == Verdict::Approve { check(self.req(reqwest::Method::POST, &format!("{base}/approve")).send().await).await?; }
+            Ok(())
+        }.await;
+        if res.is_err() { for id in created { let _ = self.req(reqwest::Method::DELETE, &format!("{base}/draft_notes/{id}")).send().await; } }
+        res
+    }
+    async fn ci(&self, r: &MrRef, _sha: &str) -> Result<Ci> {
+        let v: Value = check(self.req(reqwest::Method::GET, &Self::mr(r)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(match v.pointer("/head_pipeline/status").and_then(|x| x.as_str()) {
+            None => Ci::None, Some("running") => Ci::Running, Some("pending" | "created" | "waiting_for_resource" | "preparing" | "scheduled") => Ci::Pending,
+            Some("success") => Ci::Passed, Some("failed") => Ci::Failed, Some(_) => Ci::Canceled })
+    }
+    async fn request_review(&self, r: &MrRef, users: &[String]) -> Result<()> {
+        let mut ids = Vec::new();
+        for u in users {
+            let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/users?username={u}")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+            if let Some(id) = v.first().and_then(|x| x["id"].as_u64()) { ids.push(id); }
+        }
+        check(self.req(reqwest::Method::PUT, &Self::mr(r)).json(&json!({"reviewer_ids": ids})).send().await).await.map(|_| ())
+    }
+    /// GitLab's API has no per-file viewed state; marks stay local (see DECISIONS.md).
+    async fn set_viewed(&self, _: &MrRef, _: &str, _: bool) -> Result<()> { Err(Error::Unsupported("viewed sync")) }
+    async fn list_open(&self, project: &str) -> Result<Vec<(u64, String)>> {
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/projects/{}/merge_requests?state=opened", utf8_percent_encode(project, NON_ALPHANUMERIC))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.iter().map(|p| (p["iid"].as_u64().unwrap_or(0), p["title"].as_str().unwrap_or("").to_string())).collect())
+    }
+    async fn reply(&self, r: &MrRef, thread: &str, body: &str) -> Result<()> {
+        check(self.req(reqwest::Method::POST, &format!("{}/discussions/{thread}/notes", Self::mr(r))).json(&json!({"body": body})).send().await).await.map(|_| ())
+    }
+    async fn resolve(&self, r: &MrRef, thread: &str, resolved: bool) -> Result<()> {
+        check(self.req(reqwest::Method::PUT, &format!("{}/discussions/{thread}", Self::mr(r))).json(&json!({"resolved": resolved})).send().await).await.map(|_| ())
+    }
+    async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        check(self.req(reqwest::Method::POST, &format!("{}/notes/{comment}/award_emoji", Self::mr(r))).json(&json!({"name": emoji})).send().await).await.map(|_| ())
+    }
+    async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
+        check(self.req(reqwest::Method::PUT, &format!("{}/notes/{comment}", Self::mr(r))).json(&json!({"body": body})).send().await).await.map(|_| ())
+    }
+    async fn delete_comment(&self, r: &MrRef, _thread: &str, comment: &str) -> Result<()> {
+        check(self.req(reqwest::Method::DELETE, &format!("{}/notes/{comment}", Self::mr(r))).send().await).await.map(|_| ())
+    }
+    async fn find_for_branch(&self, project: &str, branch: &str) -> Result<Option<u64>> {
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/projects/{}/merge_requests?state=opened&source_branch={}", utf8_percent_encode(project, NON_ALPHANUMERIC), utf8_percent_encode(branch, NON_ALPHANUMERIC))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.first().and_then(|p| p["iid"].as_u64()))
+    }
+    async fn current_user(&self) -> Result<String> {
+        let v: Value = check(self.req(reqwest::Method::GET, "/user").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v["username"].as_str().unwrap_or("").to_string())
+    }
+    async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>> {
+        if self.token.is_empty() { return Err(Error::Unauthorized); }
+        let me = self.current_user().await?;
+        let who = match role { Role::ReviewRequested => format!("reviewer_username={me}"), Role::Authored => "scope=created_by_me".into(), Role::Assigned => "scope=assigned_to_me".into() };
+        let scope = if matches!(role, Role::ReviewRequested) { "&scope=all" } else { "" };
+        let st = match state { StateFilter::Open => "opened", StateFilter::Merged => "merged", StateFilter::Closed => "closed", StateFilter::All => "all" };
+        let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/merge_requests?{who}{scope}&state={st}&order_by=updated_at&sort=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        Ok(v.iter().map(|m| {
+            let web = m["web_url"].as_str().unwrap_or("");
+            let project = web.split("https://").nth(1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
+            let state = match m["state"].as_str() { Some("opened") => "open", Some("merged") => "merged", _ => "closed" };
+            RemoteMr { url: web.into(), title: m["title"].as_str().unwrap_or("").into(), project, number: m["iid"].as_u64().unwrap_or(0), author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
+                state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab }
+        }).collect())
+    }
+}

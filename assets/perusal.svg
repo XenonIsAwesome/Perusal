@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Perusal">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+    <clipPath id="lens"><circle cx="228" cy="224" r="112"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- the diff being read -->
+  <g>
+    <rect x="96" y="96" width="190" height="26" rx="13" fill="#ffffff" fill-opacity=".35"/>
+    <rect x="96" y="366" width="230" height="26" rx="13" fill="#ffffff" fill-opacity=".35"/>
+  </g>
+  <!-- magnifier: enlarges the changed lines -->
+  <circle cx="228" cy="224" r="112" fill="#0f172a"/>
+  <g clip-path="url(#lens)">
+    <rect x="130" y="158" width="200" height="38" rx="19" fill="#fca5a5"/>
+    <rect x="130" y="208" width="170" height="38" rx="19" fill="#4ade80"/>
+    <rect x="130" y="258" width="120" height="38" rx="19" fill="#4ade80"/>
+    <text x="146" y="186" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="800" fill="#991b1b">−</text>
+    <text x="146" y="236" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="800" fill="#166534">+</text>
+    <text x="146" y="286" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="800" fill="#166534">+</text>
+  </g>
+  <circle cx="228" cy="224" r="112" fill="none" stroke="#ffffff" stroke-width="22"/>
+  <line x1="310" y1="306" x2="404" y2="400" stroke="#ffffff" stroke-width="40" stroke-linecap="round"/>
+</svg>
