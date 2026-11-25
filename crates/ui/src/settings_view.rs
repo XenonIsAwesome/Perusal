@@ -345,6 +345,7 @@ impl SettingsView {
             .child(row("Response timeout", "How long an AI run may take before it is stopped. Choose No limit for very slow models or huge reviews (Stop still works)", to_dd))
             .child(row("Agent executable", "Full path to the program, for when it is not on the PATH or you want a specific install. Leave empty to find it automatically", div().flex().flex_col().flex_none().w(px(300.0)).gap_1().child(div().w_full().child(self.field_box("f-apath", F::AgentPath, "e.g. /home/me/.opencode/bin/opencode", cx, false)))
                 .child(div().text_xs().w_full().truncate().text_color(if found.is_some() { p.success } else { p.danger }).child(match &found { Some(f) => format!("Using {}", f.display()), None => "Not found. Enter its full path above".to_string() })).into_any_element()))
+            .child(row("Prompt templates", "Every prompt sent to the agent (Ask AI, AI review, filter, sort and rule generation) is a Markdown file you can edit; an AGENTS.md there lists the fields", icon_text_btn("open-prompts", ic::FOLDER_OPEN, "Open prompts folder", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let _ = crate::model::prompts(); if let Err(e) = model::open_dir(&model::prompts_dir()) { this.say(false, e); } cx.notify(); })).into_any_element()))
             .child(row("Custom command", "Optional. Program and arguments; the prompt is added as the last argument", div().w(px(300.0)).child(self.field_box("f-cmd", F::Cmd, "e.g. my-agent --read-only", cx, false)).into_any_element()))
     }
 }

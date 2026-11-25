@@ -3,7 +3,7 @@ use crate::kit::{self, badge, ci_badge, diff_squares, field_key, icon, icon_btn,
 use crate::model::{self, Model};
 use gpui::{deferred, div, list, point, prelude::*, px, relative, uniform_list, AnyElement, ClickEvent, Context, FontWeight, HighlightStyle, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText};
 use perusal_agents::run::{agent_env, run_streaming, AgentEvent, RunError};
-use perusal_agents::{chat_prompt, CtxDraft, CtxThread, ReviewContext, launch_with, on_path, parse_review, review_prompt, supports_effort, Options, Selection, REVIEW_SKILL};
+use perusal_agents::{CtxDraft, CtxThread, ReviewContext, launch_with, on_path, parse_review, supports_effort, Options, Selection};
 use perusal_app::events::{self, Snapshot};
 use perusal_app::markdown::{self, Located};
 use perusal_app::notify::Kind as NKind;
@@ -495,7 +495,8 @@ impl View {
             threads: self.threads.iter().map(|t| CtxThread { path: t.path.clone(), line: t.line, resolved: t.resolved, comments: t.comments.clone() }).collect(),
             drafts: self.m.store.drafts(review).unwrap_or_default().into_iter().map(|d| CtxDraft { file: d.file, start: d.start_line, end: d.end_line, body: d.body, ai: d.ai }).collect(),
         };
-        let prompt_chat = chat_prompt(sel.as_ref(), &self.chat, &question);
+        let prompts = model::prompts();
+        let prompt_chat = prompts.chat(sel.as_ref(), &self.chat, &question);
         if let Job::Chat = job { self.chat.push(("user".into(), question.clone())); let _ = self.m.store.add_message(review, "user", &question); }
         self.ai_job = Some(job); self.ai_started = Some(Instant::now());
         let events = self.ai_events.clone(); events.lock().unwrap().clear();
@@ -506,7 +507,7 @@ impl View {
             push(AgentEvent::Activity("Preparing a read-only copy of the code".into()));
             let dest = model::snapshot_dir(review, &rev);
             if !dest.join(".perusal-snapshot").exists() { perusal_gitops::export_tree(&repo, &rev, &dest).map_err(RunError::Failed)?; let _ = std::fs::write(dest.join(".perusal-snapshot"), "1"); }
-            let prompt = if is_review { push(AgentEvent::Activity("Collecting the patch".into())); let patch = perusal_gitops::patch(&repo, &base, &rev).map_err(RunError::Failed)?; review_prompt(REVIEW_SKILL, &rctx, &changed, &patch) } else { prompt_chat };
+            let prompt = if is_review { push(AgentEvent::Activity("Collecting the patch".into())); let patch = perusal_gitops::patch(&repo, &base, &rev).map_err(RunError::Failed)?; prompts.review(&rctx, &changed, &patch) } else { prompt_chat };
             let l = launch_with(&agent, &custom, &prompt, &opts).ok_or_else(|| RunError::Failed("no agent configured".into()))?;
             push(AgentEvent::Activity(format!("Starting {}", l.program)));
             run_streaming(&l, &dest, &agent_env(), timeout, &cancel, push)
