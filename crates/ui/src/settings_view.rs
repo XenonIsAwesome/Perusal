@@ -10,6 +10,9 @@ use perusal_app::theme;
 use perusal_diff::GroupRule;
 use perusal_providers::auth::{DeviceCode, TokenStore};
 
+/// True when dropdown `id` is the open one.
+fn open_or(dd: Option<u8>, id: u8) -> bool { dd == Some(id) }
+
 pub enum SettingsEvent { Changed, Close }
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
@@ -22,7 +25,7 @@ enum Acc { Unknown, Out, In(String), Bad(String) }
 pub struct SettingsView {
     pub settings: Settings, pal: Pal, fonts: Fonts,
     agent_path: Input, cmd: Input, model: Input, label: Input, pat: Input, host_in: Input, token: Input, client: Input, rule_gen: Input, pname: Input, pfilter: Input, psort: Input, effort_in: Input,
-    model_custom: bool, effort_custom: bool, agent_models: Vec<String>, models_for: String, stab: u8, editing_rule: Option<String>, presets: perusal_core::presets::Presets, pscope: Option<String>, pedit: bool, gen_busy: bool, gen_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    model_custom: bool, effort_custom: bool, agent_models: Vec<String>, models_for: String, dd_query: String, dd_for: Option<u8>, stab: u8, editing_rule: Option<String>, presets: perusal_core::presets::Presets, pscope: Option<String>, pedit: bool, gen_busy: bool, gen_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     focus: Option<F>, rules_open: bool, dd: Option<u8>, rule_err: Option<String>, new_kind: &'static str,
     accounts: Vec<(String, String, Acc)>, token_host: Option<String>, client_host: Option<String>, device: Option<(String, DeviceCode)>, msg: Option<(bool, String)>, busy: bool,
     /// First-run setup: the step shown (0 welcome, 1 accounts, 2 agent, 3 done). `None` is the normal Settings panel.
@@ -33,7 +36,7 @@ impl SettingsView {
     pub fn new(settings: Settings, fonts: Fonts, onboarding: bool, cx: &mut Context<Self>) -> Self {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
-            model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
+            model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), dd_query: String::new(), dd_for: None, stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
             focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), settings };
         v.refresh_accounts(cx); v
     }
@@ -148,6 +151,11 @@ impl SettingsView {
     pub fn key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         let key = ev.keystroke.key.as_str();
         if key == "escape" { if self.focus.is_some() || self.dd.is_some() { self.commit_text(cx); self.blur(); } else if self.onboarding.is_none() { cx.emit(SettingsEvent::Close); } cx.notify(); return; }
+        if self.focus.is_none() && self.dd.is_some() {
+            // typing while a dropdown is open searches its options
+            match key { "backspace" => { self.dd_query.pop(); } _ => { if !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform { if let Some(c) = ev.keystroke.key_char.as_deref().filter(|c| c.chars().all(|ch| !ch.is_control())) { self.dd_query.push_str(c); } } } }
+            cx.notify(); return;
+        }
         let Some(f) = self.focus else { return };
         if key == "enter" {
             match f {
@@ -211,6 +219,9 @@ impl SettingsView {
     fn dropdown(&mut self, id: u8, current: &str, options: Vec<String>, cx: &mut Context<Self>, set: fn(&mut Settings, String)) -> gpui::AnyElement {
         let p = self.pal; let open = self.dd == Some(id);
         let builtin = theme::BUILTIN_NAMES;
+        if self.dd_for != self.dd { self.dd_for = self.dd; self.dd_query.clear(); }
+        let q = self.dd_query.to_lowercase(); let options: Vec<String> = options.into_iter().filter(|o| q.is_empty() || o.to_lowercase().contains(&q)).collect();
+        let hint = self.dd_search_hint(open_or(self.dd, id), &options);
         let items: Vec<_> = options.iter().enumerate().map(|(i, o)| {
             let on = o == current; let oo = o.clone(); let custom = !builtin.contains(&o.as_str());
             div().id(("dd-item", id as usize * 100 + i)).flex().items_center().gap_2().px_3().py(px(6.0)).cursor_pointer().when(on, |d| d.bg(p.accent.opacity(0.16))).hover(move |x| x.bg(p.hover)).text_sm()
@@ -220,13 +231,23 @@ impl SettingsView {
         }).collect();
         div().relative().child(dd_button(("dd", id as usize), current.to_string(), open, &p)
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
-            .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; cx.notify(); })))
-            .children(open.then(|| deferred(div().absolute().top(px(36.0)).right_0().min_w(px(220.0)).max_h(px(260.0)).overflow_hidden().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(items)).with_priority(30))).into_any_element()
+            .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; this.focus = None; cx.notify(); })))
+            .children(open.then(|| deferred(div().absolute().top(px(36.0)).right_0().min_w(px(220.0)).max_h(px(260.0)).overflow_hidden().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(hint).children(items)).with_priority(30))).into_any_element()
     }
 
+    /// The "type to search" line at the top of an open dropdown.
+    fn dd_search_hint<T>(&self, open: bool, shown: &[T]) -> Option<gpui::Div> {
+        if !open { return None; }
+        let p = self.pal;
+        Some(div().px_3().py(px(4.0)).text_xs().text_color(p.muted).border_b_1().border_color(p.border)
+            .child(if self.dd_query.is_empty() { "Type to search".to_string() } else if shown.is_empty() { format!("No match for \"{}\"", self.dd_query) } else { format!("Search: {}", self.dd_query) }))
+    }
     /// A dropdown of (label, value) options whose choice runs `act`.
     fn pick(&mut self, id: u8, current: &str, options: Vec<(String, String)>, cx: &mut Context<Self>, act: fn(&mut Self, String, &mut Context<Self>)) -> gpui::AnyElement {
         let p = self.pal; let open = self.dd == Some(id);
+        if self.dd_for != self.dd { self.dd_for = self.dd; self.dd_query.clear(); }
+        let q = self.dd_query.to_lowercase(); let options: Vec<(String, String)> = options.into_iter().filter(|(l, _)| q.is_empty() || l.to_lowercase().contains(&q)).collect();
+        let hint = self.dd_search_hint(open_or(self.dd, id), &options);
         let items: Vec<_> = options.iter().enumerate().map(|(i, (label, val))| {
             let on = label == current; let v = val.clone();
             div().id(("pk-item", id as usize * 100 + i)).flex().items_center().gap_2().px_3().py(px(6.0)).cursor_pointer().when(on, |d| d.bg(p.accent.opacity(0.16))).hover(move |x| x.bg(p.hover)).text_sm()
@@ -236,8 +257,8 @@ impl SettingsView {
         }).collect();
         div().relative().child(dd_button(("pk", id as usize), current.to_string(), open, &p)
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
-            .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; cx.notify(); })))
-            .children(open.then(|| deferred(div().id(("pk-list", id as usize)).absolute().top(px(36.0)).right_0().min_w(px(260.0)).max_h(px(320.0)).overflow_y_scroll().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(items)).with_priority(30))).into_any_element()
+            .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; this.focus = None; cx.notify(); })))
+            .children(open.then(|| deferred(div().id(("pk-list", id as usize)).absolute().top(px(36.0)).right_0().min_w(px(260.0)).max_h(px(320.0)).overflow_y_scroll().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(hint).children(items)).with_priority(30))).into_any_element()
     }
 
     fn accounts_section(&mut self, cx: &mut Context<Self>) -> gpui::Div {
