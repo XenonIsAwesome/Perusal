@@ -133,8 +133,9 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     assert!(matches!(GitHub { http: reqwest::Client::new(), api: s.uri(), token: String::new() }.my_reviews("h", Role::Authored, StateFilter::Open).await, Err(Error::Unauthorized)));
     let s2 = MockServer::start().await;
     Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"username":"me","login":"me"}))).mount(&s2).await;
-    Mock::given(method("GET")).and(path("/merge_requests")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"web_url":"https://gl.corp/grp/sub/proj/-/merge_requests/3","title":"C","iid":3,"author":{"username":"zed"},"state":"opened","updated_at":"u"}]))).mount(&s2).await;
+    Mock::given(method("GET")).and(path("/merge_requests")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"web_url":"http://gl.corp/grp/sub/proj/-/merge_requests/3","title":"C","iid":3,"author":{"username":"zed"},"state":"opened","updated_at":"u"}]))).mount(&s2).await;
     let l = GitLab { http: reqwest::Client::new(), api: s2.uri(), token: "t".into() }.my_reviews("gl.corp", Role::ReviewRequested, StateFilter::Open).await.unwrap();
     assert_eq!((l[0].project.as_str(), l[0].state.as_str(), l[0].number), ("grp/sub/proj", "open", 3));
+    assert_eq!(l[0].url, "https://gl.corp/grp/sub/proj/-/merge_requests/3", "http web_url from the instance is rewritten to https");
     assert_eq!(ci_page(&Kind::GitHub, "https://github.com/o/r/pull/7"), "https://github.com/o/r/pull/7/checks");
 }
