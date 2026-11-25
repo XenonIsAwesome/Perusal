@@ -1,7 +1,6 @@
 //! perusal:// deep links and single-instance hand-off over a Unix socket.
 use perusal_core::brand::DEEP_LINK_SCHEME;
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
 fn unpercent(s: &str) -> Option<String> {
@@ -23,15 +22,35 @@ fn perusal_providers_check(url: &str) -> Result<(), String> {
     if url.contains("/pull/") || url.contains("/-/merge_requests/") { Ok(()) } else { Err("not a merge request or pull request URL".into()) }
 }
 
-/// Tries to hand `link` to a running instance. Returns Ok(true) if one accepted it (caller should exit).
-pub fn send_to_running(sock: &Path, link: &str) -> std::io::Result<bool> {
-    match UnixStream::connect(sock) { Ok(mut s) => { s.write_all(link.as_bytes())?; Ok(true) } Err(_) => Ok(false) }
+#[cfg(unix)]
+mod ipc {
+    use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    pub type Listener = UnixListener;
+    pub fn send_to_running(sock: &Path, link: &str) -> std::io::Result<bool> {
+        match UnixStream::connect(sock) { Ok(mut s) => { s.write_all(link.as_bytes())?; Ok(true) } Err(_) => Ok(false) }
+    }
+    pub fn listen(sock: &Path) -> std::io::Result<Listener> { let _ = std::fs::remove_file(sock); UnixListener::bind(sock) }
+    pub fn accept_one(l: &Listener) -> std::io::Result<String> { let (mut s, _) = l.accept()?; let mut b = String::new(); s.read_to_string(&mut b)?; Ok(b) }
 }
 
-/// Becomes the running instance: returns a listener (stale socket files are replaced).
-pub fn listen(sock: &Path) -> std::io::Result<UnixListener> { let _ = std::fs::remove_file(sock); UnixListener::bind(sock) }
-
-pub fn accept_one(l: &UnixListener) -> std::io::Result<String> { let (mut s, _) = l.accept()?; let mut b = String::new(); s.read_to_string(&mut b)?; Ok(b) }
+/// Windows has no Unix sockets in std: the running instance listens on a loopback TCP port and records it in the file at `sock`.
+#[cfg(windows)]
+mod ipc {
+    use super::*;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    pub type Listener = TcpListener;
+    pub fn send_to_running(sock: &Path, link: &str) -> std::io::Result<bool> {
+        let Some(port) = std::fs::read_to_string(sock).ok().and_then(|s| s.trim().parse::<u16>().ok()) else { return Ok(false) };
+        match TcpStream::connect((Ipv4Addr::LOCALHOST, port)) { Ok(mut s) => { s.write_all(link.as_bytes())?; Ok(true) } Err(_) => Ok(false) }
+    }
+    pub fn listen(sock: &Path) -> std::io::Result<Listener> {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        std::fs::write(sock, l.local_addr()?.port().to_string())?; Ok(l)
+    }
+    pub fn accept_one(l: &Listener) -> std::io::Result<String> { let (mut s, _) = l.accept()?; let mut b = String::new(); s.read_to_string(&mut b)?; Ok(b) }
+}
+pub use ipc::{accept_one, listen, send_to_running, Listener};
 
 #[cfg(test)]
 mod tests { use super::*;

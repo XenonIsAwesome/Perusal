@@ -23,15 +23,17 @@ impl std::fmt::Display for OpenErr {
 }
 impl From<String> for OpenErr { fn from(s: String) -> Self { OpenErr::Msg(s) } }
 
+fn home_dir() -> Option<PathBuf> { std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from) }
 pub fn data_dir() -> PathBuf {
     let d = std::env::var_os("PERUSAL_HOME").map(PathBuf::from)
         .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|p| PathBuf::from(p).join("perusal")))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/perusal")))
+        .or_else(|| if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("perusal")) } else { None })
+        .or_else(|| home_dir().map(|h| h.join(".local/share/perusal")))
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&d); d
 }
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| if cfg!(windows) { std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("perusal")) } else { None }).or_else(|| home_dir().map(|h| h.join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
 pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
 pub fn load_settings() -> perusal_app::settings::Settings { std::fs::read_to_string(config_dir().join("settings.toml")).map(|s| perusal_app::settings::Settings::from_toml(&s)).unwrap_or_default() }
@@ -179,13 +181,26 @@ pub fn open_url(url: &str) -> Result<(), String> {
     std::process::Command::new(prog).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("cannot start {prog}: {e}"))
 }
 
+/// A Windows toast through PowerShell's WinRT bridge (no extra crate or app registration needed).
+fn windows_toast(title: &str, body: &str) -> std::io::Result<std::process::Output> {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\'', "''");
+    let script = r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$n = $x.GetElementsByTagName('text'); $n.Item(0).AppendChild($x.CreateTextNode('Perusal: @T@')) | Out-Null; $n.Item(1).AppendChild($x.CreateTextNode('@B@')) | Out-Null
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($x))"#.replace("@T@", &esc(title)).replace("@B@", &esc(body));
+    let mut c = std::process::Command::new("powershell"); c.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+    c.output()
+}
+
 /// Best-effort desktop notification (notify-send on Linux, osascript on macOS). Never blocks or fails the caller.
 pub fn desktop_notify(title: &str, body: &str) {
     let (t, b) = (title.to_string(), body.to_string());
     std::thread::spawn(move || {
         let _ = if cfg!(target_os = "macos") {
             std::process::Command::new("osascript").args(["-e", &format!("display notification {:?} with title {:?}", b, format!("Perusal: {t}"))]).output()
-        } else if cfg!(target_os = "windows") { Ok(std::process::Output { status: Default::default(), stdout: vec![], stderr: vec![] }) }
+        } else if cfg!(target_os = "windows") { windows_toast(&t, &b) }
         else { std::process::Command::new("notify-send").args(["--app-name=Perusal", &format!("Perusal: {t}"), &b]).output() };
     });
 }

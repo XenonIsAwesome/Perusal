@@ -90,3 +90,44 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ steps.v.outputs.prerelease }}
           fail_on_unmatched_files: true
+
+  windows:
+    name: Build the Windows zip
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: v
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ "$V" == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          sed -i "s/^version = \".*\"/version = \"$V\"/" Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test before publishing
+        run: cargo test --workspace
+
+      - name: Build the release binaries
+        run: cargo build --release -p perusal-ui -p perusal-cli
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $T = "perusal-${{ steps.v.outputs.version }}-windows-x86_64"
+          New-Item -ItemType Directory -Force $T, dist | Out-Null
+          Copy-Item target/release/perusal.exe, target/release/perusal-cli.exe, LICENSE-MIT, LICENSE-APACHE, README.md $T
+          Compress-Archive -Path $T -DestinationPath "dist/$T.zip"
+          (Get-FileHash "dist/$T.zip" -Algorithm SHA256).Hash.ToLower() + "  $T.zip" | Set-Content "dist/$T.zip.sha256"
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ steps.v.outputs.prerelease }}
+          fail_on_unmatched_files: true

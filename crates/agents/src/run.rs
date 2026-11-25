@@ -111,7 +111,7 @@ pub fn agent_env() -> BTreeMap<String, String> {
     e
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::Arc;

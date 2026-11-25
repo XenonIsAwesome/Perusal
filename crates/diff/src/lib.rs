@@ -139,7 +139,7 @@ mod tests {
         run(&["checkout","-qb","f"]);
         std::fs::write(d.join("a.txt"), "1\n3\n4\n").unwrap(); std::fs::write(d.join("b.txt"), "x\n").unwrap();
         run(&["add","-A"]); run(&["commit","-qm","b"]);
-        std::os::unix::fs::symlink("a.txt", d.join("ln")).unwrap(); std::fs::write(d.join("w.txt"), "a\nb\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","ln"]);
+        #[cfg(unix)] std::os::unix::fs::symlink("a.txt", d.join("ln")).unwrap(); #[cfg(not(unix))] std::fs::write(d.join("ln"), "a.txt").unwrap(); std::fs::write(d.join("w.txt"), "a\nb\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","ln"]);
         run(&["checkout","-qb","g","main"]); std::fs::write(d.join("w.txt"), "a\nb\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","w0"]);
         std::fs::write(d.join("w.txt"), "a\n    b\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","w1"]);
         let g = index_range(&d, "main", "g").unwrap(); let w = g.iter().find(|x| x.path == "w.txt").unwrap(); assert!(w.status == Status::Added && !w.ws_only());
@@ -147,7 +147,7 @@ mod tests {
         run(&["checkout","-qb","h","f"]); std::fs::write(d.join("w.txt"), "a\n   b\n").unwrap(); run(&["add","-A"]); run(&["commit","-qm","w2"]);
         let h = index_range(&d, "f", "h").unwrap(); let w = h.iter().find(|x| x.path == "w.txt").unwrap(); assert!(w.ws_only(), "{w:?}");
         let mut f = index_range(&d, "main", "f").unwrap(); f.sort_by(|a, b| a.path.cmp(&b.path));
-        assert!(f.iter().find(|x| x.path == "ln").unwrap().symlink); assert!(!f.iter().find(|x| x.path == "a.txt").unwrap().symlink);
+        #[cfg(unix)] assert!(f.iter().find(|x| x.path == "ln").unwrap().symlink); assert!(!f.iter().find(|x| x.path == "a.txt").unwrap().symlink);
         let f: Vec<FileStat> = f.into_iter().filter(|x| x.path != "ln" && x.path != "w.txt").collect();
         assert_eq!((f[0].additions, f[0].deletions), (2, 1)); assert_eq!(f[1].status, Status::Added);
         let _ = std::fs::remove_dir_all(&d);

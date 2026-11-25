@@ -125,7 +125,7 @@ pub fn local_base(dir: &Path, branch: &str, override_base: Option<&str>) -> Resu
 pub fn export_tree(dir: &Path, rev: &str, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let mut a = Command::new("git").args(["archive", "--format=tar", rev]).current_dir(dir).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let t = Command::new("tar").args(["-x", "-C"]).arg(dest).stdin(a.stdout.take().unwrap()).output().map_err(|e| e.to_string())?;
+    let t = Command::new("tar").args(["-x", "-f", "-", "-C"]).arg(dest).stdin(a.stdout.take().unwrap()).output().map_err(|e| e.to_string())?;
     let o = a.wait_with_output().map_err(|e| e.to_string())?;
     if !o.status.success() { return Err(redact(&String::from_utf8_lossy(&o.stderr))); }
     if !t.status.success() { return Err(String::from_utf8_lossy(&t.stderr).to_string()); }

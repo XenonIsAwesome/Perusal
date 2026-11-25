@@ -44,3 +44,15 @@ jobs:
 
       - name: Packaging scripts parse
         run: for f in packaging/*.sh extension/build.sh; do bash -n "$f"; done
+
+  windows:
+    name: Build and test (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --workspace
+      - name: Release build of the GUI
+        run: cargo build --release -p perusal-ui -p perusal-cli

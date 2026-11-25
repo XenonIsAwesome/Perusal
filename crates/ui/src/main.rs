@@ -1,4 +1,6 @@
 //! Perusal GUI (GPUI). Thin: all review logic lives in the UI-free crates.
+// Release builds on Windows are GUI-subsystem (no console window); `attach_console` restores output for the CLI subcommands.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod icons;
 mod kit;
 mod model;
@@ -8,7 +10,13 @@ mod view;
 
 use perusal_app::{deeplink, theme};
 
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_console() { #[link(name = "kernel32")] extern "system" { fn AttachConsole(pid: u32) -> i32; } unsafe { AttachConsole(u32::MAX); } }
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn attach_console() {}
+
 fn main() {
+    attach_console();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["theme", "check", file] => {

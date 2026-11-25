@@ -1,7 +1,7 @@
 //! Agent safety: minimal environment, per-review repo allowlist, visible access log, read-only permissions.
 use std::collections::BTreeMap;
 
-const KEEP: [&str; 9] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL", "NODE_PATH"];
+const KEEP: [&str; 20] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL", "NODE_PATH", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "COMSPEC", "HOMEDRIVE", "HOMEPATH", "USERNAME"];
 /// Variables that only describe where tools live (version managers, XDG dirs, locale); launchers and shims of agent CLIs need them to find themselves.
 const KEEP_PREFIX: [&str; 16] = ["XDG_", "LC_", "VOLTA_", "ASDF_", "MISE_", "NVM_", "FNM_", "PNPM_", "BUN_", "NPM_CONFIG_PREFIX", "CARGO_HOME", "RUSTUP_HOME", "HOMEBREW_", "PYENV", "SDKMAN", "NODENV"];
 const SECRET_HINTS: [&str; 7] = ["TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "COOKIE", "AUTH"];
