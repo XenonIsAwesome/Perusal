@@ -94,6 +94,9 @@ jobs:
   windows:
     name: Build the Windows zip
     runs-on: windows-2022
+    # Runs after the Linux job so the release (and its generated notes) already exists: two jobs creating the same
+    # release at once can fail or duplicate the notes.
+    needs: release
     steps:
       - uses: actions/checkout@v4
 
@@ -136,12 +139,13 @@ jobs:
           New-Item -ItemType Directory -Force $T, dist | Out-Null
           Copy-Item target/release/perusal.exe, target/release/perusal-cli.exe, LICENSE-MIT, LICENSE-APACHE, README.md $T
           Compress-Archive -Path $T -DestinationPath "dist/$T.zip"
-          (Get-FileHash "dist/$T.zip" -Algorithm SHA256).Hash.ToLower() + "  $T.zip" | Set-Content "dist/$T.zip.sha256"
+          # The Linux job's SHA256SUMS cannot cover these files, so the Windows assets get their own list.
+          Get-ChildItem dist -File | Where-Object Name -ne 'SHA256SUMS-windows' | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $_.Name } | Set-Content dist/SHA256SUMS-windows
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          generate_release_notes: false
           prerelease: ${{ steps.v.outputs.prerelease }}
           fail_on_unmatched_files: true

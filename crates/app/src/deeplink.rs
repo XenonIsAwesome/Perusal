@@ -45,11 +45,16 @@ mod ipc {
     use std::time::Duration;
     const MAX_LEN: u64 = 8 * 1024;
     pub struct Listener { inner: TcpListener, token: String }
-    fn random_token() -> String {
-        use std::hash::{BuildHasher, Hasher};
-        // RandomState is seeded from the OS random generator; two independent hashers give 128 bits.
-        (0..2).map(|i| { let mut h = std::collections::hash_map::RandomState::new().build_hasher(); h.write_u32(std::process::id() ^ i); format!("{:016x}", h.finish()) }).collect()
+    /// 128 random bits from the operating system's generator (BCryptGenRandom with the system-preferred RNG), hex encoded.
+    fn random_token() -> std::io::Result<String> {
+        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        let mut b = [0u8; 16];
+        let st = unsafe { BCryptGenRandom(std::ptr::null_mut(), b.as_mut_ptr(), b.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+        if st != 0 { return Err(std::io::Error::other(format!("BCryptGenRandom failed: 0x{st:X}"))); }
+        Ok(b.iter().map(|x| format!("{x:02x}")).collect())
     }
+    /// Compares without stopping at the first difference.
+    fn same(a: &str, b: &str) -> bool { a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0 }
     pub fn send_to_running(sock: &Path, link: &str) -> std::io::Result<bool> {
         let Ok(info) = std::fs::read_to_string(sock) else { return Ok(false) };
         let mut it = info.split_whitespace();
@@ -60,7 +65,7 @@ mod ipc {
         }
     }
     pub fn listen(sock: &Path) -> std::io::Result<Listener> {
-        let inner = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?; let token = random_token();
+        let inner = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?; let token = random_token()?;
         std::fs::write(sock, format!("{} {token}", inner.local_addr()?.port()))?; Ok(Listener { inner, token })
     }
     /// Accepts one connection and returns its link; a client with the wrong token, an oversized or a stalled message is an error (the caller just accepts again).
@@ -68,7 +73,7 @@ mod ipc {
         let (s, _) = l.inner.accept()?; s.set_read_timeout(Some(Duration::from_secs(2)))?;
         let mut b = String::new(); s.take(MAX_LEN + 1).read_to_string(&mut b)?;
         if b.len() as u64 > MAX_LEN { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "message too long")); }
-        match b.split_once('\n') { Some((t, link)) if t == l.token => Ok(link.to_string()), _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "bad token")) }
+        match b.split_once('\n') { Some((t, link)) if same(t, &l.token) => Ok(link.to_string()), _ => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "bad token")) }
     }
 }
 pub use ipc::{accept_one, listen, send_to_running, Listener};
@@ -85,17 +90,31 @@ pub fn registry_commands(exe: &Path) -> Vec<Vec<String>> {
     ]
 }
 
-/// Windows: makes `perusal://` links open this executable (per-user registry entry). Does nothing if already registered for it.
+/// The default value of `HKCU\Software\Classes\perusal\shell\open\command`, read through the registry API (no process is spawned).
+#[cfg(windows)]
+fn registered_command() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    let sub: Vec<u16> = format!(r"Software\Classes\{DEEP_LINK_SCHEME}\shell\open\command").encode_utf16().chain(Some(0)).collect();
+    let mut size = 0u32;
+    unsafe {
+        if RegGetValueW(HKEY_CURRENT_USER, sub.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) != 0 || size < 2 { return None; }
+        let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+        if RegGetValueW(HKEY_CURRENT_USER, sub.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size) != 0 { return None; }
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+/// Windows: makes `perusal://` links open this executable (per-user registry entry). The common case (already registered for
+/// this exe) is one registry read; `reg.exe` only runs when the entry is missing or points elsewhere.
 #[cfg(windows)]
 pub fn register_scheme() -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe()?;
     // An MSIX install declares the protocol in its manifest; do not write a second registration pointing into the package.
     if exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps")) { return Ok(()); }
+    if registered_command().is_some_and(|c| c.contains(&format!("\"{}\"", exe.display()))) { return Ok(()); }
     let run = |args: &[String]| std::process::Command::new("reg").args(args).creation_flags(0x0800_0000).output();
-    let key = format!(r"HKCU\Software\Classes\{DEEP_LINK_SCHEME}\shell\open\command");
-    let current = run(&["query".into(), key, "/ve".into()])?;
-    if String::from_utf8_lossy(&current.stdout).contains(&format!("\"{}\"", exe.display())) { return Ok(()); }
     for c in registry_commands(&exe) { let o = run(&c)?; if !o.status.success() { return Err(std::io::Error::other(String::from_utf8_lossy(&o.stderr).trim().to_string())); } }
     Ok(())
 }

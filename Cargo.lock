@@ -4198,6 +4198,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "toml 0.8.23",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

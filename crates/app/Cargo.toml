@@ -16,3 +16,6 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 perusal-gitops = { path = "../gitops" }
 pulldown-cmark = { version = "0.12", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Registry"] }
