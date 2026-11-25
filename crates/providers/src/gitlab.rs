@@ -15,16 +15,18 @@ impl Provider for GitLab {
     async fn mr_info(&self, r: &MrRef) -> Result<MrInfo> {
         let v: Value = check(self.req(reqwest::Method::GET, &Self::mr(r)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        Ok(MrInfo { title: s("/title"), state: s("/state"), author: s("/author/username"), head_sha: s("/sha"), base_ref: s("/target_branch"), web_url: s("/web_url") })
+        Ok(MrInfo { title: s("/title"), state: s("/state"), author: s("/author/username"), head_sha: s("/sha"), base_ref: s("/target_branch"), web_url: s("/web_url"), description: s("/description"), source_ref: s("/source_branch") })
     }
     async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("{}/discussions", Self::mr(r))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
-        Ok(v.iter().filter(|d| d["individual_note"].as_bool() != Some(true)).map(|d| {
-            let notes = d["notes"].as_array().cloned().unwrap_or_default();
+        Ok(v.iter().filter_map(|d| {
+            // system notes ("added 1 commit", "approved this merge request") are not conversation
+            let notes: Vec<Value> = d["notes"].as_array().cloned().unwrap_or_default().into_iter().filter(|n| n["system"].as_bool() != Some(true)).collect();
+            if notes.is_empty() { return None; }
             let first = notes.first().cloned().unwrap_or(Value::Null);
-            Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
+            Some(Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
                 line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: notes.iter().any(|n| n["resolved"].as_bool() == Some(true)),
-                comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect() }
+                comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect() })
         }).collect())
     }
     /// Draft notes then bulk publish. If any step fails, drafts already created are deleted: nothing half-posted.
@@ -103,9 +105,12 @@ impl Provider for GitLab {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/merge_requests?{who}{scope}&state={st}&order_by=updated_at&sort=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v.iter().map(|m| {
             let web = m["web_url"].as_str().unwrap_or("");
-            let project = web.split("https://").nth(1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
+            let project = web.split_once("://").map(|x| x.1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
             let state = match m["state"].as_str() { Some("opened") => "open", Some("merged") => "merged", _ => "closed" };
-            RemoteMr { url: web.into(), title: m["title"].as_str().unwrap_or("").into(), project, number: m["iid"].as_u64().unwrap_or(0), author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
+            // Some instances report http:// web_urls (TLS terminated by a proxy); always use the https host the user connected to.
+            let number = m["iid"].as_u64().unwrap_or(0);
+            let url = if project.is_empty() { web.to_string() } else { format!("https://{host}/{project}/-/merge_requests/{number}") };
+            RemoteMr { url, title: m["title"].as_str().unwrap_or("").into(), project, number, author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
                 state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab }
         }).collect())
     }

@@ -14,6 +14,8 @@ pub struct Model {
     pub web_url: Option<String>,
     /// MR state when opened (open, merged, closed).
     pub mr_state: String,
+    /// Host metadata of the MR when it was opened (description for the overview).
+    pub info: Option<perusal_providers::MrInfo>,
 }
 
 #[derive(Debug)]
@@ -69,7 +71,7 @@ impl Model {
         let title = store.review_title(review).ok().filter(|t| !t.is_empty()).unwrap_or(title);
         let vm = ReviewVm::new(&store, review, files);
         let graph = GraphVm::load(&repo, &base_sha, &rev, 6)?;
-        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new() })
+        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new(), info: None })
     }
 
     pub fn open_local(repo: &Path, branch: &str, base: Option<&str>) -> Result<Self, OpenErr> {
@@ -98,7 +100,7 @@ impl Model {
         let base_sha = perusal_gitops::merge_base(&dir, "refs/perusal/base", &head)?;
         let canon = canonical(&r);
         let mut m = Self::finish(dir, base_sha, head, &format!("remote:{canon}"), info.title.clone(), Some(canon))?;
-        m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); Ok(m)
+        m.info = Some(info.clone()); m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); Ok(m)
     }
 
     /// Reopens a review from the recent list using its stored key.

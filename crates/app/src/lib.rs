@@ -8,6 +8,7 @@ pub mod hosts;
 pub mod events;
 pub mod markdown;
 pub mod notify;
+pub mod search;
 pub mod settings;
 pub mod keymap;
 pub mod tabs;

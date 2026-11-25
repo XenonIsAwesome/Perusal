@@ -53,7 +53,7 @@ pub struct Options { pub model: String, pub effort: String, /// Full path of the
 
 /// Like `launch_for`, adding the model and effort/variant where the agent supports them:
 /// claude `--model` and a thinking budget (MAX_THINKING_TOKENS), codex `-m` and reasoning effort,
-/// gemini `-m` (no effort control), opencode `-m` and `--variant`. Claude is run in stream-json mode for live activity.
+/// gemini `-m` (no effort control), opencode `-m provider/model#variant`. Claude is run in stream-json mode for live activity.
 pub fn launch_with(agent: &str, custom: &str, prompt: &str, o: &Options) -> Option<Launch> {
     if !custom.trim().is_empty() { return custom_launch(custom, prompt); }
     let (m, e) = (o.model.trim(), o.effort.trim());
@@ -74,8 +74,9 @@ pub fn launch_with(agent: &str, custom: &str, prompt: &str, o: &Options) -> Opti
         }
         "opencode" => {
             args.push("run".into());
-            if !m.is_empty() { args.extend(["-m".into(), m.into()]); }
-            if !e.is_empty() { args.extend(["--variant".into(), e.into()]); }
+            // opencode has no variant flag in `run`: the variant rides on the model as `provider/model#variant`
+            // (so it needs a model; without one the effort is ignored rather than breaking the command line).
+            if !m.is_empty() { args.extend(["-m".into(), if e.is_empty() || m.contains('#') { m.to_string() } else { format!("{m}#{e}") }]); }
             args.push(prompt.into()); "opencode"
         }
         _ => return None,
@@ -275,7 +276,9 @@ mod tests {
         let c = launch_with("claude", "", "q", &o).unwrap(); assert!(c.stream_json && c.args.windows(2).any(|w| w == ["--model", "sonnet"]) && c.env == vec![("MAX_THINKING_TOKENS".to_string(), "31999".to_string())]);
         let x = launch_with("codex", "", "q", &o).unwrap(); assert!(x.args.contains(&"model_reasoning_effort=\"high\"".to_string()) && x.args.last().unwrap() == "q");
         let g = launch_with("gemini", "", "q", &o).unwrap(); assert!(g.args.windows(2).any(|w| w == ["-m", "sonnet"]) && g.env.is_empty());
-        let op = launch_with("opencode", "", "q", &o).unwrap(); assert!(op.args.windows(2).any(|w| w == ["--variant", "high"]));
+        let op = launch_with("opencode", "", "q", &o).unwrap(); assert!(op.args.windows(2).any(|w| w == ["-m", "sonnet#high"]) && !op.args.contains(&"--variant".to_string()));
+        let o2 = Options { model: "anthropic/claude-x#max".into(), effort: "high".into(), path: String::new() }; assert!(launch_with("opencode", "", "q", &o2).unwrap().args.contains(&"anthropic/claude-x#max".to_string()));
+        let o3 = Options { model: String::new(), effort: "high".into(), path: String::new() }; assert_eq!(launch_with("opencode", "", "q", &o3).unwrap().args, vec!["run".to_string(), "q".to_string()]);
         let d = launch_with("claude", "", "q", &Options::default()).unwrap(); assert!(!d.args.contains(&"--model".to_string()) && d.env.is_empty());
         assert!(launch_with("nope", "", "q", &o).is_none()); assert_eq!(launch_with("x", "my-agent -v", "q", &o).unwrap().program, "my-agent");
         let n = launch_with("claude", "", "q", &Options { model: String::new(), effort: "20000".into(), path: String::new() }).unwrap(); assert_eq!(n.env, vec![("MAX_THINKING_TOKENS".to_string(), "20000".to_string())]); assert!(effort_suggestions("codex").contains(&"minimal"));

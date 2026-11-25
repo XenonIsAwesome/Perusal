@@ -19,7 +19,7 @@ impl Provider for GitHub {
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let state = if v["merged"].as_bool() == Some(true) { "merged".into() } else { s("/state") };
-        Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url") })
+        Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url"), description: s("/body"), source_ref: s("/head/ref") })
     }
     async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}/comments", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
@@ -29,6 +29,12 @@ impl Provider for GitHub {
             let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string();
             if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); }
             else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)] }); }
+        }
+        // general conversation on the pull request (issue comments); optional, so a failure here keeps the inline threads
+        if let Ok(resp) = check(self.req(reqwest::Method::GET, &format!("/repos/{}/issues/{}/comments?per_page=100", r.project, r.number)).send().await).await {
+            if let Ok(list) = resp.json::<Vec<Value>>().await {
+                for c in list { out.push(Thread { id: format!("i{}", c["id"]), path: None, line: None, resolved: false, comments: vec![(c["user"]["login"].as_str().unwrap_or("").to_string(), c["body"].as_str().unwrap_or("").to_string())] }); }
+            }
         }
         Ok(out)
     }
