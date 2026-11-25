@@ -40,6 +40,10 @@ impl SettingsView {
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
             model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), dd_query: String::new(), dd_for: None, stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
             focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), settings };
+        if onboarding {
+            let a = perusal_app::settings::pick_installed_agent(&v.settings.agent, |k| on_path(agent_program(k)));
+            if a != v.settings.agent { v.settings.agent = a; v.changed(cx); }
+        }
         v.refresh_accounts(cx); v
     }
     /// Loads the model list of the selected agent (opencode only) in the background.
@@ -297,6 +301,25 @@ impl SettingsView {
                     .child(icon_text_btn("add-host", ic::ADD, "Add", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.add_host(cx); cx.notify(); })))))
     }
 
+    /// Model dropdown (plus the free-text box for Custom), shared by Settings and first-run setup.
+    fn model_control(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.fetch_models(cx);
+        let s = self.settings.clone();
+        let mut model_opts: Vec<(String, String)> = vec![("Default".into(), String::new()), ("Custom…".into(), "\u{0}custom".into())]; if self.agent_models.is_empty() { model_opts.extend(model_suggestions(&s.agent).iter().map(|m| (m.to_string(), m.to_string()))); } else { model_opts.extend(self.agent_models.iter().map(|m| (m.clone(), m.clone()))); } 
+        let model_label = if self.model_custom { "Custom…".to_string() } else if s.model.is_empty() { "Default".into() } else { s.model.clone() };
+        let model_dd = self.pick(3, &model_label, model_opts, cx, |this, v, cx| {
+            if v == "\u{0}custom" { this.model_custom = true; this.focus = Some(F::Model); } else { this.model_custom = false; this.model.f.set(&v); this.settings.model = v; this.changed(cx); } cx.notify(); });
+        div().flex().flex_col().items_end().gap_2().child(model_dd).when(self.model_custom, |d| d.child(div().w(px(260.0)).child(self.field_box("f-model", F::Model, "Model name, e.g. claude-sonnet-4-5", cx, false)))).into_any_element()
+    }
+
+    /// "Import all logins" card (every gh / glab login at once), shown in Settings and in first-run setup.
+    fn import_all_card(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let p = self.pal;
+        div().flex().items_center().gap_3().p_3().rounded_md().border_1().border_color(p.border).bg(p.bg).child(icon(ic::TERMINAL, 20.0, p.accent))
+            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Import from gh and glab")).child(div().text_xs().text_color(p.muted).child("Finds every host you are logged in to, including GitHub Enterprise and self-hosted GitLab, and signs in to all of them.")))
+            .child(icon_text_btn("import-all", ic::DOWNLOAD, "Import all logins", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.import_all(cx); })))
+    }
+
     fn ai_section(&mut self, cx: &mut Context<Self>, row: &dyn Fn(&'static str, &'static str, gpui::AnyElement) -> gpui::Div) -> gpui::Div {
         self.fetch_models(cx);
         let p = self.pal; let s = self.settings.clone();
@@ -304,10 +327,7 @@ impl SettingsView {
         let agent_chips: Vec<_> = AGENTS.iter().enumerate().map(|(i, (k, l))| { let kk = k.to_string(); let installed = on_path(match *k { "claude" => "claude", "gemini" => "gemini", "codex" => "codex", _ => "opencode" });
             chip(("ag", i), format!("{l}{}", if installed { "  ✓" } else { "" }), s.agent == *k).on_click(cx.listener(move |this, _, _, cx| {
                 this.settings.agent = kk.clone(); this.model_custom = false; this.effort_custom = false; this.settings.model.clear(); this.settings.effort.clear(); this.model.f.clear(); this.effort_in.f.clear(); this.changed(cx); })) }).collect();
-        let mut model_opts: Vec<(String, String)> = vec![("Default".into(), String::new()), ("Custom…".into(), "\u{0}custom".into())]; if self.agent_models.is_empty() { model_opts.extend(model_suggestions(&s.agent).iter().map(|m| (m.to_string(), m.to_string()))); } else { model_opts.extend(self.agent_models.iter().map(|m| (m.clone(), m.clone()))); } 
-        let model_label = if self.model_custom { "Custom…".to_string() } else if s.model.is_empty() { "Default".into() } else { s.model.clone() };
-        let model_dd = self.pick(3, &model_label, model_opts, cx, |this, v, cx| {
-            if v == "\u{0}custom" { this.model_custom = true; this.focus = Some(F::Model); } else { this.model_custom = false; this.model.f.set(&v); this.settings.model = v; this.changed(cx); } cx.notify(); });
+        let model_ctl = self.model_control(cx);
         let mut eff_opts: Vec<(String, String)> = vec![("Default".into(), String::new())]; eff_opts.extend(effort_suggestions(&s.agent).iter().map(|m| (m.to_string(), m.to_string()))); eff_opts.push(("Custom…".into(), "\u{0}custom".into()));
         let eff_label = if self.effort_custom { "Custom…".to_string() } else if s.effort.is_empty() { "Default".into() } else { s.effort.clone() };
         let eff_dd = self.pick(4, &eff_label, eff_opts, cx, |this, v, cx| {
@@ -317,7 +337,6 @@ impl SettingsView {
         if !to_opts.iter().any(|(_, v)| *v == s.agent_timeout_mins.to_string()) { to_opts.push((timeout_label(s.agent_timeout_mins), s.agent_timeout_mins.to_string())); }
         let to_dd = self.pick(6, &timeout_label(s.agent_timeout_mins), to_opts, cx, |this, v, cx| { this.settings.agent_timeout_mins = v.parse().unwrap_or(15); this.changed(cx); });
         let found = if s.agent_path.trim().is_empty() { perusal_agents::find_program(match s.agent.as_str() { "claude" => "claude", "gemini" => "gemini", "codex" => "codex", _ => "opencode" }) } else { perusal_agents::find_program(s.agent_path.trim()) };
-        let model_ctl = div().flex().flex_col().items_end().gap_2().child(model_dd).when(self.model_custom, |d| d.child(div().w(px(260.0)).child(self.field_box("f-model", F::Model, "Model name, e.g. claude-sonnet-4-5", cx, false)))).into_any_element();
         let eff_ctl = div().flex().flex_col().items_end().gap_2().when(!effort_ok, |d| d.opacity(0.4)).child(eff_dd).when(self.effort_custom && effort_ok, |d| d.child(div().w(px(260.0)).child(self.field_box("f-effort", F::Effort, if s.agent == "claude" { "Thinking tokens, e.g. 20000" } else { "Variant name" }, cx, false)))).into_any_element();
         div().flex().flex_col()
             .child(row("Agent", "Runs the CLI you already have installed (a check mark means it was found on your PATH); no keys are stored here", div().flex().flex_wrap().gap_2().max_w(px(380.0)).justify_end().children(agent_chips).into_any_element()))
@@ -329,6 +348,9 @@ impl SettingsView {
             .child(row("Custom command", "Optional. Program and arguments; the prompt is added as the last argument", div().w(px(300.0)).child(self.field_box("f-cmd", F::Cmd, "e.g. my-agent --read-only", cx, false)).into_any_element()))
     }
 }
+
+/// Executable name of an agent key.
+fn agent_program(k: &str) -> &'static str { match k { "claude" => "claude", "gemini" => "gemini", "codex" => "codex", _ => "opencode" } }
 
 impl gpui::Render for SettingsView {
     fn render(&mut self, _w: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -346,15 +368,16 @@ impl gpui::Render for SettingsView {
                 .child(div().size(px(36.0)).flex_none().rounded_lg().bg(p.accent.opacity(0.14)).flex().items_center().justify_center().child(icon(i, 20.0, p.accent)))
                 .child(div().flex().flex_col().flex_1().min_w_0().gap(px(2.0)).child(div().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(t)).child(div().text_sm().text_color(p.muted).child(d)));
             let signed_in = self.accounts.iter().filter(|a| matches!(a.2, Acc::In(_))).count();
+            let model_ctl = if step == 2 { Some(self.model_control(cx)) } else { None };
             let agent_cards: Vec<_> = AGENTS.iter().enumerate().map(|(i, (k, l))| {
-                let prog = match *k { "claude" => "claude", "gemini" => "gemini", "codex" => "codex", _ => "opencode" };
+                let prog = agent_program(k);
                 let found = on_path(prog); let on = s.agent == *k; let kk = k.to_string();
                 let blurb = match *k { "claude" => "Anthropic's coding agent", "gemini" => "Google's command-line agent", "codex" => "OpenAI's coding agent", _ => "Open-source agent for many providers" };
                 div().id(("obag", i)).flex().items_center().gap_3().px_4().py_3().rounded_lg().border_1().border_color(if on { p.accent } else { p.border }).bg(if on { p.accent.opacity(0.10) } else { p.bg }).cursor_pointer().hover(move |x| x.bg(p.hover))
                     .child(icon(if on { ic::RADIO_BUTTON_CHECKED } else { ic::RADIO_BUTTON_UNCHECKED }, 20.0, if on { p.accent } else { p.muted }))
                     .child(div().flex().flex_col().flex_1().gap(px(1.0)).child(div().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(*l)).child(div().text_xs().text_color(p.muted).child(blurb)))
                     .child(if found { badge("Found on PATH", p.success, p.success.opacity(0.15)) } else { badge("Not installed", p.muted, p.hover) })
-                    .on_click(cx.listener(move |this, _, _, cx| { this.settings.agent = kk.clone(); this.changed(cx); }))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.settings.agent = kk.clone(); this.model_custom = false; this.effort_custom = false; this.settings.model.clear(); this.settings.effort.clear(); this.model.f.clear(); this.effort_in.f.clear(); this.changed(cx); }))
             }).collect();
             let content = match step {
                 0 => div().flex().flex_col().gap_5().py_5()
@@ -371,12 +394,15 @@ impl gpui::Render for SettingsView {
                 1 => div().flex().flex_col().gap_3().py_4()
                     .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(p.fg).child("Connect your accounts"))
                     .child(div().text_sm().text_color(p.muted).child("Public repositories open without signing in. Sign in to see your own reviews, open private repositories and post reviews. Use whichever method works for you."))
+                    .child(self.import_all_card(cx))
                     .child(self.accounts_section(cx)).children(msg).into_any_element(),
                 2 => div().flex().flex_col().gap_3().py_4()
                     .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(p.fg).child("Choose your AI agent"))
                     .child(div().text_sm().text_color(p.muted).child("Perusal runs the agent CLI that is already installed and logged in on your machine, read-only, on a copy of the code. No keys are stored here."))
                     .child(div().flex().flex_col().gap_2().children(agent_cards))
-                    .child(div().text_xs().text_color(p.muted).child("Model and effort can be set in Settings later. Install an agent and reopen this step to see it detected."))
+                    .child(div().flex().items_center().gap_3().pt_2().child(div().flex().flex_col().flex_1().min_w_0().child(div().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child("Model")).child(div().text_xs().text_color(p.muted).child("Pick one, or leave Default to use the agent's own choice.")))
+                        .children(model_ctl))
+                    .child(div().text_xs().text_color(p.muted).child("Effort and timeout can be set in Settings later. Install an agent and reopen this step to see it detected."))
                     .into_any_element(),
                 _ => div().flex().flex_col().items_center().gap_4().py_8()
                     .child(div().size(px(72.0)).rounded_full().bg(p.success.opacity(0.15)).flex().items_center().justify_center().child(icon(ic::CHECK_CIRCLE, 44.0, p.success)))
@@ -510,9 +536,7 @@ impl gpui::Render for SettingsView {
                     .child(row("Built-in title bar", "Draw the minimize, maximize and close buttons inside the app. Turn off to use the system title bar and borders", sw("sw-tb", s.custom_titlebar, cx, |st| st.custom_titlebar = !st.custom_titlebar)))
                     .child(section("Setup")).child(row("Run the first-time setup again", "Walks through accounts and the AI agent", icon_text_btn("rerun-ob", ic::ROCKET_LAUNCH, "Start setup", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.onboarding = Some(0); cx.notify(); })).into_any_element())),
                 1 => div().flex().flex_col().child(section("Accounts")).child(div().pt_2().flex().flex_col().gap_2()
-                        .child(div().flex().items_center().gap_3().p_3().rounded_md().border_1().border_color(p.border).bg(p.bg).child(icon(ic::TERMINAL, 20.0, p.accent))
-                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Import from gh and glab")).child(div().text_xs().text_color(p.muted).child("Finds every host you are logged in to, including GitHub Enterprise and self-hosted GitLab, and signs in to all of them.")))
-                            .child(icon_text_btn("import-all", ic::DOWNLOAD, "Import all logins", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.import_all(cx); }))))
+                        .child(self.import_all_card(cx))
                         .child(accounts)).children(msgbox),
                 2 => div().flex().flex_col().child(section("Desktop notifications"))
                     .child(row("Desktop notifications", "Master switch. In-app messages always appear", sw("sw-dn", s.desktop_notifications, cx, |st| st.desktop_notifications = !st.desktop_notifications)))

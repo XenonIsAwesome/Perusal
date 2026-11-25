@@ -77,6 +77,13 @@ pub struct Settings {
     pub right_open: bool,
 }
 
+/// Agent to preselect at first run: keep `current` if it is installed, otherwise the first installed one in `AGENTS` order
+/// (so a machine with only opencode does not start on Claude). With none installed, `current` stays.
+pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> String {
+    if installed(current) { return current.to_string(); }
+    AGENTS.iter().map(|(k, _)| *k).find(|k| installed(k)).unwrap_or(current).to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
             model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
@@ -137,4 +144,11 @@ mod tests { use super::*;
         assert_eq!(Settings::from_toml("agent_timeout_mins = 2\n").agent_timeout(), Some(std::time::Duration::from_secs(120)));
     }
     #[test] fn agent_cycle() { let mut s = Settings::default(); assert_eq!(s.agent_label(), "Claude Code"); for _ in 0..4 { s.next_agent(); } assert_eq!(s.agent, "claude"); s.next_agent(); assert_eq!(s.agent_label(), "Gemini CLI"); }
+    #[test] fn first_run_agent_follows_what_is_installed() {
+        assert_eq!(pick_installed_agent("claude", |a| a == "opencode"), "opencode");
+        assert_eq!(pick_installed_agent("claude", |a| a == "gemini" || a == "opencode"), "gemini");
+        assert_eq!(pick_installed_agent("claude", |_| true), "claude");
+        assert_eq!(pick_installed_agent("codex", |a| a == "codex" || a == "gemini"), "codex");
+        assert_eq!(pick_installed_agent("claude", |_| false), "claude");
+    }
 }
