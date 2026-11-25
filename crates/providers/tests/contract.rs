@@ -7,7 +7,7 @@ fn gh(s: &MockServer) -> GitHub { GitHub { http: reqwest::Client::new(), api: s.
 fn gl(s: &MockServer) -> GitLab { GitLab { http: reqwest::Client::new(), api: s.uri(), token: "t".into() } }
 fn ghref() -> MrRef { MrRef { kind: Kind::GitHub, host: "h".into(), project: "o/r".into(), number: 3 } }
 fn glref() -> MrRef { MrRef { kind: Kind::GitLab, host: "h".into(), project: "g/p".into(), number: 4 } }
-fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into() }] } }
+fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3 }] } }
 
 #[tokio::test] async fn github_info_and_ci() {
     let s = MockServer::start().await;
@@ -61,6 +61,9 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     let pos = &posted[0]["position"];
     assert_eq!((pos["base_sha"].as_str(), pos["start_sha"].as_str(), pos["head_sha"].as_str(), pos["position_type"].as_str()), (Some("BASE"), Some("START"), Some("HEAD"), Some("text")));
     assert!(pos["new_line"].as_u64().is_some() && pos["old_path"].as_str().is_some());
+    // a multi-line selection (lines 2-4) is sent as a range, not just its last line
+    assert_eq!((pos["new_line"].as_u64(), pos["line_range"]["start"]["new_line"].as_u64(), pos["line_range"]["end"]["new_line"].as_u64()), (Some(4), Some(2), Some(4)));
+    assert!(pos["line_range"]["start"]["line_code"].as_str().unwrap().ends_with("_2_2") && pos["line_range"]["end"]["line_code"].as_str().unwrap().ends_with("_3_4"));
 }
 #[tokio::test] async fn gitlab_failed_submit_leaves_nothing_half_posted() {
     let s = MockServer::start().await;

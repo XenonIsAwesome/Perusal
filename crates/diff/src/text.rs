@@ -36,6 +36,17 @@ pub fn diff_lines(old: &str, new: &str, context: usize) -> Vec<Line> {
     out
 }
 
+/// Old-side line number GitLab pairs with new-side line `new_line` when it builds a line code: the old line of an
+/// unchanged line, or for an added line the next old line number (one past the last old line before it).
+pub fn old_line_for_new(old: &str, new: &str, new_line: u32) -> u32 {
+    let mut next_old = 1u32;
+    for l in diff_lines(old, new, usize::MAX / 2) {
+        if l.new_no == Some(new_line) { return l.old_no.unwrap_or(next_old); }
+        if let Some(o) = l.old_no { next_old = o + 1; }
+    }
+    next_old
+}
+
 /// Like [`diff_lines`] but lines that differ only in whitespace count as equal (context shows the new text). No word highlights.
 pub fn diff_lines_ws(old: &str, new: &str, context: usize) -> Vec<Line> {
     let (ol, nl): (Vec<&str>, Vec<&str>) = (old.split_inclusive('\n').collect(), new.split_inclusive('\n').collect());
@@ -248,5 +259,18 @@ mod reanchor_tests {
         assert!(diff_lines(a, b, 0).iter().any(|l| l.kind == Kind::Removed));
         let w = diff_lines_ws(a, b, 0); assert_eq!(w.iter().filter(|l| l.kind == Kind::Removed).count(), 0); assert_eq!(w.iter().filter(|l| l.kind == Kind::Added).map(|l| l.text.trim()).collect::<Vec<_>>(), vec!["y();"]);
         assert!(diff_lines_ws("a\n b\n", "a\n    b\n", 3).iter().all(|l| l.kind == Kind::Context));
+    }
+}
+
+#[cfg(test)]
+mod old_line_tests {
+    use super::*;
+    #[test] fn maps_new_lines_to_old() {
+        let old = "a\nb\nc\nd\n"; let new = "a\nX\nY\nb\nc\nd\n";
+        assert_eq!(old_line_for_new(old, new, 1), 1);
+        assert_eq!(old_line_for_new(old, new, 2), 2); // added: next old line
+        assert_eq!(old_line_for_new(old, new, 4), 2); // unchanged b
+        assert_eq!(old_line_for_new(old, new, 6), 4);
+        assert_eq!(old_line_for_new("", "x\ny\n", 2), 1);
     }
 }

@@ -4268,6 +4268,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1_smol",
  "tokio",
  "windows-sys 0.61.2",
  "wiremock",

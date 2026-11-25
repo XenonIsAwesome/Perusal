@@ -28,7 +28,7 @@ Self-hosted hosts with a private CA work once the CA is in the system trust stor
 
 ## Agents
 Agents run read-only in a checkout of the reviewed head, with a minimal environment (no tokens). Their output is only ever
-saved as AI-tagged drafts. Edit `skills/review.md` to change the review prompt.
+saved as AI-tagged drafts. Every prompt (chat, review, filter/sort/rule generation) is an editable Markdown template in `~/.config/perusal/prompts/` (Settings, AI, Open prompts folder); see the `AGENTS.md` there.
 
 ## Browser extension
 `extension/build.sh` builds Chromium and Firefox zips. Add self-hosted domains in the extension options.
@@ -55,11 +55,12 @@ In the Files panel, Ctrl+click toggles files and Shift+click selects a range; **
 
 ## AI
 **Ask AI** (`a`) opens a chat in the right panel with the selected lines as context. Answers can be saved as AI-tagged drafts with **Add as draft**.
-**AI review** runs the review prompt in `skills/review.md` and adds its findings as AI-tagged drafts you can edit or remove. Nothing is posted to the host.
+**AI review** runs the review prompt template (`prompts/review.md`) and adds its findings as AI-tagged drafts you can edit or remove. Nothing is posted to the host. The agent is also told about the discussion already on the merge request and your local drafts (so it does not repeat them) and gets the merge request link to fetch the overview itself.
 Agents run headless in a read-only snapshot of the reviewed head, with a minimal environment: only PATH, HOME, LANG, TERM, TMPDIR and XDG_RUNTIME_DIR are passed, and any variable whose name looks like a credential (TOKEN, KEY, SECRET...) is dropped, including API keys such as `ANTHROPIC_API_KEY`. Agents that need such a variable must use their own stored login.
 
 ## Layout and controls (v2)
 - **Floating bar** at the bottom of the diff: previous/next batch, a comment on the whole merge request, Unified/Split, Diff/Preview for Markdown, and **Finish review**.
+- **Publish comments instantly** (Settings, off by default): on remote reviews each new comment is posted as soon as you add it and Finish review (and `f`) is hidden; turn it off to approve or to post a summary. Leftover drafts show a publish icon.
 - **Finish review** (`f`) posts your drafts plus an optional summary and a verdict (Comment, Approve, Request changes; GitLab has no Request changes). You can finish before viewing every file. For a local review it copies your drafts as Markdown and saves a file.
 - **Sidebars** collapse with their chevron buttons and resize by dragging the divider; the right panel's Commits and Drafts sections collapse too. Layout is remembered.
 - **Commit scope:** click a commit to review only that commit. A chip above the file list shows it; click it again or the close button to show everything.

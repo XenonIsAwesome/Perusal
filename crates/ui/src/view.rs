@@ -3,7 +3,7 @@ use crate::kit::{self, badge, ci_badge, diff_squares, field_key, icon, icon_btn,
 use crate::model::{self, Model};
 use gpui::{deferred, div, list, point, prelude::*, px, relative, uniform_list, AnyElement, ClickEvent, Context, FontWeight, HighlightStyle, KeyDownEvent, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText};
 use perusal_agents::run::{agent_env, run_streaming, AgentEvent, RunError};
-use perusal_agents::{chat_prompt, launch_with, on_path, parse_review, review_prompt, supports_effort, Options, Selection, REVIEW_SKILL};
+use perusal_agents::{CtxDraft, CtxThread, ReviewContext, launch_with, on_path, parse_review, supports_effort, Options, Selection};
 use perusal_app::events::{self, Snapshot};
 use perusal_app::markdown::{self, Located};
 use perusal_app::notify::Kind as NKind;
@@ -59,7 +59,7 @@ pub struct View {
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, list: ListState, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>, hx: f32, hb_drag: Option<f32>, hx_text: std::rc::Rc<std::cell::Cell<f32>>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
@@ -105,7 +105,7 @@ impl View {
         View { pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
-            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
+            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
@@ -153,6 +153,7 @@ impl View {
         let batch = self.m.vm.current_batch().to_vec();
         if batch.is_empty() { self.base.clear(); self.rows.clear(); self.md = None; self.shown = None; self.list.reset(0); return; }
         if self.shown.as_ref() == Some(&batch) { return; }
+        self.hx = 0.0; self.hx_text.set(0.0);
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink); self.nav_changed = false; }
         self.shown = Some(batch.clone()); self.md = None; self.sym_target = None; self.sym_path = None;
         let p = self.pal;
@@ -378,19 +379,22 @@ impl View {
         self.comment.f.set(&text); self.comment.f.multiline = true;
         self.composer = Some(Comp { editing, global, preview: false }); self.focus = Some(Fid::Comment);
     }
-    fn save_composer(&mut self) {
+    fn save_composer(&mut self, cx: &mut Context<Self>) {
         let text = self.comment.f.text.trim().to_string(); if text.is_empty() { return; }
         let Some(c) = self.composer.take() else { return };
+        let mut added: Option<i64> = None;
         if let Some(id) = c.editing { let _ = self.m.store.edit_draft(id, &text); self.note(NKind::Success, "Comment updated.", None); }
         else {
             let sel = if c.global { None } else { self.selection() };
             match (sel, self.current_file(), c.global) {
-                (Some(s), _, _) => { let _ = self.m.store.add_draft(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false); self.note(NKind::Success, format!("Draft added on {}:{}-{}", s.file, s.start, s.end), None); }
-                (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); let _ = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false); self.note(NKind::Success, format!("Draft added on {path}"), None); }
-                _ => { let _ = self.m.store.add_draft(self.m.vm.review, None, None, &text, false); self.note(NKind::Success, "Draft added on the merge request.", None); }
+                (Some(s), _, _) => { added = self.m.store.add_draft(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false).ok(); self.note(NKind::Success, format!("Draft added on {}:{}-{}", s.file, s.start, s.end), None); }
+                (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); added = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false).ok(); self.note(NKind::Success, format!("Draft added on {path}"), None); }
+                _ => { added = self.m.store.add_draft(self.m.vm.review, None, None, &text, false).ok(); self.note(NKind::Success, "Draft added on the merge request.", None); }
             }
         }
         self.comment.f.clear(); self.focus = None; self.clear_selection(); self.resync();
+        // Saved locally first so nothing is lost if the host is unreachable; then posted right away.
+        if let (Some(id), true) = (added, self.instant()) { self.publish_draft(id, cx); }
     }
     fn toggle_viewed(&mut self) { if let Some(fi) = self.current_file() { let v = !self.m.vm.files[fi].viewed; for i in self.m.vm.current_batch().to_vec() { self.m.vm.set_viewed(&self.m.store, i, v); } } }
     fn next(&mut self) { self.m.vm.next(&self.m.store); self.reload(); }
@@ -487,7 +491,13 @@ impl View {
         let (agent, custom) = (self.settings.agent.clone(), self.settings.agent_command.clone());
         let timeout = self.settings.agent_timeout().unwrap_or(std::time::Duration::MAX);
         let changed: Vec<String> = self.m.vm.files.iter().map(|f| f.path.clone()).collect();
-        let prompt_chat = chat_prompt(sel.as_ref(), &self.chat, &question);
+        let rctx = ReviewContext {
+            mr_url: self.m.web_url.clone(),
+            threads: self.threads.iter().map(|t| CtxThread { path: t.path.clone(), line: t.line, resolved: t.resolved, comments: t.comments.clone() }).collect(),
+            drafts: self.m.store.drafts(review).unwrap_or_default().into_iter().map(|d| CtxDraft { file: d.file, start: d.start_line, end: d.end_line, body: d.body, ai: d.ai }).collect(),
+        };
+        let prompts = model::prompts();
+        let prompt_chat = prompts.chat(sel.as_ref(), &self.chat, &question);
         if let Job::Chat = job { self.chat.push(("user".into(), question.clone())); let _ = self.m.store.add_message(review, "user", &question); }
         self.ai_job = Some(job); self.ai_started = Some(Instant::now());
         let events = self.ai_events.clone(); events.lock().unwrap().clear();
@@ -498,7 +508,7 @@ impl View {
             push(AgentEvent::Activity("Preparing a read-only copy of the code".into()));
             let dest = model::snapshot_dir(review, &rev);
             if !dest.join(".perusal-snapshot").exists() { perusal_gitops::export_tree(&repo, &rev, &dest).map_err(RunError::Failed)?; let _ = std::fs::write(dest.join(".perusal-snapshot"), "1"); }
-            let prompt = if is_review { push(AgentEvent::Activity("Collecting the patch".into())); let patch = perusal_gitops::patch(&repo, &base, &rev).map_err(RunError::Failed)?; review_prompt(REVIEW_SKILL, &changed, &patch) } else { prompt_chat };
+            let prompt = if is_review { push(AgentEvent::Activity("Collecting the patch".into())); let patch = perusal_gitops::patch(&repo, &base, &rev).map_err(RunError::Failed)?; prompts.review(&rctx, &changed, &patch) } else { prompt_chat };
             let l = launch_with(&agent, &custom, &prompt, &opts).ok_or_else(|| RunError::Failed("no agent configured".into()))?;
             push(AgentEvent::Activity(format!("Starting {}", l.program)));
             run_streaming(&l, &dest, &agent_env(), timeout, &cancel, push)
@@ -556,15 +566,41 @@ impl View {
     }
     fn build_submission(&self) -> Submission {
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
-        let mut summary = self.summary.f.text.trim().to_string(); let mut comments = vec![];
+        self.submission_of(drafts, self.summary.f.text.trim().to_string(), self.verdict.clone())
+    }
+    fn submission_of(&self, drafts: Vec<perusal_core::store::Draft>, mut summary: String, verdict: Verdict) -> Submission {
+        let mut comments = vec![];
         for d in drafts {
             match (&d.file, d.start_line, d.end_line) {
-                (Some(f), Some(a), Some(b)) => comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body }),
+                (Some(f), Some(a), Some(b)) => {
+                    let (old, new) = (perusal_gitops::show(&self.m.repo, &self.m.base_sha, f).unwrap_or_default(), perusal_gitops::show(&self.m.repo, &self.m.branch, f).unwrap_or_default());
+                    let (start_old, end_old) = (perusal_diff::text::old_line_for_new(&old, &new, a), perusal_diff::text::old_line_for_new(&old, &new, b));
+                    comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old })
+                }
                 (Some(f), _, _) => { summary.push_str(&format!("\n\n**{f}**: {}", d.body)); }
                 _ => { summary.push_str(&format!("\n\n{}", d.body)); }
             }
         }
-        Submission { head_sha: self.m.branch.clone(), summary: summary.trim().to_string(), verdict: self.verdict.clone(), comments }
+        Submission { head_sha: self.m.branch.clone(), summary: summary.trim().to_string(), verdict, comments }
+    }
+    /// True when comments go straight to the host and Finish review is not shown (remote reviews only).
+    fn instant(&self) -> bool { self.settings.publish_instantly && self.m.mr.is_some() }
+    /// Posts one local draft to the host now. The draft is only deleted once the host accepted it.
+    fn publish_draft(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(mr) = self.m.mr.clone() else { return };
+        let Some(d) = self.m.store.drafts(self.m.vm.review).unwrap_or_default().into_iter().find(|d| d.id == id) else { return };
+        let sub = self.submission_of(vec![d], String::new(), Verdict::Comment);
+        let task = cx.background_executor().spawn(async move { model::submit_review(&mr, &sub) });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |t, cx| {
+                match r {
+                    Ok(()) => { let _ = t.m.store.delete_draft(id); t.note(NKind::Success, "Comment published.", None); t.resync(); }
+                    Err(e) => t.note(NKind::Error, format!("Could not publish the comment (kept as a draft): {e}"), None),
+                }
+                t.flush(cx); cx.notify();
+            });
+        }).detach();
     }
     fn start_submit(&mut self, cx: &mut Context<Self>) {
         let Some(mr) = self.m.mr.clone() else { return };
@@ -613,7 +649,7 @@ impl View {
                         _ => { let i = if is_sort { &mut self.sort } else { &mut self.filter }; if field_key(&mut i.f, ks, cx) { self.update_suggestions(); } }
                     }
                 }
-                Fid::Comment => { if key == "escape" { self.composer = None; self.focus = None; } else if key == "enter" && ctrl { self.save_composer(); } else { field_key(&mut self.comment.f, ks, cx); } }
+                Fid::Comment => { if key == "escape" { self.composer = None; self.focus = None; } else if key == "enter" && ctrl { self.save_composer(cx); } else { field_key(&mut self.comment.f, ks, cx); } }
                 Fid::Ask => { if key == "escape" { self.focus = None; } else if key == "enter" { let q = self.ask.f.text.trim().to_string(); if !q.is_empty() { self.ask.f.clear(); self.start_ai(Job::Chat, q, cx); } } else { field_key(&mut self.ask.f, ks, cx); } }
                 Fid::Summary => { if key == "escape" { self.finish_open = false; self.focus = None; } else if key == "enter" && ctrl { self.start_submit(cx); } else { field_key(&mut self.summary.f, ks, cx); } }
                 Fid::Preset => { if key == "escape" { self.presets_open = false; self.focus = None; } else if key == "enter" { self.save_preset(true); } else { field_key(&mut self.preset_name.f, ks, cx); } }
@@ -632,7 +668,7 @@ impl View {
             "c" => { self.open_composer(self.page == Page::Overview && self.info.is_some(), None); }
             "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
             "s" => { cx.emit(ViewEvent::OpenSettings); }
-            "f" => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
+            "f" if !self.instant() => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
             "m" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
             "u" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
             "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
@@ -694,6 +730,7 @@ impl Render for View {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen] { i.dragging = false; }
                 if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
+                this.hb_drag = None;
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
                 cx.notify();
             }))
@@ -701,6 +738,10 @@ impl Render for View {
                 if ev.pressed_button != Some(MouseButton::Left) { return; }
                 let zoom = this.zoom; let vw: f32 = w.viewport_size().width.into(); let x: f32 = ev.position.x.into(); let y: f32 = ev.position.y.into();
                 match this.resizing { Some(Side::Left) => { this.left_w = (x / zoom).clamp(200.0, 700.0); cx.notify(); } Some(Side::Right) => { this.right_w = ((vw - x) / zoom).clamp(220.0, 700.0); cx.notify(); } None => {} }
+                if let (Some(grab), Some((ox, tw, max))) = (this.hb_drag, this.hbar_geom()) {
+                    let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0);
+                    this.hx = ((x - ox - grab) / travel).clamp(0.0, 1.0) * max; cx.notify();
+                }
                 if let Some(grab) = this.sb_drag {
                     let vp = this.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let oy: f32 = vp.origin.y.into(); let max: f32 = this.list.max_offset_for_scrollbar().y.into();
                     let thumb = (vh * vh / (vh + max)).max(28.0); let travel = (vh - thumb).max(1.0);
@@ -743,7 +784,8 @@ impl View {
         let title: AnyElement = if renaming {
             self.winp(Fid::Rename, div().id("rename-box").flex().items_center().px_3().py(px(4.0)).w(px(360.0)).rounded_md().border_1().border_color(p.accent).bg(p.bg).child(input_text(&self.rename, true, "Name this review", &p, false, 1)), cx).into_any_element()
         } else {
-            div().flex().items_center().gap_1().min_w_0().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().child(SharedString::from(self.m.title.clone())))
+            div().flex().items_center().gap_1().min_w_0().child(div().id("title-text").text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().px_2().py(px(2.0)).rounded_md().border_1().border_color(gpui::transparent_black()).cursor_text().hover(move |x| x.bg(p.hover).border_color(p.accent)).child(SharedString::from(self.m.title.clone()))
+                .on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); })))
                 .child(icon_btn("rename", ic::EDIT, "Rename this review", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); }))).into_any_element()
         };
         let ci = ci_badge(&self.ci, &p).map(|b| b.on_click(cx.listener(|this, _, _, _| { if let Some(u) = this.ci_url() { let _ = model::open_url(&u); } })));
@@ -942,10 +984,15 @@ impl View {
     /// One row of the diff list (a code line, a hunk marker, a note or a comment card).
     fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(r) = self.rows.get(ix).cloned() else { return div().into_any_element() };
-        let p = self.pal; let h = px(20.0 * self.zoom); let fsz = px(13.0 * self.zoom); let mono = self.fonts.mono.clone();
+        let p = self.pal; let h = px(20.0 * self.zoom); let fsz_f = 13.0 * self.zoom; let fsz = px(fsz_f); let mono = self.fonts.mono.clone();
         let fi = r.fi; let st = self.m.vm.files[fi].status;
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
         let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).text_size(fsz).text_color(p.fg);
+        let hx = self.hx; let hxt = self.hx_text.clone();
+        let code = |rl: &RLine| -> gpui::Div {
+            let w = rl.line.text.chars().count() as f32 * fsz_f * 0.6; if w > hxt.get() { hxt.set(w); }
+            div().flex_1().min_w_0().h_full().overflow_hidden().child(div().flex_none().relative().left(px(-hx)).whitespace_nowrap().child(StyledText::new(SharedString::from(rl.line.text.clone())).with_highlights(rl.runs.clone())))
+        };
         let cell = |side: Option<&RLine>, left: bool| -> gpui::Div {
             let Some(rl) = side else { return div().flex_1().h_full().bg(if selected { p.accent.opacity(0.22) } else { p.hover.opacity(0.4) }) };
             let l = &rl.line;
@@ -954,7 +1001,7 @@ impl View {
             div().flex().items_center().h_full().flex_1().min_w_0().overflow_hidden().bg(if selected { p.accent.opacity(0.28) } else { bg })
                 .child(div().w(px(46.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(no.map(|n| n.to_string()).unwrap_or_default()))
                 .child(div().w(px(20.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().child(StyledText::new(SharedString::from(l.text.clone())).with_highlights(rl.runs.clone())))
+                .child(code(rl))
         };
         let inner = match &r.kind {
             RowKind::FileHeader => {
@@ -981,7 +1028,7 @@ impl View {
                     .when(show_old, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
                     .when(show_new, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))
                     .child(div().w(px(22.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(match l.kind { Kind::Added => "+", Kind::Removed => "−", _ => " " }))
-                    .child(div().flex_1().min_w_0().whitespace_nowrap().child(StyledText::new(SharedString::from(l.text.clone())).with_highlights(rl.runs.clone())))
+                    .child(code(rl))
             }
             RowKind::Split(a, b) => base.child(cell(a.as_ref(), true)).child(div().w(px(1.0)).h_full().bg(p.border)).child(cell(b.as_ref(), false)),
         };
@@ -1008,6 +1055,7 @@ impl View {
 
     /// A comment on the diff, GitLab style: collapsible, rich or raw, with edit and delete for your own drafts.
     fn comment_card(&mut self, fi: usize, c: &CItem, cx: &mut Context<Self>) -> impl IntoElement {
+        let instant = self.instant();
         let (cfi, hv) = (fi, c.range);
         let p = self.pal; let mono = self.fonts.mono.clone();
         let collapsed = self.collapsed_c.contains(&c.key); let raw = self.raw_c.contains(&c.key);
@@ -1029,10 +1077,32 @@ impl View {
                     .child(div().flex_1().min_w_0().truncate().text_xs().text_color(p.muted).when(collapsed, |d| d.child(first_line)))
                     .child(icon_btn(SharedString::from(format!("raw-{}", c.key)), if raw { ic::PREVIEW } else { ic::CODE }, if raw { "Show the rendered comment" } else { "Show the raw Markdown" }, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { if !this.raw_c.remove(&k2) { this.raw_c.insert(k2.clone()); } this.rebuild_rows(); cx.notify(); })))
                     .children(draft.map(|d| icon_btn(SharedString::from(format!("ed-{d}")), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(d)); cx.stop_propagation(); cx.notify(); }))))
+                    .children(draft.filter(|_| instant).map(|d| icon_btn(SharedString::from(format!("pub-{d}")), ic::SEND, "Publish this draft now", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.publish_draft(d, cx); cx.stop_propagation(); cx.notify(); }))))
                     .children(draft.map(|d| icon_btn(SharedString::from(format!("rm-{d}")), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(d); this.resync(); cx.stop_propagation(); cx.notify(); })))))
                 .when(!collapsed, |d| d.child(div().flex().flex_col().gap_2().px_3().py_2().child(body(&c.body))
                     .children(c.replies.iter().map(|(a, t)| div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(p.border).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(a.clone())).child(body(t))).collect::<Vec<_>>())))
         ).id(id)
+    }
+
+    /// Horizontal scrollbar geometry: (track left x, track width, max offset); None when nothing overflows.
+    fn hbar_geom(&self) -> Option<(f32, f32, f32)> {
+        let b = self.b_body.get(); let (ox, w): (f32, f32) = (b.origin.x.into(), b.size.width.into());
+        let cols = if self.diff_mode == DiffMode::Split { 2.0 } else { 1.0 };
+        let max = (self.hx_text.get() - (w - 130.0) / cols).max(0.0);
+        (max > 1.0 && w > 60.0 && self.md.is_none()).then_some((ox, w - 12.0, max))
+    }
+
+    fn hscrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.pal; let (ox, tw, max) = self.hbar_geom()?;
+        let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0); let left = (self.hx / max).clamp(0.0, 1.0) * travel;
+        let dragging = self.hb_drag.is_some();
+        Some(div().id("hb-track").absolute().bottom(px(70.0)).left_0().w(px(tw)).h(px(12.0)).cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                let x: f32 = ev.position.x.into(); let rel = x - ox;
+                let grab = if rel >= left && rel <= left + thumb { rel - left } else { thumb / 2.0 };
+                this.hb_drag = Some(grab); this.hx = ((rel - grab) / travel).clamp(0.0, 1.0) * max; cx.stop_propagation(); cx.notify();
+            }))
+            .child(div().absolute().left(px(left)).bottom(px(2.0)).h(px(8.0)).w(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
     }
 
     fn scrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1071,6 +1141,7 @@ impl View {
 
     /// The overview page: what the MR is about and the conversation that is not tied to a line.
     fn overview_page(&mut self, drafts: &[perusal_core::store::Draft], cx: &mut Context<Self>) -> AnyElement {
+        let instant = self.instant();
         let p = self.pal; let mono = self.fonts.mono.clone();
         let Some(info) = self.info.clone() else { return div().into_any_element() };
         let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
@@ -1085,6 +1156,7 @@ impl View {
             let id = d.id;
             list.push(card("You".into(), &d.body, Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
                 .child(div().flex().justify_end().child(icon_btn(("ovde", id as usize), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
+                    .children(instant.then(|| icon_btn(("ovdp", id as usize), ic::SEND, "Publish this draft now", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.publish_draft(id, cx); cx.notify(); }))))
                     .child(icon_btn(("ovdd", id as usize), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))).into_any_element());
         }
         let state = model::norm_state(&info.state); let dot = match state.as_str() { "merged" => p.ai, "closed" => p.danger, _ => p.success };
@@ -1105,7 +1177,7 @@ impl View {
             div().flex().items_center().gap_2().px_3().py_2().rounded_lg().bg(p.surface).border_1().border_color(p.border).shadow_lg()
                 .child(icon_text_btn("ov-code", ic::DIFFERENCE, "Review the changes", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.page = Page::Code; cx.notify(); })))
                 .child(icon_btn("ov-gcomment", ic::ADD_COMMENT, "Comment on the whole merge request (c)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))
-                .child(icon_text_btn("ov-finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); }))));
+                .children((!self.instant()).then(|| icon_text_btn("ov-finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
         div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(page).child(bar).children(composer).into_any_element()
     }
@@ -1156,9 +1228,18 @@ impl View {
         } else if self.rows.is_empty() {
             div().flex_1().flex().items_center().justify_center().text_color(p.muted).child("Nothing to show for this selection.").into_any_element()
         } else {
-            list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| this.render_row(ix, cx))).flex_1().min_h_0().w_full().pb(px(70.0)).into_any_element()
+            div().id("diff-wrap").flex_1().min_h_0().w_full().pb(px(70.0))
+                .on_scroll_wheel(cx.listener(|this, ev: &gpui::ScrollWheelEvent, _, cx| {
+                    let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
+                    if dx != 0.0 {
+                        let max = this.hbar_geom().map(|g| g.2).unwrap_or(0.0);
+                        let n = (this.hx - dx).clamp(0.0, max); if n != this.hx { this.hx = n; cx.notify(); }
+                    }
+                }))
+                .child(list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| this.render_row(ix, cx))).size_full()).into_any_element()
         };
         let scrollbar = if self.md.is_none() { self.scrollbar(cx) } else { None };
+        let hscrollbar = self.hscrollbar(cx);
 
         // toolbar that floats above the selected lines
         let sel = self.selection();
@@ -1189,10 +1270,10 @@ impl View {
                 .when(is_md, |d| d.child(sep()).child(seg_box(&p).child(seg_icon("md-diff", ic::CODE, "Show the markdown source diff (m)", !md_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.md_rendered { this.md_rendered = false; this.shown = None; this.clear_selection(); } cx.notify(); })))
                     .child(seg_icon("md-prev", ic::VISIBILITY, "Show the rendered markdown (m)", md_on, &p).on_click(cx.listener(|this, _, _, cx| { if !this.md_rendered { this.md_rendered = true; this.shown = None; this.clear_selection(); } cx.notify(); })))))
                 .child(sep())
-                .child(icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); }))));
+                .children((!self.instant()).then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
 
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
-        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(toolbar).child(bar);
+        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(hscrollbar).children(toolbar).child(bar);
         div().relative().flex().flex_col().flex_1().min_w_0().min_h_0().children(header).child(wrap).children(composer)
     }
 
@@ -1230,7 +1311,7 @@ impl View {
             .child(div().mx_3().rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).child(editor))
             .child(div().flex().items_center().gap_2().px_3().py_2().child(div().flex_1().text_xs().text_color(p.muted).child("Ctrl+Enter saves. Markdown and ```suggestion blocks are supported."))
                 .child(icon_text_btn("cmp-cancel", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.composer = None; this.focus = None; cx.stop_propagation(); cx.notify(); })))
-                .child(icon_text_btn("cmp-save", ic::CHECK, if editing.is_some() { "Save changes" } else { "Add draft" }, Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer(); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
+                .child(icon_text_btn("cmp-save", ic::CHECK, if editing.is_some() { "Save changes" } else { "Add draft" }, Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer(cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
     }
 
     fn right_panel(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft]) -> impl IntoElement {
