@@ -49,7 +49,9 @@ pub enum Ci { None, Pending, Running, Passed, Failed, Canceled }
 pub enum Verdict { Approve, RequestChanges, Comment }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: u32, pub body: String }
+pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: u32, pub body: String,
+    /// Old-side line numbers paired with `start_line`/`end_line` (GitLab line codes need them); 0 when unknown.
+    pub start_old: u32, pub end_old: u32 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: Verdict, pub comments: Vec<InlineComment> }
