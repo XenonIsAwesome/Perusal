@@ -5,13 +5,15 @@ use crate::model;
 use gpui::{deferred, div, prelude::*, px, relative, Context, EventEmitter, FontWeight, MouseButton, SharedString};
 use perusal_agents::{effort_suggestions, model_suggestions, on_path, supports_effort};
 use perusal_app::hosts;
-use perusal_app::settings::{DiffMode, HostCfg, MdMode, Settings, AGENTS};
+use perusal_app::settings::{DiffMode, FirstView, HostCfg, MdMode, Settings, AGENTS};
 use perusal_app::theme;
 use perusal_diff::GroupRule;
 use perusal_providers::auth::{DeviceCode, TokenStore};
 
 /// True when dropdown `id` is the open one.
 fn open_or(dd: Option<u8>, id: u8) -> bool { dd == Some(id) }
+
+fn timeout_label(m: u32) -> String { match m { 0 => "No limit".into(), m if m % 60 == 0 => format!("{} h", m / 60), m => format!("{m} min") } }
 
 pub enum SettingsEvent { Changed, Close }
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -311,6 +313,9 @@ impl SettingsView {
         let eff_dd = self.pick(4, &eff_label, eff_opts, cx, |this, v, cx| {
             if v == "\u{0}custom" { this.effort_custom = true; this.focus = Some(F::Effort); } else { this.effort_custom = false; this.effort_in.f.set(&v); this.settings.effort = v; this.changed(cx); } cx.notify(); });
         let effort_ok = supports_effort(&s.agent);
+        let mut to_opts: Vec<(String, String)> = [5u32, 10, 15, 30, 60, 120, 240].iter().map(|m| (timeout_label(*m), m.to_string())).collect(); to_opts.push(("No limit".into(), "0".into()));
+        if !to_opts.iter().any(|(_, v)| *v == s.agent_timeout_mins.to_string()) { to_opts.push((timeout_label(s.agent_timeout_mins), s.agent_timeout_mins.to_string())); }
+        let to_dd = self.pick(6, &timeout_label(s.agent_timeout_mins), to_opts, cx, |this, v, cx| { this.settings.agent_timeout_mins = v.parse().unwrap_or(15); this.changed(cx); });
         let found = if s.agent_path.trim().is_empty() { perusal_agents::find_program(match s.agent.as_str() { "claude" => "claude", "gemini" => "gemini", "codex" => "codex", _ => "opencode" }) } else { perusal_agents::find_program(s.agent_path.trim()) };
         let model_ctl = div().flex().flex_col().items_end().gap_2().child(model_dd).when(self.model_custom, |d| d.child(div().w(px(260.0)).child(self.field_box("f-model", F::Model, "Model name, e.g. claude-sonnet-4-5", cx, false)))).into_any_element();
         let eff_ctl = div().flex().flex_col().items_end().gap_2().when(!effort_ok, |d| d.opacity(0.4)).child(eff_dd).when(self.effort_custom && effort_ok, |d| d.child(div().w(px(260.0)).child(self.field_box("f-effort", F::Effort, if s.agent == "claude" { "Thinking tokens, e.g. 20000" } else { "Variant name" }, cx, false)))).into_any_element();
@@ -318,6 +323,7 @@ impl SettingsView {
             .child(row("Agent", "Runs the CLI you already have installed (a check mark means it was found on your PATH); no keys are stored here", div().flex().flex_wrap().gap_2().max_w(px(380.0)).justify_end().children(agent_chips).into_any_element()))
             .child(row("Model", "Pick one, or choose Custom to type any model name the agent accepts", model_ctl))
             .child(row("Effort / variant", if effort_ok { "How hard the model thinks (Claude: thinking budget, Codex: reasoning effort, opencode: variant)" } else { "Not supported by this agent" }, eff_ctl))
+            .child(row("Response timeout", "How long an AI run may take before it is stopped. Choose No limit for very slow models or huge reviews (Stop still works)", to_dd))
             .child(row("Agent executable", "Full path to the program, for when it is not on the PATH or you want a specific install. Leave empty to find it automatically", div().flex().flex_col().flex_none().w(px(300.0)).gap_1().child(div().w_full().child(self.field_box("f-apath", F::AgentPath, "e.g. /home/me/.opencode/bin/opencode", cx, false)))
                 .child(div().text_xs().w_full().truncate().text_color(if found.is_some() { p.success } else { p.danger }).child(match &found { Some(f) => format!("Using {}", f.display()), None => "Not found. Enter its full path above".to_string() })).into_any_element()))
             .child(row("Custom command", "Optional. Program and arguments; the prompt is added as the last argument", div().w(px(300.0)).child(self.field_box("f-cmd", F::Cmd, "e.g. my-agent --read-only", cx, false)).into_any_element()))
@@ -513,6 +519,9 @@ impl gpui::Render for SettingsView {
                     .child(div().pt_2().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("NOTIFY ME WHEN"))
                     .child(div().flex().flex_col().children(events)),
                 3 => div().flex().flex_col()
+                    .child(section("Opening a review"))
+                    .child(row("First screen", "What a pull or merge request opens on. Switch any time with the tabs above the diff or the O key. Local branch reviews have no overview and open on the code", seg_box(&p).child(seg_icon("fv-ov", ic::DESCRIPTION, "Overview: description and conversation", s.first_view == FirstView::Overview, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.first_view = FirstView::Overview; this.changed(cx); })))
+                        .child(seg_icon("fv-code", ic::DIFFERENCE, "Code: files and diff", s.first_view == FirstView::Code, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.first_view = FirstView::Code; this.changed(cx); }))).into_any_element()))
                     .child(section("Files"))
                     .child(row("Group related files", "Batch files that belong together using the rules below", sw("sw-grp", s.group_related, cx, |st| st.group_related = !st.group_related)))
                     .child(div().pt_2().child(rules_card))

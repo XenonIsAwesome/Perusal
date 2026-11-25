@@ -30,6 +30,14 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
         {"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5},{"id":2,"in_reply_to_id":1,"user":{"login":"b"},"body":"a","path":"x.rs","line":5}]))).mount(&s).await;
     let t = gh(&s).threads(&ghref()).await.unwrap(); assert_eq!(t.len(), 1); assert_eq!(t[0].comments.len(), 2);
+    // general conversation on the PR is added as path-less threads
+    Mock::given(method("GET")).and(path("/repos/o/r/issues/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":9,"user":{"login":"c"},"body":"overall"}]))).mount(&s).await;
+    let t = gh(&s).threads(&ghref()).await.unwrap(); assert_eq!(t.len(), 2); assert!(t[1].path.is_none() && t[1].comments[0] == ("c".to_string(), "overall".to_string()));
+}
+#[tokio::test] async fn mr_description_is_read() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"title":"T","state":"open","user":{"login":"u"},"head":{"sha":"a","ref":"feat"},"base":{"ref":"main"},"html_url":"x","body":"Why this exists"}))).mount(&s).await;
+    let i = gh(&s).mr_info(&ghref()).await.unwrap(); assert_eq!((i.description.as_str(), i.source_ref.as_str()), ("Why this exists", "feat"));
 }
 #[tokio::test] async fn errors_map() {
     let s = MockServer::start().await;
@@ -67,10 +75,12 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"head_pipeline":{"status":"success"}}))).mount(&s).await;
     Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4/discussions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
         {"id":"d1","individual_note":false,"notes":[{"author":{"username":"a"},"body":"x","resolved":true,"position":{"new_path":"f.rs","new_line":7}}]},
-        {"id":"d2","individual_note":true,"notes":[{"author":{"username":"a"},"body":"hi"}]}]))).mount(&s).await;
+        {"id":"d2","individual_note":true,"notes":[{"author":{"username":"a"},"body":"hi"}]},
+        {"id":"d3","individual_note":true,"notes":[{"author":{"username":"gitlab"},"body":"added 1 commit","system":true}]}]))).mount(&s).await;
     let g = gl(&s);
     assert_eq!(g.ci(&glref(), "").await.unwrap(), Ci::Passed);
-    let t = g.threads(&glref()).await.unwrap(); assert_eq!(t.len(), 1); assert!(t[0].resolved); assert_eq!(t[0].line, Some(7));
+    let t = g.threads(&glref()).await.unwrap(); assert_eq!(t.len(), 2, "inline thread plus the general note; system notes are skipped"); assert!(t[0].resolved); assert_eq!(t[0].line, Some(7));
+    assert!(t[1].path.is_none() && t[1].comments[0].1 == "hi");
     assert!(matches!(g.set_viewed(&glref(), "f", true).await, Err(Error::Unsupported(_))));
     assert!(matches!(g.submit(&glref(), &sub(Verdict::RequestChanges)).await, Err(Error::Unsupported(_))));
 }

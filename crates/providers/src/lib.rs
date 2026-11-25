@@ -29,7 +29,7 @@ pub fn parse_mr_url(url: &str) -> std::result::Result<MrRef, String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MrInfo { pub title: String, pub state: String, pub author: String, pub head_sha: String, pub base_ref: String, pub web_url: String }
+pub struct MrInfo { pub title: String, pub state: String, pub author: String, pub head_sha: String, pub base_ref: String, pub web_url: String, pub description: String, pub source_ref: String }
 
 /// Why a merge request is in your list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
