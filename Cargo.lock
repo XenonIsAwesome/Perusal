@@ -4267,6 +4267,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1_smol",
  "tokio",
  "wiremock",
 ]

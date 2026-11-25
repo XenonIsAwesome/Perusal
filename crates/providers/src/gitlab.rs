@@ -10,6 +10,18 @@ impl GitLab {
     fn mr(r: &MrRef) -> String { format!("/projects/{}/merge_requests/{}", utf8_percent_encode(&r.project, NON_ALPHANUMERIC), r.number) }
 }
 
+/// Draft-note body for one inline comment. A multi-line selection needs `line_range` (start and end line codes);
+/// `new_line` alone anchors the note to its last line only.
+pub fn gitlab_position(c: &InlineComment, base_sha: &Option<String>, head: &str, start_sha: &Option<String>) -> Value {
+    let mut pos = json!({"position_type": "text", "old_path": c.path, "new_path": c.path, "new_line": c.end_line, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha});
+    if c.start_line < c.end_line {
+        let hash = sha1_smol::Sha1::from(c.path.as_bytes()).digest().to_string();
+        let end = |l: u32, o: u32| json!({"line_code": format!("{hash}_{o}_{l}"), "type": "new", "new_line": l});
+        pos["line_range"] = json!({"start": end(c.start_line, c.start_old), "end": end(c.end_line, c.end_old)});
+    }
+    json!({"note": c.body, "position": pos})
+}
+
 #[async_trait::async_trait]
 impl Provider for GitLab {
     async fn mr_info(&self, r: &MrRef) -> Result<MrInfo> {
@@ -39,7 +51,7 @@ impl Provider for GitLab {
         let refs = |k: &str| mr.pointer(&format!("/diff_refs/{k}")).and_then(|x| x.as_str()).map(String::from);
         let head = refs("head_sha").unwrap_or_else(|| s.head_sha.clone());
         let (base_sha, start_sha) = (refs("base_sha"), refs("start_sha"));
-        let mut bodies: Vec<Value> = s.comments.iter().map(|c| json!({"note": c.body, "position": {"position_type": "text", "old_path": c.path, "new_path": c.path, "new_line": c.end_line, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha}})).collect();
+        let mut bodies: Vec<Value> = s.comments.iter().map(|c| gitlab_position(c, &base_sha, &head, &start_sha)).collect();
         if !s.summary.is_empty() { bodies.push(json!({"note": s.summary})); }
         let res: Result<()> = async {
             for b in &bodies {

@@ -36,6 +36,14 @@ pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
 pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
+/// Editable prompt templates (`~/.config/perusal/prompts`); the defaults and an AGENTS.md are written there on first use.
+pub fn prompts_dir() -> PathBuf { config_dir().join("prompts") }
+/// Prompt templates with the user's overrides. Creates the folder and missing default files once per run.
+pub fn prompts() -> perusal_agents::Prompts {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| perusal_agents::ensure_prompt_files(&prompts_dir()));
+    perusal_agents::Prompts::new(prompts_dir())
+}
 pub fn load_settings() -> perusal_app::settings::Settings { std::fs::read_to_string(config_dir().join("settings.toml")).map(|s| perusal_app::settings::Settings::from_toml(&s)).unwrap_or_default() }
 pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::create_dir_all(config_dir()); let _ = std::fs::write(config_dir().join("settings.toml"), s.to_toml()); }
 /// Where the read-only code snapshot for agents lives, per review and head.
@@ -273,10 +281,10 @@ mod tests {
 /// Asks the configured agent to write a filter, sort or grouping rule (blocking; run it on a background thread).
 /// The answer is validated with the real parsers before it is returned: `[expr]` or `[label, pattern]`.
 pub fn run_gen(s: &perusal_app::settings::Settings, kind: perusal_agents::GenKind, request: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<String>, String> {
-    use perusal_agents::{gen_prompt, launch_with, on_path, parse_generated, GenKind, Options};
+    use perusal_agents::{launch_with, on_path, parse_generated, GenKind, Options};
     if request.trim().is_empty() { return Err("Describe what you want first.".into()); }
     let reference = if kind == GenKind::GroupRule { String::new() } else { perusal_filter::reference() };
-    let prompt = gen_prompt(kind, request.trim(), &reference);
+    let prompt = prompts().generate(kind, request.trim(), &reference);
     let l = launch_with(&s.agent, &s.agent_command, &prompt, &Options { model: s.model.clone(), effort: s.effort.clone(), path: s.agent_path.clone() }).ok_or("No agent configured. Choose one in Settings.")?;
     if !on_path(&l.program) { return Err(format!("`{}` was not found on your PATH. Install it or pick another agent in Settings.", l.program)); }
     let dir = std::env::temp_dir().join("perusal-gen"); let _ = std::fs::create_dir_all(&dir);
