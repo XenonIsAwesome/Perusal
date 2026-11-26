@@ -346,7 +346,7 @@ impl Root {
                 .child(icon(ic::CHEVRON_RIGHT, 18.0, p.muted))
         }).collect();
         let n = rows.len();
-        let sbox = self.search_box("mine-search", Hf::MSearch, "Search title, overview text, project, people… or author:  assignee:  reviewer:  label:  is:draft  host:  kind:github", cx);
+        let sbox = self.search_box("mine-search", Hf::MSearch, "Search text, or author: assignee: reviewer: label: is:draft", cx);
         let chips = |this: &Self| div().flex().flex_col().gap_2().px_4().py_2().border_b_1().border_color(p.border)
             .child(div().flex().flex_wrap().items_center().gap_2()
                 .child(div().text_xs().text_color(p.muted).child("Show"))

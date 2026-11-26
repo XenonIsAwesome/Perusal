@@ -143,7 +143,7 @@ pub fn avatar_with(name: &str, url: Option<&str>, size: f32) -> gpui::AnyElement
     let place = std::rc::Rc::new(move || div().size(px(size)).flex_none().rounded_full().bg(bg).text_color(fg).flex().items_center().justify_center().font_weight(FontWeight::SEMIBOLD).text_size(px(size * 0.42)).line_height(px(size)).child(letters.clone()));
     if let Some(u) = url {
         if let Some(path) = crate::avatars::cached(u) {
-            return div().size(px(size)).flex_none().rounded_full().overflow_hidden().child(gpui::img(path).size(px(size)).object_fit(gpui::ObjectFit::Cover).with_loading({ let p = place.clone(); move || p().into_any_element() }).with_fallback(move || place().into_any_element())).into_any_element();
+            return div().size(px(size)).flex_none().rounded_full().overflow_hidden().child(gpui::img(path).size(px(size)).rounded_full().object_fit(gpui::ObjectFit::Cover).with_loading({ let p = place.clone(); move || p().into_any_element() }).with_fallback(move || place().into_any_element())).into_any_element();
         }
         crate::avatars::request(u);
     }
