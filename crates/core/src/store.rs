@@ -21,7 +21,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS viewed(review INTEGER, path TEXT, PRIMARY KEY(review, path));
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, review INTEGER, file TEXT, start_line INTEGER, end_line INTEGER, body TEXT, ai INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, review INTEGER, role TEXT, text TEXT);
-            CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);")?;
+            CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);
+            CREATE TABLE IF NOT EXISTS review_ui(review INTEGER PRIMARY KEY, filter TEXT, sort TEXT);")?;
         // additive migrations for databases created by earlier versions
         for alter in ["ALTER TABLE reviews ADD COLUMN mr_state TEXT DEFAULT ''", "ALTER TABLE reviews ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE chat ADD COLUMN conv INTEGER DEFAULT 0"] { let _ = conn.execute(alter, []); }
         Ok(Store { conn })
@@ -38,7 +39,28 @@ impl Store {
         self.conn.query_row("SELECT id FROM reviews WHERE key=?1", params![key], |r| r.get(0))
     }
     pub fn pinned_head(&self, review: i64) -> Result<String> { self.conn.query_row("SELECT head FROM reviews WHERE id=?1", params![review], |r| r.get(0)) }
+    /// Remembers the file filter expression and sort of a review (restored when it is opened again).
+    pub fn set_ui(&self, review: i64, filter: &str, sort: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO review_ui(review,filter,sort) VALUES(?1,?2,?3) ON CONFLICT(review) DO UPDATE SET filter=?2, sort=?3", params![review, filter, sort])?; Ok(())
+    }
+    /// The remembered (filter, sort); `None` when the user never changed them in this review.
+    pub fn ui(&self, review: i64) -> Result<Option<(String, String)>> {
+        match self.conn.query_row("SELECT filter, sort FROM review_ui WHERE review=?1", params![review], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            Ok(v) => Ok(Some(v)), Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), Err(e) => Err(e),
+        }
+    }
+    /// True when leaving would lose work: not submitted yet and there are drafts or a partly finished viewed list.
+    pub fn unfinished(&self, review: i64) -> Result<bool> {
+        let state: String = self.conn.query_row("SELECT state FROM reviews WHERE id=?1", params![review], |r| r.get(0))?;
+        if state == "submitted" { return Ok(false); }
+        let drafts: u32 = self.conn.query_row("SELECT COUNT(*) FROM drafts WHERE review=?1", params![review], |r| r.get(0))?;
+        let (v, t) = self.progress(review)?;
+        Ok(drafts > 0 || (v > 0 && v < t))
+    }
+    /// New work after a submit makes the review unfinished again.
+    fn reopen(&self, review: i64) { let _ = self.conn.execute("UPDATE reviews SET state='open' WHERE id=?1 AND state='submitted'", params![review]); }
     pub fn set_viewed(&self, review: i64, path: &str, viewed: bool) -> Result<()> {
+        if viewed { self.reopen(review); } // un-viewing is not new work
         if viewed { self.conn.execute("INSERT OR IGNORE INTO viewed VALUES(?1,?2)", params![review, path])?; }
         else { self.conn.execute("DELETE FROM viewed WHERE review=?1 AND path=?2", params![review, path])?; }
         self.log(review, &format!("viewed {path} {viewed}"))
@@ -56,6 +78,7 @@ impl Store {
     pub fn add_draft(&self, review: i64, file: Option<&str>, lines: Option<(u32, u32)>, body: &str, ai: bool) -> Result<i64> {
         self.conn.execute("INSERT INTO drafts(review,file,start_line,end_line,body,ai) VALUES(?1,?2,?3,?4,?5,?6)",
             params![review, file, lines.map(|l| l.0), lines.map(|l| l.1), body, ai])?;
+        self.reopen(review);
         let id = self.conn.last_insert_rowid(); self.log(review, &format!("draft+ {id}"))?; Ok(id)
     }
     pub fn edit_draft(&self, id: i64, body: &str) -> Result<()> { self.conn.execute("UPDATE drafts SET body=?2 WHERE id=?1", params![id, body])?; Ok(()) }
@@ -116,7 +139,7 @@ impl Store {
         Ok(ids.len())
     }
     pub fn discard(&self, review: i64) -> Result<()> {
-        for t in ["viewed", "drafts", "journal", "chat"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
+        for t in ["viewed", "drafts", "journal", "chat", "review_ui"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
     }
     /// Rows for the recent-reviews page, pinned first then most recently opened.
@@ -136,6 +159,20 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn remembers_filter_sort_and_knows_when_unfinished() {
+        let s = Store::memory().unwrap();
+        let r = s.open_review("k", "T", "h", 3).unwrap();
+        assert_eq!(s.ui(r).unwrap(), None); s.set_ui(r, "additions > 5", "-additions").unwrap(); s.set_ui(r, "", "name").unwrap();
+        assert_eq!(s.ui(r).unwrap(), Some((String::new(), "name".into())));
+        assert!(!s.unfinished(r).unwrap()); // untouched
+        s.set_viewed(r, "a", true).unwrap(); assert!(s.unfinished(r).unwrap()); // partly viewed
+        s.set_viewed(r, "b", true).unwrap(); s.set_viewed(r, "c", true).unwrap(); assert!(!s.unfinished(r).unwrap()); // all viewed, no drafts
+        s.add_draft(r, None, None, "x", false).unwrap(); assert!(s.unfinished(r).unwrap());
+        s.set_state(r, "submitted").unwrap(); assert!(!s.unfinished(r).unwrap());
+        s.add_draft(r, None, None, "more", false).unwrap(); assert!(s.unfinished(r).unwrap()); // new work reopens it
+        s.set_state(r, "submitted").unwrap(); s.set_viewed(r, "a", false).unwrap(); assert!(!s.unfinished(r).unwrap()); // un-viewing keeps a submitted review closed
+        s.discard(r).unwrap(); assert!(s.ui(r).unwrap().is_none());
+    }
     #[test] fn review_lifecycle() {
         let s = Store::memory().unwrap();
         let r = s.open_review("gh/o/r#1", "Fix", "abc", 4).unwrap();

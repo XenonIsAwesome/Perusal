@@ -10,6 +10,16 @@ pub enum DiffMode { #[default] Unified, Split }
 #[serde(rename_all = "lowercase")]
 pub enum FirstView { #[default] Overview, Code }
 
+/// Which Home list is selected when the app starts (an empty Recent reviews list always starts on My reviews).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeTab { #[default] Recent, Mine }
+
+impl HomeTab {
+    /// The tab to start on: the chosen one, except that with nothing in Recent reviews there is nothing to show there.
+    pub fn start(self, recent_count: usize) -> HomeTab { if recent_count == 0 { HomeTab::Mine } else { self } }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MdMode { #[default] Source, Rendered }
@@ -32,6 +42,7 @@ pub struct Settings {
     pub diff_mode: DiffMode,
     /// Screen a pull/merge request review opens on (local branch reviews have no overview and always open on the code).
     pub first_view: FirstView,
+    pub home_tab: HomeTab,
     /// Markdown files open as rendered text or as a source diff.
     pub markdown: MdMode,
     /// Agent CLI used for Ask AI and AI review: claude, gemini, codex or opencode.
@@ -71,6 +82,8 @@ pub struct Settings {
     /// Draw our own title bar and window buttons instead of the system's (restart-free where the platform allows).
     pub custom_titlebar: bool,
     /// Panel layout, remembered between sessions.
+    /// Height the Commits section may take in the review panel (drag the divider below it).
+    pub commits_height: Option<f32>,
     pub left_width: f32,
     pub right_width: f32,
     pub left_open: bool,
@@ -85,8 +98,8 @@ pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> 
 }
 
 impl Default for Settings {
-    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
+    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
+            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
 impl Settings {
@@ -94,7 +107,7 @@ impl Settings {
         let mut st: Settings = toml::from_str(s).unwrap_or_default();
         st.group_rules = perusal_diff::rules::merge_with_builtins(std::mem::take(&mut st.group_rules));
         for d in default_hosts() { if !st.hosts.iter().any(|h| h.host == d.host) { st.hosts.insert(0, d); } }
-        st.left_width = st.left_width.clamp(200.0, 700.0); st.right_width = st.right_width.clamp(220.0, 700.0);
+        st.commits_height = st.commits_height.map(|h| h.clamp(60.0, 700.0)); st.left_width = st.left_width.clamp(200.0, 700.0); st.right_width = st.right_width.clamp(220.0, 700.0);
         st
     }
     pub fn to_toml(&self) -> String { toml::to_string_pretty(self).unwrap_or_default() }
@@ -117,7 +130,7 @@ mod tests { use super::*;
     }
     #[test] fn rules_merge_and_layout_clamp() {
         let t = Settings::from_toml("left_width = 5000.0\nright_width = 1.0\n[[group_rules]]\nid = \"mine\"\nlabel = \"m\"\npattern = \"(?P<stem>x)\"\nenabled = true\n");
-        assert_eq!((t.left_width, t.right_width), (700.0, 220.0)); assert_eq!(t.group_rules.len(), 6); assert!(t.group_rules.iter().any(|r| r.id == "mine" && !r.builtin));
+        assert_eq!((t.left_width, t.right_width), (700.0, 220.0)); assert_eq!(Settings::from_toml("commits_height = 5.0\n").commits_height, Some(60.0)); assert_eq!(Settings::default().commits_height, None); assert_eq!(t.group_rules.len(), 6); assert!(t.group_rules.iter().any(|r| r.id == "mine" && !r.builtin));
         assert!(Settings::from_toml("").group_rules.iter().all(|r| r.builtin));
     }
     #[test] fn hosts_always_include_the_cloud_hosts() {
@@ -132,6 +145,12 @@ mod tests { use super::*;
     #[test] fn theme_choice() {
         let mut s = Settings::default(); assert_eq!(s.effective_theme(false), "dark");
         s.follow_os = true; assert_eq!(s.effective_theme(false), "github-light"); assert_eq!(s.effective_theme(true), "dark");
+    }
+    #[test] fn home_tab_choice_and_empty_recent() {
+        assert_eq!(Settings::default().home_tab, HomeTab::Recent);
+        assert_eq!(Settings::from_toml("home_tab = \"mine\"\n").home_tab, HomeTab::Mine);
+        assert_eq!(HomeTab::Recent.start(3), HomeTab::Recent); assert_eq!(HomeTab::Mine.start(3), HomeTab::Mine);
+        assert_eq!(HomeTab::Recent.start(0), HomeTab::Mine); assert_eq!(HomeTab::Mine.start(0), HomeTab::Mine);
     }
     #[test] fn first_view_defaults_to_overview() {
         assert_eq!(Settings::default().first_view, FirstView::Overview);

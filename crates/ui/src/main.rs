@@ -1,4 +1,5 @@
 //! Perusal GUI (GPUI). Thin: all review logic lives in the UI-free crates.
+mod avatars;
 mod icons;
 mod kit;
 mod model;

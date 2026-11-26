@@ -130,6 +130,46 @@ pub fn icon(i: Icon, size: f32, color: Hsla) -> Div {
     div().font_family("Material Icons").text_size(px(size)).line_height(px(size)).size(px(size)).flex().items_center().justify_center().flex_none().text_color(color).child(i.0.to_string())
 }
 
+/// A small circular spinner: a ring of dots that fade in turn, so it reads as spinning.
+pub fn spinner(p: &Pal, size: f32) -> Div {
+    let (c, n) = (p.accent, 8usize); let r = size / 2.0 - 2.0;
+    div().relative().size(px(size)).flex_none().children((0..n).map(|i| {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        div().absolute().left(px(size / 2.0 + r * a.sin() - 1.5)).top(px(size / 2.0 - r * a.cos() - 1.5)).size(px(3.0)).rounded_full().bg(c)
+            .with_animation(("spin", i), Animation::new(Duration::from_millis(900)).repeat(), move |d, t| d.opacity(1.0 - 0.85 * (t - i as f32 / n as f32).rem_euclid(1.0)))
+    }).collect::<Vec<_>>())
+}
+/// A thin indeterminate progress bar along the bottom edge of its (relatively positioned) parent.
+pub fn indeterminate_bar(p: &Pal) -> Div {
+    div().absolute().bottom_0().left_0().right_0().h(px(2.0)).overflow_hidden()
+        .child(div().absolute().top_0().h_full().w(gpui::relative(0.3)).bg(p.accent).with_animation("indet", Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.left(gpui::relative(t * 1.3 - 0.3))))
+}
+
+/// Small copy button for error messages: puts the whole message on the clipboard.
+pub fn copy_btn(id: impl Into<gpui::ElementId>, text: String, p: &Pal) -> Stateful<Div> {
+    icon_btn(id, crate::icons::CONTENT_COPY, "Copy this message", Btn::Ghost, p).on_click(move |_, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); cx.stop_propagation(); })
+}
+
+/// Round user picture. Draws the downloaded image when the host gave one and it is on disk; otherwise (or if it fails to decode) the
+/// placeholder: two letters of the name on a colour hashed from it. `name` is the login (or git author name for local committers).
+pub fn avatar(name: &str, size: f32) -> gpui::AnyElement {
+    let url = crate::avatars::url_for(name);
+    avatar_with(name, url.as_deref(), size)
+}
+pub fn avatar_with(name: &str, url: Option<&str>, size: f32) -> gpui::AnyElement {
+    let sw = perusal_app::avatar::swatch(name); let letters = perusal_app::avatar::initials(name);
+    let c = |v: [u8; 3]| -> Hsla { rgb(((v[0] as u32) << 16) | ((v[1] as u32) << 8) | v[2] as u32).into() };
+    let (bg, fg) = (c(sw.bg), c(sw.fg));
+    let place = std::rc::Rc::new(move || div().size(px(size)).flex_none().rounded_full().bg(bg).text_color(fg).flex().items_center().justify_center().font_weight(FontWeight::SEMIBOLD).text_size(px(size * 0.42)).line_height(px(size)).child(letters.clone()));
+    if let Some(u) = url {
+        if let Some(path) = crate::avatars::cached(u) {
+            return div().size(px(size)).flex_none().rounded_full().overflow_hidden().child(gpui::img(path).size(px(size)).rounded_full().object_fit(gpui::ObjectFit::Cover).with_loading({ let p = place.clone(); move || p().into_any_element() }).with_fallback(move || place().into_any_element())).into_any_element();
+        }
+        crate::avatars::request(u);
+    }
+    place().into_any_element()
+}
+
 pub struct TipView { text: SharedString, p: Pal }
 impl Render for TipView {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -266,7 +306,8 @@ pub fn fence_language(label: &str) -> &'static str {
 fn code_lines(text: &str, lang: &str, p: &Pal) -> Vec<Div> {
     let spans = line_spans(lang, text, p);
     text.split('\n').enumerate().map(|(i, l)| {
-        let runs = spans.get(i).cloned().unwrap_or_default();
+        let mut runs = spans.get(i).cloned().unwrap_or_default();
+        if find_active() { let extra = find_runs(l); if !extra.is_empty() { runs = gpui::combine_highlights(runs, extra).collect(); } }
         div().whitespace_nowrap().child(gpui::StyledText::new(if l.is_empty() { " ".to_string() } else { l.to_string() }).with_highlights(runs))
     }).collect()
 }
@@ -317,23 +358,57 @@ pub fn markdown_view_ctx(blocks: &[perusal_app::markdown::Block], p: &Pal, mono:
 }
 pub fn markdown_view(blocks: &[perusal_app::markdown::Block], p: &Pal, mono: &SharedString) -> Div { markdown_view_ctx(blocks, p, mono, None) }
 
+// ---- Ctrl+F highlighting inside rendered Markdown
+struct FindCtx { query: String, current: Option<usize>, seen: usize, hit: Hsla, cur: Hsla, fg: Hsla }
+thread_local! { static FIND: std::cell::RefCell<Option<FindCtx>> = const { std::cell::RefCell::new(None) }; }
+
+/// Like `markdown_view` but highlights every occurrence of `query` in the drawn text (`current` is the ordinal of the strongly highlighted one).
+/// Occurrences are counted per text run in drawing order, matching `perusal_app::markdown::block_texts`.
+pub fn markdown_view_find(blocks: &[perusal_app::markdown::Block], p: &Pal, mono: &SharedString, query: &str, current: Option<usize>) -> Div {
+    if query.is_empty() { return markdown_view(blocks, p, mono); }
+    FIND.with(|f| *f.borrow_mut() = Some(FindCtx { query: query.to_string(), current, seen: 0, hit: p.warn.opacity(0.5), cur: p.accent.opacity(0.8), fg: p.fg }));
+    let el = markdown_view(blocks, p, mono);
+    FIND.with(|f| *f.borrow_mut() = None);
+    el
+}
+/// Highlight ranges for one text run (counts its occurrences toward the ordinal); empty when no search is active.
+fn find_runs(text: &str) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    FIND.with(|f| {
+        let mut f = f.borrow_mut(); let Some(c) = f.as_mut() else { return vec![] };
+        let hits = perusal_app::find::find_all(text, &c.query);
+        let out = hits.iter().enumerate().map(|(k, r)| (r.clone(), gpui::HighlightStyle { background_color: Some(if c.current == Some(c.seen + k) { c.cur } else { c.hit }), color: Some(c.fg), ..Default::default() })).collect();
+        c.seen += hits.len(); out
+    })
+}
+fn find_active() -> bool { FIND.with(|f| f.borrow().is_some()) }
+/// Clips run-level highlights to the piece `[start, start+len)` of the run and shifts them to piece coordinates.
+fn clip_runs(runs: &[(std::ops::Range<usize>, gpui::HighlightStyle)], start: usize, len: usize) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    runs.iter().filter_map(|(r, s)| { let (a, b) = (r.start.max(start), r.end.min(start + len)); (a < b).then(|| (a - start..b - start, *s)) }).collect()
+}
+
 /// Inline Markdown as a wrapping row of words, so each span can have its own weight, style, font and click action
 /// (bold, italic, monospace code, clickable links).
 fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -> Div {
     let mut row = div().flex().flex_wrap().items_baseline();
     let mut n = 0usize;
+    let hl = if find_active() { find_runs(&spans.iter().map(|s| s.text.as_str()).collect::<String>()) } else { vec![] };
+    let mut pos = 0usize; // byte offset of the current span in the joined text
     for s in spans {
+        let span_start = pos; pos += s.text.len();
         if s.code {
             n += 1;
             let url = s.link.clone();
-            let el = div().id(("md-code", n)).px(px(5.0)).mx(px(1.0)).rounded(px(4.0)).bg(p.hover).font_family(mono.clone()).text_size(px(13.0)).text_color(if url.is_some() { p.accent } else { p.fg }).whitespace_nowrap().child(s.text.clone());
+            let el = div().id(("md-code", n)).px(px(5.0)).mx(px(1.0)).rounded(px(4.0)).bg(p.hover).font_family(mono.clone()).text_size(px(13.0)).text_color(if url.is_some() { p.accent } else { p.fg }).whitespace_nowrap().child(match clip_runs(&hl, span_start, s.text.len()) { r if r.is_empty() => div().child(s.text.clone()), r => div().child(gpui::StyledText::new(s.text.clone()).with_highlights(r)) });
             row = row.child(match url { Some(u) => el.cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)).into_any_element(), None => el.into_any_element() });
             continue;
         }
+        let mut tok_pos = span_start;
         for tok in s.text.split_inclusive([' ', '\n']) {
+            let tok_start = tok_pos; tok_pos += tok.len();
             if tok == "\n" { row = row.child(div().w_full().h(px(0.0))); continue; }
             n += 1;
             let t = tok.trim_end_matches('\n').to_string();
+            let t_runs = clip_runs(&hl, tok_start, t.len());
             let mut el = div().id(("md-t", n)).whitespace_nowrap();
             let (bold_alt, italic_alt) = VARIANTS.get().cloned().unwrap_or((None, None));
             if s.bold { el = el.font_weight(FontWeight::BOLD); }
@@ -346,7 +421,7 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -
                 Some(u) => { let u = u.clone(); el.text_color(p.accent).underline().cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)) }
                 None => el,
             };
-            row = row.child(el.child(t));
+            row = row.child(if t_runs.is_empty() { el.child(t) } else { el.child(gpui::StyledText::new(t).with_highlights(t_runs)) });
             if tok.ends_with('\n') { row = row.child(div().w_full().h(px(0.0))); }
         }
     }

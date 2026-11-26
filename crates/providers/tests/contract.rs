@@ -7,7 +7,7 @@ fn gh(s: &MockServer) -> GitHub { GitHub { http: reqwest::Client::new(), api: s.
 fn gl(s: &MockServer) -> GitLab { GitLab { http: reqwest::Client::new(), api: s.uri(), token: "t".into() } }
 fn ghref() -> MrRef { MrRef { kind: Kind::GitHub, host: "h".into(), project: "o/r".into(), number: 3 } }
 fn glref() -> MrRef { MrRef { kind: Kind::GitLab, host: "h".into(), project: "g/p".into(), number: 4 } }
-fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3 }] } }
+fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3 }], general: vec![] } }
 
 #[tokio::test] async fn github_info_and_ci() {
     let s = MockServer::start().await;
@@ -180,4 +180,70 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     let t = gl(&s).threads(&glref()).await.unwrap();
     assert_eq!(t.len(), 3, "the system-note-only discussion is dropped");
     assert_eq!(t.iter().map(|x| (x.id.as_str(), x.resolved)).collect::<Vec<_>>(), vec![("all", true), ("mixed", false), ("plain", false)]);
+}
+#[tokio::test] async fn github_general_comments_are_threads() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/repos/o/r/issues/3/comments")).and(body_partial_json(json!({"body":"overall"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({}))).expect(1).mount(&s).await;
+    // only general comments: no empty review is created
+    let only = Submission { head_sha: "abc".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![], general: vec!["overall".into()] };
+    gh(&s).submit(&ghref(), &only).await.unwrap();
+}
+#[tokio::test] async fn gitlab_general_comments_are_unpositioned_draft_notes() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4")).respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes")).and(body_partial_json(json!({"note":"overall"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":5}))).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes/bulk_publish")).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
+    let only = Submission { head_sha: "abc".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![], general: vec!["overall".into()] };
+    gl(&s).submit(&glref(), &only).await.unwrap();
+}
+#[tokio::test] async fn github_my_reviews_carries_people_labels_and_text() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/search/issues")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[{"html_url":"https://x/o/r/pull/1","title":"T","number":1,"state":"open","repository_url":"https://api/repos/o/r","updated_at":"2024","user":{"login":"al","avatar_url":"https://a/al.png"},
+        "assignees":[{"login":"bo","avatar_url":"https://a/bo.png"}],"labels":[{"name":"bug"}],"body":"overview text","draft":true}]}))).mount(&s).await;
+    let l = gh(&s).my_reviews("github.com", Role::Authored, StateFilter::Open).await.unwrap();
+    assert_eq!((l[0].author_avatar.as_str(), l[0].assignees[0].login.as_str(), l[0].labels[0].as_str(), l[0].description.as_str(), l[0].draft), ("https://a/al.png", "bo", "bug", "overview text", true));
+}
+#[tokio::test] async fn gitlab_threads_carry_avatars() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4/discussions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":"d","notes":[{"system":false,"body":"hi","author":{"username":"u","avatar_url":"https://a/u.png"}}]}]))).mount(&s).await;
+    let t = gl(&s).threads(&glref()).await.unwrap(); assert_eq!(t[0].avatars, vec!["https://a/u.png".to_string()]);
+}
+#[tokio::test] async fn github_reviewable_lists_pulls_of_repos_you_can_push_to() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"full_name":"o/rw","permissions":{"push":true}}, {"full_name":"o/ro","permissions":{"push":false}}, {"full_name":"o/old","archived":true,"permissions":{"push":true}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/rw/pulls")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"html_url":"https://x/o/rw/pull/1","title":"A","number":1,"state":"open","merged_at":null,"updated_at":"2026","user":{"login":"al"},"assignees":[],"labels":[{"name":"bug"}],"body":"b","draft":false,"requested_reviewers":[{"login":"me"}]}]))).expect(1).mount(&s).await;
+    let l = gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await.unwrap();
+    assert_eq!(l.len(), 1); assert_eq!((l[0].project.as_str(), l[0].reviewers[0].login.as_str(), l[0].labels[0].as_str()), ("o/rw", "me", "bug"));
+}
+#[tokio::test] async fn gitlab_reviewable_lists_mrs_of_projects_with_developer_access() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7},{"id":8}]))).mount(&s).await;
+    for id in [7, 8] {
+        Mock::given(method("GET")).and(path(format!("/projects/{id}/merge_requests"))).respond_with(ResponseTemplate::new(if id == 8 { 403 } else { 200 }).set_body_json(json!([
+            {"web_url":"https://h/g/p/-/merge_requests/3","iid":3,"title":"T","state":"opened","updated_at":"2026","author":{"username":"u"},"assignees":[],"reviewers":[],"labels":["x"],"description":"","draft":false}]))).mount(&s).await;
+    }
+    let l = gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await.unwrap();
+    assert_eq!(l.len(), 1); assert_eq!((l[0].project.as_str(), l[0].number), ("g/p", 3));
+}
+#[tokio::test] async fn github_reviewable_errors_when_every_repo_fails() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"full_name":"o/a","permissions":{"push":true}},{"full_name":"o/b","permissions":{"push":true}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/a/pulls")).respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30")).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/b/pulls")).respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30")).mount(&s).await;
+    assert!(matches!(gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await, Err(Error::RateLimited(Some(30)))));
+}
+#[tokio::test] async fn github_reviewable_keeps_results_when_only_some_repos_fail() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"full_name":"o/a","permissions":{"push":true}},{"full_name":"o/b","permissions":{"push":true}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/a/pulls")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"html_url":"https://x/o/a/pull/1","title":"A","number":1,"state":"open","merged_at":null,"updated_at":"2026","user":{"login":"u"},"assignees":[],"labels":[],"body":"","draft":false}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/b/pulls")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
+    assert_eq!(gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await.unwrap().len(), 1);
+}
+#[tokio::test] async fn gitlab_reviewable_errors_when_every_project_fails() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7},{"id":8}]))).mount(&s).await;
+    for id in [7, 8] { Mock::given(method("GET")).and(path(format!("/projects/{id}/merge_requests"))).respond_with(ResponseTemplate::new(401)).mount(&s).await; }
+    assert!(matches!(gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await, Err(Error::Unauthorized)));
 }

@@ -1,12 +1,15 @@
 //! UI-free view models for the GPUI shell. Everything here is testable headless.
+pub mod avatar;
 pub mod banner;
 pub mod ci;
 pub mod deeplink;
 pub mod filterbar;
+pub mod find;
 pub mod graph;
 pub mod hosts;
 pub mod events;
 pub mod markdown;
+pub mod mine;
 pub mod notify;
 pub mod search;
 pub mod settings;
