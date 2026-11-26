@@ -490,7 +490,8 @@ impl Render for Root {
         let toasts = self.toast_stack(cx);
         let settings = self.settings_view.clone();
         div().relative().size_full().flex().flex_col().bg(p.bg).font_family(self.fonts.ui.clone()).text_size(px(14.0)).track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { if this.mine_dd.is_some() { this.mine_dd = None; if this.hf == Some(Hf::DSearch) { this.hf = None; } cx.notify(); } if this.hf.is_some() { if this.renaming.is_some() { this.commit_rename(cx); } this.hf = None; cx.notify(); } }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { if this.mine_dd.is_some() { this.mine_dd = None; if this.hf == Some(Hf::DSearch) { this.hf = None; } cx.notify(); }
+                if this.hf.is_some() { if this.renaming.is_some() { this.commit_rename(cx); } this.hf = None; cx.notify(); } }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 let ks = &ev.keystroke; let ctrl = ks.modifiers.control || ks.modifiers.platform;
                 if let Some(sv) = this.settings_view.clone() { sv.update(cx, |v, cx| v.key(ev, cx)); return; }

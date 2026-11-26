@@ -219,7 +219,9 @@ pub fn ci_label(c: &Ci) -> &'static str { match c { Ci::None => "none", Ci::Pend
 /// The user's reviews across every host they are signed in to. Hosts without a token are skipped; failures are reported per host.
 /// Also returns the signed-in login per host (for the "Me" choices). GitHub pull requests have no dependable reviewer list here, so the
 /// "reviewer" toggle lists every pull request in repositories you can review in, same as the default.
-pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> (Vec<RemoteMr>, Vec<(String, String)>, std::collections::HashMap<String, String>) {
+/// Requests, per-host errors, and the signed-in login per host.
+pub type MineResult = (Vec<RemoteMr>, Vec<(String, String)>, std::collections::HashMap<String, String>);
+pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> MineResult {
     let (mut all, mut errs, mut mes) = (vec![], vec![], std::collections::HashMap::new());
     let Ok(rt) = rt() else { return (all, errs, mes) };
     for h in hosts {
