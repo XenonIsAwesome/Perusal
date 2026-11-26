@@ -242,6 +242,7 @@ impl Root {
             let ci = kit::ci_badge(&t.ci, &p).map(|_| { let c = match t.ci.as_str() { "passed" => p.success, "failed" => p.danger, "running" => p.warn, _ => p.muted }; div().size(px(8.0)).rounded_full().bg(c) });
             div().id(("tab", i)).group("tab").flex().items_center().gap_2().pl_3().pr_1().h(px(36.0)).max_w(px(240.0)).min_w(px(110.0)).cursor_pointer().border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).bg(if on { p.bg } else { gpui::transparent_black() }).hover(move |s| s.bg(p.hover))
                 .on_click(cx.listener(move |this, _, _, cx| { this.active = Some(i); cx.notify(); }))
+                .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| { this.close_tab(i, cx); cx.stop_propagation(); }))
                 .children(ci).child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).child(t.title.clone()))
                 .child(icon_btn(("tabx", i), ic::CLOSE, "Close this tab (Ctrl+W)", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.close_tab(i, cx); cx.stop_propagation(); })))
         }).collect();

@@ -28,8 +28,36 @@ pub fn parse_mr_url(url: &str) -> std::result::Result<MrRef, String> {
     Err("not a merge request or pull request URL".into())
 }
 
+/// A person on a host: login plus the avatar URL the host reported (empty when it did not).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Person { pub login: String, pub avatar: String }
+
+/// Reads `{login_key, avatar_url}` objects (assignees, reviewers) into people.
+pub(crate) fn people(v: &serde_json::Value, login_key: &str) -> Vec<Person> {
+    v.as_array().into_iter().flatten().filter_map(|p| { let l = p[login_key].as_str()?; Some(Person { login: l.into(), avatar: p["avatar_url"].as_str().unwrap_or("").into() }) }).collect()
+}
+
+/// Best-guess avatar URL when the host did not report one: GitHub serves `/<login>.png`; GitLab needs the API, so no guess.
+pub fn guess_avatar(kind: &Kind, host: &str, login: &str) -> Option<String> {
+    if login.is_empty() { return None; }
+    match kind { Kind::GitHub => Some(format!("https://{host}/{login}.png?size=80")), Kind::GitLab => None }
+}
+
+/// Downloads an avatar image (small, size-capped). The token is sent only to the host the user connected to.
+pub async fn fetch_avatar(url: &str, token: Option<(&str, &str)>) -> Result<Vec<u8>> {
+    let mut rq = reqwest::Client::new().get(url).timeout(std::time::Duration::from_secs(15));
+    if let Some((h, v)) = token { rq = rq.header(h, v); }
+    let resp = check(rq.send().await).await?;
+    if resp.content_length().map(|n| n > 2_000_000).unwrap_or(false) { return Err(Error::Http(0, "avatar too large".into())); }
+    let b = resp.bytes().await.map_err(|e| Error::Offline(e.to_string()))?;
+    if b.len() > 2_000_000 { return Err(Error::Http(0, "avatar too large".into())); }
+    Ok(b.to_vec())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MrInfo { pub title: String, pub state: String, pub author: String, pub head_sha: String, pub base_ref: String, pub web_url: String, pub description: String, pub source_ref: String }
+pub struct MrInfo { pub title: String, pub state: String, pub author: String, pub head_sha: String, pub base_ref: String, pub web_url: String, pub description: String, pub source_ref: String,
+    /// Author, assignees and requested reviewers with their avatars.
+    #[serde(default)] pub people: Vec<Person> }
 
 /// Why a merge request is in your list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,7 +68,8 @@ pub enum Role { ReviewRequested, Authored, Assigned }
 pub enum StateFilter { Open, Merged, Closed, All }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RemoteMr { pub url: String, pub title: String, pub project: String, pub number: u64, pub author: String, pub state: String, pub updated: String, pub host: String, pub kind: Kind }
+pub struct RemoteMr { pub url: String, pub title: String, pub project: String, pub number: u64, pub author: String, pub state: String, pub updated: String, pub host: String, pub kind: Kind,
+    pub author_avatar: String, pub assignees: Vec<Person>, pub reviewers: Vec<Person>, pub labels: Vec<String>, pub description: String, pub draft: bool }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ci { None, Pending, Running, Passed, Failed, Canceled }
@@ -54,10 +83,14 @@ pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: 
     pub start_old: u32, pub end_old: u32 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: Verdict, pub comments: Vec<InlineComment> }
+pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: Verdict, pub comments: Vec<InlineComment>,
+    /// Whole-MR comments: each is posted as its own conversation thread, not folded into the review summary.
+    pub general: Vec<String> }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Thread { pub id: String, pub path: Option<String>, pub line: Option<u32>, pub resolved: bool, pub comments: Vec<(String, String)> }
+pub struct Thread { pub id: String, pub path: Option<String>, pub line: Option<u32>, pub resolved: bool, pub comments: Vec<(String, String)>,
+    /// Avatar URL of each comment's author, parallel to `comments` (empty string when unknown).
+    pub avatars: Vec<String> }
 
 #[derive(Debug)]
 pub enum Error { Unauthorized, RateLimited(Option<u64>), Offline(String), Unsupported(&'static str), Http(u16, String) }

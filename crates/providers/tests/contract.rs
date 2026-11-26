@@ -7,7 +7,7 @@ fn gh(s: &MockServer) -> GitHub { GitHub { http: reqwest::Client::new(), api: s.
 fn gl(s: &MockServer) -> GitLab { GitLab { http: reqwest::Client::new(), api: s.uri(), token: "t".into() } }
 fn ghref() -> MrRef { MrRef { kind: Kind::GitHub, host: "h".into(), project: "o/r".into(), number: 3 } }
 fn glref() -> MrRef { MrRef { kind: Kind::GitLab, host: "h".into(), project: "g/p".into(), number: 4 } }
-fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3 }] } }
+fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3 }], general: vec![] } }
 
 #[tokio::test] async fn github_info_and_ci() {
     let s = MockServer::start().await;
@@ -180,4 +180,31 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     let t = gl(&s).threads(&glref()).await.unwrap();
     assert_eq!(t.len(), 3, "the system-note-only discussion is dropped");
     assert_eq!(t.iter().map(|x| (x.id.as_str(), x.resolved)).collect::<Vec<_>>(), vec![("all", true), ("mixed", false), ("plain", false)]);
+}
+#[tokio::test] async fn github_general_comments_are_threads() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/repos/o/r/issues/3/comments")).and(body_partial_json(json!({"body":"overall"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({}))).expect(1).mount(&s).await;
+    // only general comments: no empty review is created
+    let only = Submission { head_sha: "abc".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![], general: vec!["overall".into()] };
+    gh(&s).submit(&ghref(), &only).await.unwrap();
+}
+#[tokio::test] async fn gitlab_general_comments_are_unpositioned_draft_notes() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4")).respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes")).and(body_partial_json(json!({"note":"overall"}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":5}))).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/projects/g%2Fp/merge_requests/4/draft_notes/bulk_publish")).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
+    let only = Submission { head_sha: "abc".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![], general: vec!["overall".into()] };
+    gl(&s).submit(&glref(), &only).await.unwrap();
+}
+#[tokio::test] async fn github_my_reviews_carries_people_labels_and_text() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/search/issues")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[{"html_url":"https://x/o/r/pull/1","title":"T","number":1,"state":"open","repository_url":"https://api/repos/o/r","updated_at":"2024","user":{"login":"al","avatar_url":"https://a/al.png"},
+        "assignees":[{"login":"bo","avatar_url":"https://a/bo.png"}],"labels":[{"name":"bug"}],"body":"overview text","draft":true}]}))).mount(&s).await;
+    let l = gh(&s).my_reviews("github.com", Role::Authored, StateFilter::Open).await.unwrap();
+    assert_eq!((l[0].author_avatar.as_str(), l[0].assignees[0].login.as_str(), l[0].labels[0].as_str(), l[0].description.as_str(), l[0].draft), ("https://a/al.png", "bo", "bug", "overview text", true));
+}
+#[tokio::test] async fn gitlab_threads_carry_avatars() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4/discussions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":"d","notes":[{"system":false,"body":"hi","author":{"username":"u","avatar_url":"https://a/u.png"}}]}]))).mount(&s).await;
+    let t = gl(&s).threads(&glref()).await.unwrap(); assert_eq!(t[0].avatars, vec!["https://a/u.png".to_string()]);
 }

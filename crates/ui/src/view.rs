@@ -585,7 +585,7 @@ impl View {
         self.submission_of(drafts, self.summary.f.text.trim().to_string(), self.verdict.clone())
     }
     fn submission_of(&self, drafts: Vec<perusal_core::store::Draft>, mut summary: String, verdict: Verdict) -> Submission {
-        let mut comments = vec![];
+        let (mut comments, mut general) = (vec![], vec![]);
         for d in drafts {
             match (&d.file, d.start_line, d.end_line) {
                 (Some(f), Some(a), Some(b)) => {
@@ -601,10 +601,10 @@ impl View {
                     }
                 }
                 (Some(f), _, _) => { summary.push_str(&format!("\n\n**{f}**: {}", d.body)); }
-                _ => { summary.push_str(&format!("\n\n{}", d.body)); }
+                _ => general.push(d.body),
             }
         }
-        Submission { head_sha: self.m.branch.clone(), summary: summary.trim().to_string(), verdict, comments }
+        Submission { head_sha: self.m.branch.clone(), summary: summary.trim().to_string(), verdict, comments, general }
     }
     /// True when comments go straight to the host and Finish review is not shown (remote reviews only).
     fn instant(&self) -> bool { self.settings.publish_instantly && self.m.mr.is_some() }

@@ -1,4 +1,5 @@
 //! UI-free view models for the GPUI shell. Everything here is testable headless.
+pub mod avatar;
 pub mod banner;
 pub mod ci;
 pub mod deeplink;

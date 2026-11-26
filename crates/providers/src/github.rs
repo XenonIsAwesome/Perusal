@@ -42,23 +42,24 @@ impl Provider for GitHub {
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let state = if v["merged"].as_bool() == Some(true) { "merged".into() } else { s("/state") };
-        Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url"), description: s("/body"), source_ref: s("/head/ref") })
+        Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url"), description: s("/body"), source_ref: s("/head/ref"),
+            people: { let mut out = vec![Person { login: s("/user/login"), avatar: s("/user/avatar_url") }]; out.extend(people(&v["assignees"], "login")); out.extend(people(&v["requested_reviewers"], "login")); out } })
     }
     async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}/comments", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let mut out: Vec<Thread> = Vec::new();
         for c in v {
             let root = c["in_reply_to_id"].as_u64().map(|x| x.to_string()).unwrap_or(c["id"].to_string());
-            let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string();
-            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); }
-            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)] }); }
+            let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string(); let av = c["user"]["avatar_url"].as_str().unwrap_or("").to_string();
+            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); t.avatars.push(av); }
+            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)], avatars: vec![av] }); }
         }
         // the REST API does not say which review threads are resolved; ask GraphQL (best effort)
         for id in self.resolved_roots(r).await { if let Some(t) = out.iter_mut().find(|t| t.id == id.to_string()) { t.resolved = true; } }
         // general conversation on the pull request (issue comments); optional, so a failure here keeps the inline threads
         if let Ok(resp) = check(self.req(reqwest::Method::GET, &format!("/repos/{}/issues/{}/comments?per_page=100", r.project, r.number)).send().await).await {
             if let Ok(list) = resp.json::<Vec<Value>>().await {
-                for c in list { out.push(Thread { id: format!("i{}", c["id"]), path: None, line: None, resolved: false, comments: vec![(c["user"]["login"].as_str().unwrap_or("").to_string(), c["body"].as_str().unwrap_or("").to_string())] }); }
+                for c in list { out.push(Thread { id: format!("i{}", c["id"]), path: None, line: None, resolved: false, comments: vec![(c["user"]["login"].as_str().unwrap_or("").to_string(), c["body"].as_str().unwrap_or("").to_string())], avatars: vec![c["user"]["avatar_url"].as_str().unwrap_or("").to_string()] }); }
             }
         }
         Ok(out)
@@ -70,7 +71,15 @@ impl Provider for GitHub {
             json!({"path": c.path, "start_line": c.start_line, "line": c.end_line, "side": "RIGHT", "body": c.body})
         } else { json!({"path": c.path, "line": c.end_line, "side": "RIGHT", "body": c.body}) }).collect();
         let body = json!({"commit_id": s.head_sha, "body": s.summary, "event": event, "comments": comments});
-        check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/{}/reviews", r.project, r.number)).json(&body).send().await).await.map(|_| ())
+        // A review with nothing to say (no summary, no inline comments, a plain Comment verdict) is rejected by GitHub; skip it when only general comments remain.
+        if !(s.verdict == Verdict::Comment && s.summary.is_empty() && s.comments.is_empty() && !s.general.is_empty()) {
+            check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/{}/reviews", r.project, r.number)).json(&body).send().await).await?;
+        }
+        // General comments are conversation threads (issue comments), posted after the review that carries the verdict.
+        for g in &s.general {
+            check(self.req(reqwest::Method::POST, &format!("/repos/{}/issues/{}/comments", r.project, r.number)).json(&json!({"body": g})).send().await).await?;
+        }
+        Ok(())
     }
     async fn ci(&self, r: &MrRef, sha: &str) -> Result<Ci> {
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/repos/{}/commits/{sha}/check-runs", r.project)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
@@ -140,7 +149,9 @@ impl Provider for GitHub {
             let state = if merged { "merged" } else if i["state"] == "open" { "open" } else { "closed" };
             let project = i["repository_url"].as_str().and_then(|u| u.split("/repos/").nth(1)).unwrap_or("").to_string();
             RemoteMr { url: i["html_url"].as_str().unwrap_or("").into(), title: i["title"].as_str().unwrap_or("").into(), project, number: i["number"].as_u64().unwrap_or(0),
-                author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub }
+                author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub,
+                author_avatar: i.pointer("/user/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&i["assignees"], "login"), reviewers: vec![],
+                labels: i["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: i["body"].as_str().unwrap_or("").into(), draft: i["draft"].as_bool() == Some(true) }
         }).collect())
     }
 }
