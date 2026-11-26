@@ -10,6 +10,16 @@ pub enum DiffMode { #[default] Unified, Split }
 #[serde(rename_all = "lowercase")]
 pub enum FirstView { #[default] Overview, Code }
 
+/// Which Home list is selected when the app starts (an empty Recent reviews list always starts on My reviews).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeTab { #[default] Recent, Mine }
+
+impl HomeTab {
+    /// The tab to start on: the chosen one, except that with nothing in Recent reviews there is nothing to show there.
+    pub fn start(self, recent_count: usize) -> HomeTab { if recent_count == 0 { HomeTab::Mine } else { self } }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MdMode { #[default] Source, Rendered }
@@ -32,6 +42,7 @@ pub struct Settings {
     pub diff_mode: DiffMode,
     /// Screen a pull/merge request review opens on (local branch reviews have no overview and always open on the code).
     pub first_view: FirstView,
+    pub home_tab: HomeTab,
     /// Markdown files open as rendered text or as a source diff.
     pub markdown: MdMode,
     /// Agent CLI used for Ask AI and AI review: claude, gemini, codex or opencode.
@@ -85,7 +96,7 @@ pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> 
 }
 
 impl Default for Settings {
-    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
+    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
             model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
@@ -132,6 +143,12 @@ mod tests { use super::*;
     #[test] fn theme_choice() {
         let mut s = Settings::default(); assert_eq!(s.effective_theme(false), "dark");
         s.follow_os = true; assert_eq!(s.effective_theme(false), "github-light"); assert_eq!(s.effective_theme(true), "dark");
+    }
+    #[test] fn home_tab_choice_and_empty_recent() {
+        assert_eq!(Settings::default().home_tab, HomeTab::Recent);
+        assert_eq!(Settings::from_toml("home_tab = \"mine\"\n").home_tab, HomeTab::Mine);
+        assert_eq!(HomeTab::Recent.start(3), HomeTab::Recent); assert_eq!(HomeTab::Mine.start(3), HomeTab::Mine);
+        assert_eq!(HomeTab::Recent.start(0), HomeTab::Mine); assert_eq!(HomeTab::Mine.start(0), HomeTab::Mine);
     }
     #[test] fn first_view_defaults_to_overview() {
         assert_eq!(Settings::default().first_view, FirstView::Overview);

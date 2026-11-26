@@ -5,7 +5,7 @@ use crate::model;
 use gpui::{deferred, div, prelude::*, px, relative, Context, EventEmitter, FontWeight, MouseButton, SharedString};
 use perusal_agents::{effort_suggestions, model_suggestions, on_path, supports_effort};
 use perusal_app::hosts;
-use perusal_app::settings::{DiffMode, FirstView, HostCfg, MdMode, Settings, AGENTS};
+use perusal_app::settings::{DiffMode, FirstView, HomeTab, HostCfg, MdMode, Settings, AGENTS};
 use perusal_app::theme;
 use perusal_diff::GroupRule;
 use perusal_providers::auth::{DeviceCode, TokenStore};
@@ -544,6 +544,9 @@ impl gpui::Render for SettingsView {
                     .child(div().pt_2().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("NOTIFY ME WHEN"))
                     .child(div().flex().flex_col().children(events)),
                 3 => div().flex().flex_col()
+                    .child(section("Home"))
+                    .child(row("Start on", "Which list Home opens with. With no recent reviews yet it always opens on My reviews", seg_box(&p).child(seg_icon("ht-recent", ic::HISTORY, "Recent reviews", s.home_tab == HomeTab::Recent, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.home_tab = HomeTab::Recent; this.changed(cx); })))
+                        .child(seg_icon("ht-mine", ic::FORUM, "My reviews", s.home_tab == HomeTab::Mine, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.home_tab = HomeTab::Mine; this.changed(cx); }))).into_any_element()))
                     .child(section("Opening a review"))
                     .child(row("First screen", "What a pull or merge request opens on. Switch any time with the tabs above the diff or the O key. Local branch reviews have no overview and open on the code", seg_box(&p).child(seg_icon("fv-ov", ic::DESCRIPTION, "Overview: description and conversation", s.first_view == FirstView::Overview, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.first_view = FirstView::Overview; this.changed(cx); })))
                         .child(seg_icon("fv-code", ic::DIFFERENCE, "Code: files and diff", s.first_view == FirstView::Code, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.first_view = FirstView::Code; this.changed(cx); }))).into_any_element()))
