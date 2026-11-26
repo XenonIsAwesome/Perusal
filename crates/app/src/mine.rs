@@ -3,6 +3,18 @@
 use crate::search::{matches_item, Item};
 use std::collections::BTreeSet;
 
+/// The My reviews filters, remembered globally between runs (`ui_state.toml`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Saved { pub remote: String, pub state: String, pub reviewer: bool, pub authors: Vec<String>, pub assignees: Vec<String>, pub labels: Vec<String>, pub query: String }
+impl Default for Saved { fn default() -> Self { Saved { remote: "all".into(), state: "open".into(), reviewer: false, authors: vec![], assignees: vec![], labels: vec![], query: String::new() } } }
+impl Saved {
+    pub fn from_toml(s: &str) -> Saved { toml::from_str(s).unwrap_or_default() }
+    pub fn to_toml(&self) -> String { toml::to_string_pretty(self).unwrap_or_default() }
+    pub fn sel(&self) -> Sel { Sel { authors: self.authors.iter().cloned().collect(), assignees: self.assignees.iter().cloned().collect(), labels: self.labels.iter().cloned().collect() } }
+    pub fn set_sel(&mut self, s: &Sel) { self.authors = s.authors.iter().cloned().collect(); self.assignees = s.assignees.iter().cloned().collect(); self.labels = s.labels.iter().cloned().collect(); }
+}
+
 /// Stands for the signed-in user (a different login per host) in the people filters.
 pub const ME: &str = "@me";
 
@@ -84,6 +96,12 @@ mod tests { use super::*;
         assert_eq!(options(&own, Dim::Author, None, &none, ""), Vec::<String>::new()); assert_eq!(options(&own, Dim::Assignee, None, &none, ""), vec!["zz"]);
         // a selected value that no longer exists stays listed so it can be removed
         let mut s = Sel::default(); s.toggle(Dim::Label, "gone"); assert!(options(&items, Dim::Label, None, &s, "").contains(&"gone".to_string()));
+    }
+    #[test] fn saved_filters_round_trip_and_survive_garbage() {
+        let mut s = Saved { remote: "gitlab".into(), state: "all".into(), reviewer: true, query: "label:bug".into(), ..Default::default() };
+        let mut sel = Sel::default(); sel.toggle(Dim::Author, ME); sel.toggle(Dim::Label, "bug"); s.set_sel(&sel);
+        let back = Saved::from_toml(&s.to_toml()); assert_eq!(back, s); assert_eq!(back.sel(), sel);
+        assert_eq!(Saved::from_toml("not toml {{"), Saved::default()); assert_eq!(Saved::from_toml("reviewer = true\n").state, "open");
     }
     #[test] fn me_needs_a_known_login() {
         let mut i = it("me1", vec![], vec![], "github"); i.me = None; let mut s = Sel::default(); s.toggle(Dim::Author, ME);

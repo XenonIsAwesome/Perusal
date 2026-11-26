@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename, Gen }
+enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename, Gen, Find }
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab { Review, Ai }
 #[derive(PartialEq, Clone, Copy)]
@@ -32,6 +32,9 @@ enum Job { Chat, Review }
 /// The centre pane: the MR overview or the code (files and diff).
 #[derive(Clone, Copy, PartialEq)]
 enum Page { Overview, Code }
+/// One occurrence found by Ctrl+F: the list row (diff) or page section (overview), which text of that row, and where in it.
+#[derive(Clone)]
+struct Hit { row: usize, part: usize, range: Range<usize> }
 struct Comp { editing: Option<i64>, global: bool, preview: bool }
 
 #[derive(Clone)]
@@ -54,6 +57,7 @@ impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
+    find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
@@ -107,10 +111,12 @@ impl View {
         let presets = model::load_presets(); let project = model::project_of(&m);
         let (mut f0, mut s0) = (String::new(), String::new());
         if let Some(d) = presets.effective_default(&project) { f0 = d.filter.clone(); s0 = d.sort.clone(); let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
+        // what the user last typed in this review wins over the preset default (even when they cleared it)
+        if let Ok(Some((f, s))) = m.store.ui(m.vm.review) { f0 = f; s0 = s; let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        View { pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        View { find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
@@ -127,6 +133,15 @@ impl View {
     fn resync(&mut self) { self.m.vm.sync_review_state(&self.m.store); let _ = self.m.vm.refresh(); self.rebuild_rows(); }
 
     /// Applies new settings from the Settings panel to this review.
+    /// (drafts, viewed, total) when leaving this review would lose work; `None` when there is nothing unsaved or it was already submitted.
+    pub fn unfinished(&self) -> Option<(usize, u32, u32)> {
+        if !self.m.store.unfinished(self.m.vm.review).unwrap_or(false) { return None; }
+        let (v, t) = self.m.vm.progress(); Some((self.m.store.drafts(self.m.vm.review).map(|d| d.len()).unwrap_or(0), v as u32, t as u32))
+    }
+    pub fn review_id(&self) -> i64 { self.m.vm.review }
+    pub fn is_remote(&self) -> bool { self.m.mr.is_some() }
+    /// Opens the Finish review dialog (used by the leave prompt's Submit choice).
+    pub fn begin_finish(&mut self, cx: &mut Context<Self>) { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; cx.notify(); }
     pub fn apply_settings(&mut self, s: Settings) {
         let regroup = s.group_related != self.settings.group_related || s.group_rules != self.settings.group_rules || s.files_tree != self.settings.files_tree;
         let diff_changed = s.diff_mode != self.settings.diff_mode;
@@ -275,6 +290,7 @@ impl View {
             }
         }
         self.rows = out;
+        if self.find_open && self.page == Page::Code { self.recompute_find(); }
         // measure every row up front so the scroll range is exact (otherwise it keeps growing as unseen rows are measured); huge diffs stay lazy
         let all = self.rows.len() <= 4000;
         if all != self.list_all { self.list = ListState::new(self.rows.len(), ListAlignment::Top, px(600.0)); if all { self.list = self.list.clone().measure_all(); } self.list_all = all; } else { self.list.reset(self.rows.len()); }
@@ -326,10 +342,10 @@ impl View {
 
     // ---------- filter, sort, presets
     fn apply_filter(&mut self) {
-        match self.m.vm.set_filter(self.filter.f.text.trim()) { Ok(()) => { self.error = None; self.sug.clear(); self.reload(); } Err(e) => self.error = Some(format!("Filter: {e}")) }
+        match self.m.vm.set_filter(self.filter.f.text.trim()) { Ok(()) => { self.error = None; self.sug.clear(); self.remember_ui(); self.reload(); } Err(e) => self.error = Some(format!("Filter: {e}")) }
     }
     fn apply_sort(&mut self) {
-        match self.m.vm.set_sort(self.sort.f.text.trim()) { Ok(()) => { self.error = None; self.sug.clear(); self.reload(); } Err(e) => self.error = Some(format!("Sort: {e}")) }
+        match self.m.vm.set_sort(self.sort.f.text.trim()) { Ok(()) => { self.error = None; self.sug.clear(); self.remember_ui(); self.reload(); } Err(e) => self.error = Some(format!("Sort: {e}")) }
     }
     fn set_tiers(&mut self, t: Vec<(String, bool)>) { let text = perusal_filter::format_tiers(&t); self.sort.f.set(&text); self.apply_sort(); }
     /// Asks the agent to write the filter or sort described in the generate box.
@@ -379,8 +395,10 @@ impl View {
     fn apply_preset(&mut self, p: &Preset) {
         self.filter.f.set(&p.filter); self.sort.f.set(&p.sort);
         let (a, b) = (self.m.vm.set_filter(&p.filter), self.m.vm.set_sort(&p.sort));
-        self.error = a.err().or(b.err()); self.reload();
+        self.error = a.err().or(b.err()); self.remember_ui(); self.reload();
     }
+    /// Saves the applied filter and sort with this review so reopening it restores them.
+    fn remember_ui(&self) { let _ = self.m.store.set_ui(self.m.vm.review, self.filter.f.text.trim(), self.sort.f.text.trim()); }
     fn save_preset(&mut self, project_scope: bool) {
         let name = self.preset_name.f.text.trim().to_string(); if name.is_empty() { return; }
         let pr = Preset { filter: self.filter.f.text.trim().into(), sort: self.sort.f.text.trim().into() };
@@ -569,6 +587,66 @@ impl View {
         }
         self.flush(cx); cx.notify();
     }
+    // ---------- find in page (Ctrl+F)
+    fn open_find(&mut self, cx: &mut Context<Self>) {
+        self.find_open = true; self.focus = Some(Fid::Find); self.find_in.f.select_all(); self.recompute_find(); self.scroll_to_hit(); cx.notify();
+    }
+    fn close_find(&mut self) { self.find_open = false; self.find_hits.clear(); self.find_cur = 0; if self.focus == Some(Fid::Find) { self.focus = None; } }
+    /// The searchable texts of a diff row (one per part: the two sides of a split row, a comment and its replies).
+    fn row_texts(&self, r: &Row) -> Vec<String> {
+        match &r.kind {
+            RowKind::Uni(rl) => vec![rl.line.text.clone()],
+            RowKind::Split(a, b) => vec![a.as_ref().map(|x| x.line.text.clone()).unwrap_or_default(), b.as_ref().map(|x| x.line.text.clone()).unwrap_or_default()],
+            RowKind::FileHeader => vec![self.m.vm.files[r.fi].path.clone()],
+            RowKind::Hunk(t) | RowKind::Note(t) | RowKind::Collapsed(t, _) => vec![t.clone()],
+            RowKind::Comment(c) => { let mut v = vec![format!("{} {}", c.author, c.body)]; v.extend(c.replies.iter().map(|(a, t)| format!("{a} {t}"))); v }
+            RowKind::Rendered(_) => vec![],
+        }
+    }
+    /// Finds every occurrence on the current page (diff rows; the overview recomputes itself while drawing).
+    fn recompute_find(&mut self) {
+        self.find_page = self.page;
+        let q = self.find_in.f.text.clone();
+        let mut hits = vec![];
+        if !q.is_empty() && self.page == Page::Code {
+            for (ix, r) in self.rows.iter().enumerate() { for (part, t) in self.row_texts(r).iter().enumerate() { for range in perusal_app::find::find_all(t, &q) { hits.push(Hit { row: ix, part, range }); } } }
+        }
+        self.find_hits = hits; if self.find_cur >= self.find_hits.len() { self.find_cur = 0; }
+    }
+    fn find_step(&mut self, forward: bool) {
+        if self.find_page != self.page { self.recompute_find(); }
+        if let Some(i) = perusal_app::find::step(self.find_cur, self.find_hits.len(), forward) { self.find_cur = i; self.scroll_to_hit(); }
+    }
+    fn scroll_to_hit(&mut self) {
+        let Some(h) = self.find_hits.get(self.find_cur) else { return };
+        if self.page == Page::Code { self.list.scroll_to(gpui::ListOffset { item_ix: h.row.saturating_sub(3), offset_in_item: px(0.0) }); } else { self.ov_scroll.scroll_to_item(h.row); }
+    }
+    /// Hits inside one row as (part, range, is the current hit).
+    fn hits_in_row(&self, row: usize) -> Vec<(usize, Range<usize>, bool)> {
+        if !self.find_open || self.find_hits.is_empty() || self.page != Page::Code { return vec![]; }
+        let start = self.find_hits.partition_point(|h| h.row < row);
+        self.find_hits[start..].iter().enumerate().take_while(|(_, h)| h.row == row).map(|(i, h)| (h.part, h.range.clone(), start + i == self.find_cur)).collect()
+    }
+    /// Background for rows whose text is not drawn as a plain code line (headers, comments, hunks), so hits there are still visible.
+    fn row_tint(&self, ix: usize) -> Option<gpui::Hsla> {
+        let kind_plain = self.rows.get(ix).map(|r| matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))).unwrap_or(true);
+        if kind_plain { return None; }
+        let hits = self.hits_in_row(ix); if hits.is_empty() { None } else { Some(self.pal.warn.opacity(if hits.iter().any(|h| h.2) { 0.35 } else { 0.16 })) }
+    }
+    /// The floating find box (top right of the centre pane).
+    fn find_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.find_open { return None; }
+        let p = self.pal; let focused = self.focus == Some(Fid::Find);
+        let n = self.find_hits.len(); let has_q = !self.find_in.f.text.is_empty();
+        let count = if !has_q { String::new() } else if n == 0 { "No results".to_string() } else { format!("{} of {n}", self.find_cur + 1) };
+        let input = self.winp(Fid::Find, div().id("find-box").flex().items_center().w(px(220.0)).px_2().py(px(4.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).child(input_text(&self.find_in, focused, "Find in page", &p, false, 1)), cx);
+        Some(div().absolute().top(px(8.0)).right(px(20.0)).flex().items_center().gap_1().px_2().py(px(5.0)).rounded_lg().bg(p.surface).border_1().border_color(p.border).shadow_lg()
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .child(input).child(div().min_w(px(62.0)).px_1().text_xs().text_color(if has_q && n == 0 { p.danger } else { p.muted }).child(count))
+            .child(icon_btn("find-prev", ic::KEYBOARD_ARROW_UP, "Previous match (Shift+Enter)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.find_step(false); cx.notify(); })))
+            .child(icon_btn("find-next", ic::KEYBOARD_ARROW_DOWN, "Next match (Enter)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.find_step(true); cx.notify(); })))
+            .child(icon_btn("find-close", ic::CLOSE, "Close (Esc)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.close_find(); cx.notify(); }))).into_any_element())
+    }
     fn draft_from_answer(&mut self, text: &str) {
         let (f, l) = match &self.ai_ctx { Some(s) => (Some(s.file.clone()), Some((s.start, s.end))), None => (self.current_file().map(|i| self.m.vm.files[i].path.clone()), None) };
         let _ = self.m.store.add_draft(self.m.vm.review, f.as_deref(), l, text, true); self.note(NKind::Success, "Saved the answer as an AI draft.", None); self.resync();
@@ -651,7 +729,7 @@ impl View {
     }
     fn export_local(&mut self, cx: &mut Context<Self>) {
         match self.m.store.export_markdown(self.m.vm.review).map_err(|e| e.to_string()).and_then(|md| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(md.clone())); model::export_markdown_file(&self.m.title, &md) }) {
-            Ok(p) => self.submit_msg = Some((true, format!("Copied to the clipboard and saved to {}", p.display()))),
+            Ok(p) => { let _ = self.m.store.set_state(self.m.vm.review, "submitted"); self.submit_msg = Some((true, format!("Copied to the clipboard and saved to {}", p.display()))) }
             Err(e) => self.submit_msg = Some((false, e)),
         }
     }
@@ -660,6 +738,7 @@ impl View {
     pub fn key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &ev.keystroke; let key = ks.key.as_str();
         let ctrl = ks.modifiers.control || ks.modifiers.platform;
+        if ctrl && key == "f" { self.open_find(cx); return; }
         if self.finish_open && self.focus != Some(Fid::Summary) { if key == "escape" { self.finish_open = false; cx.notify(); } return; }
         if let Some(f) = self.focus {
             match f {
@@ -678,6 +757,11 @@ impl View {
                 Fid::Ask => { if key == "escape" { self.focus = None; } else if key == "enter" { let q = self.ask.f.text.trim().to_string(); if !q.is_empty() { self.ask.f.clear(); self.start_ai(Job::Chat, q, cx); } } else { field_key(&mut self.ask.f, ks, cx); } }
                 Fid::Summary => { if key == "escape" { self.finish_open = false; self.focus = None; } else if key == "enter" && ctrl { self.start_submit(cx); } else { field_key(&mut self.summary.f, ks, cx); } }
                 Fid::Preset => { if key == "escape" { self.presets_open = false; self.focus = None; } else if key == "enter" { self.save_preset(true); } else { field_key(&mut self.preset_name.f, ks, cx); } }
+                Fid::Find => match key {
+                    "escape" => self.close_find(),
+                    "enter" | "f3" => self.find_step(!ks.modifiers.shift),
+                    _ => { if field_key(&mut self.find_in.f, ks, cx) { self.find_cur = 0; self.recompute_find(); self.scroll_to_hit(); } }
+                },
                 Fid::Gen => { if key == "escape" { self.gen_for = None; self.focus = None; } else if key == "enter" { self.start_gen(cx); } else { field_key(&mut self.gen.f, ks, cx); } }
                 Fid::Rename => { if key == "escape" { let t = self.m.title.clone(); self.rename.f.set(&t); self.focus = None; } else if key == "enter" { self.commit_rename(cx); self.focus = None; } else { field_key(&mut self.rename.f, ks, cx); } }
             }
@@ -792,9 +876,10 @@ impl View {
             Fid::Preset => wire_input(el, cx, |t| &mut t.preset_name, |t, _| { t.focus = Some(Fid::Preset); }, ui, false),
             Fid::Gen => wire_input(el, cx, |t| &mut t.gen, |t, _| { t.focus = Some(Fid::Gen); }, ui, false),
             Fid::Rename => wire_input(el, cx, |t| &mut t.rename, |t, _| { t.focus = Some(Fid::Rename); }, ui, false),
+            Fid::Find => wire_input(el, cx, |t| &mut t.find_in, |t, _| { t.focus = Some(Fid::Find); }, ui, false),
         }
     }
-    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename, Fid::Gen => &self.gen } }
+    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename, Fid::Gen => &self.gen, Fid::Find => &self.find_in } }
     fn rail(&mut self, s: Side, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
         let (i, t) = if s == Side::Left { (ic::CHEVRON_RIGHT, "Show the files panel") } else { (ic::CHEVRON_LEFT, "Show the review panel") };
@@ -1014,9 +1099,14 @@ impl View {
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
         let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).text_size(fsz).text_color(p.fg);
         let hx = self.hx; let hxt = self.hx_text.clone();
-        let code = |rl: &RLine| -> gpui::Div {
+        let found = self.hits_in_row(ix);
+        let code = |rl: &RLine, part: usize| -> gpui::Div {
             let w = rl.line.text.chars().count() as f32 * fsz_f * 0.6; if w > hxt.get() { hxt.set(w); }
-            div().flex_1().min_w_0().h_full().overflow_hidden().child(div().flex_none().relative().left(px(-hx)).whitespace_nowrap().child(StyledText::new(SharedString::from(rl.line.text.clone())).with_highlights(rl.runs.clone())))
+            let mut runs = rl.runs.clone();
+            let extra: Vec<(Range<usize>, HighlightStyle)> = found.iter().filter(|h| h.0 == part && h.1.end <= rl.line.text.len())
+                .map(|h| (h.1.clone(), HighlightStyle { background_color: Some(if h.2 { p.accent.opacity(0.8) } else { p.warn.opacity(0.5) }), color: Some(p.fg), ..Default::default() })).collect();
+            if !extra.is_empty() { runs = gpui::combine_highlights(runs, extra).collect(); }
+            div().flex_1().min_w_0().h_full().overflow_hidden().child(div().flex_none().relative().left(px(-hx)).whitespace_nowrap().child(StyledText::new(SharedString::from(rl.line.text.clone())).with_highlights(runs)))
         };
         let cell = |side: Option<&RLine>, left: bool| -> gpui::Div {
             let Some(rl) = side else { return div().flex_1().h_full().bg(if selected { p.accent.opacity(0.22) } else { p.hover.opacity(0.4) }) };
@@ -1026,7 +1116,7 @@ impl View {
             div().flex().items_center().h_full().flex_1().min_w_0().overflow_hidden().bg(if selected { p.accent.opacity(0.28) } else { bg })
                 .child(div().w(px(46.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(no.map(|n| n.to_string()).unwrap_or_default()))
                 .child(div().w(px(20.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
-                .child(code(rl))
+                .child(code(rl, if left { 0 } else { 1 }))
         };
         let marks: Vec<AnyElement> = r.marks.iter().enumerate().map(|(i, m)| {
             let k = m.key.clone(); let range = m.range;
@@ -1064,7 +1154,7 @@ impl View {
                     .when(show_old, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
                     .when(show_new, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))
                     .child(div().w(px(22.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(match l.kind { Kind::Added => "+", Kind::Removed => "−", _ => " " }))
-                    .child(code(rl))
+                    .child(code(rl, 0))
             }
             RowKind::Split(a, b) => base.child(cell(a.as_ref(), true)).child(div().w(px(1.0)).h_full().bg(p.border)).child(cell(b.as_ref(), false)),
         };
@@ -1150,6 +1240,7 @@ impl View {
 
     /// Centre pane: a switch between Overview and Changes (remote reviews only), then the chosen page.
     fn center(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.find_open && self.find_page != self.page { self.recompute_find(); }
         let p = self.pal;
         let tabs = self.info.is_some().then(|| {
             let tab = |id: &'static str, label: &'static str, i: ic::Icon, on: bool, to: Page, cx: &mut Context<Self>| div().id(id).flex().items_center().gap_2().px_4().py(px(7.0)).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted })
@@ -1162,7 +1253,8 @@ impl View {
         });
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
         let inner = if self.page == Page::Overview && self.info.is_some() { self.overview_page(&drafts, cx) } else { self.code_center(cx).into_any_element() };
-        div().flex().flex_col().flex_1().min_w_0().h_full().children(tabs).child(inner).into_any_element()
+        let find = self.find_bar(cx);
+        div().relative().flex().flex_col().flex_1().min_w_0().h_full().children(tabs).child(inner).children(find).into_any_element()
     }
 
     /// The overview page: what the MR is about and the conversation that is not tied to a line.
@@ -1173,35 +1265,52 @@ impl View {
         let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
         let global_drafts: Vec<&perusal_core::store::Draft> = drafts.iter().filter(|d| d.file.is_none()).collect();
         let me = self.who("You");
-        let card = |who: String, body: &str, tag: Option<AnyElement>| div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
+        let card = |who: String, body: &str, tag: Option<AnyElement>| div().w_full().max_w(px(900.0)).flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
             .child(div().flex().items_center().gap_2().child(kit::avatar(if who == "You" { &me } else { &who }, 24.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
-        let mut list: Vec<AnyElement> = vec![];
+        let mut list: Vec<AnyElement> = vec![]; let mut list_texts: Vec<String> = vec![];
         for t in &global_threads {
-            for (i, (a, b)) in t.comments.iter().enumerate() { list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
+            for (i, (a, b)) in t.comments.iter().enumerate() { list_texts.push(format!("{a} {b}")); list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
         }
         for d in &global_drafts {
-            let id = d.id;
+            let id = d.id; list_texts.push(d.body.clone());
             list.push(card("You".into(), &d.body, Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
                 .child(div().flex().justify_end().child(icon_btn(("ovde", id as usize), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
                     .children(instant.then(|| icon_btn(("ovdp", id as usize), ic::SEND, "Publish this draft now", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.publish_draft(id, cx); cx.notify(); }))))
                     .child(icon_btn(("ovdd", id as usize), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))).into_any_element());
         }
         let state = model::norm_state(&info.state); let dot = match state.as_str() { "merged" => p.ai, "closed" => p.danger, _ => p.success };
-        let page = div().id("overview").flex_1().min_h_0().overflow_y_scroll().child(div().flex().flex_col().gap_4().max_w(px(900.0)).mx_auto().px_6().pt_6().pb(px(100.0))
-            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(info.title.clone()))
-            .child(div().flex().flex_wrap().items_center().gap_3().text_sm().text_color(p.muted)
+        // Ctrl+F on this page: one search text per section, in drawing order (title, meta, description, header, [empty hint], comments..., footer)
+        let first_list = 4 + usize::from(list.is_empty());
+        if self.find_open {
+            let q = self.find_in.f.text.clone();
+            let mut texts: Vec<String> = vec![info.title.clone(), String::new(), info.description.clone(), String::new()];
+            if list.is_empty() { texts.push(String::new()); } texts.extend(list_texts.iter().cloned());
+            let mut hits = vec![];
+            if !q.is_empty() { for (ix, t) in texts.iter().enumerate() { for range in perusal_app::find::find_all(t, &q) { hits.push(Hit { row: ix, part: 0, range }); } } }
+            self.find_page = Page::Overview; self.find_hits = hits; if self.find_cur >= self.find_hits.len() { self.find_cur = 0; }
+        }
+        let tint = |ix: usize| -> Option<gpui::Hsla> {
+            if !self.find_open || self.page != Page::Overview { return None; }
+            let any = self.find_hits.iter().any(|h| h.row == ix); if !any { return None; }
+            Some(p.warn.opacity(if self.find_hits.get(self.find_cur).map(|h| h.row == ix).unwrap_or(false) { 0.35 } else { 0.16 }))
+        };
+        let list: Vec<AnyElement> = list.into_iter().enumerate().map(|(i, el)| match tint(first_list + i) { Some(c) => div().w_full().max_w(px(900.0)).rounded_md().bg(c).child(el).into_any_element(), None => el }).collect();
+        let sec = |el: gpui::Div| el.w_full().max_w(px(900.0));
+        let page = div().id("overview").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.ov_scroll).flex().flex_col().items_center().gap_4().px_6().pt_6().pb(px(100.0))
+            .child(sec(div().text_2xl().font_weight(FontWeight::SEMIBOLD).when_some(tint(0), |d, c| d.bg(c)).child(info.title.clone())))
+            .child(sec(div().flex().flex_wrap().items_center().gap_3().text_sm().text_color(p.muted)
                 .child(badge(match state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15))).child(div().flex().items_center().gap_2().child(kit::avatar(&info.author, 22.0)).child(format!("by {}", info.author)))
                 .children((!info.assignees.is_empty()).then(|| div().flex().items_center().gap_1().child(div().text_xs().child("Assigned")).children(info.assignees.iter().map(|a| div().flex().items_center().gap_1().child(kit::avatar(&a.login, 20.0)).child(a.login.clone())))))
                 .children((!info.reviewers.is_empty()).then(|| div().flex().items_center().gap_1().child(div().text_xs().child("Reviewers")).children(info.reviewers.iter().map(|a| div().flex().items_center().gap_1().child(kit::avatar(&a.login, 20.0)).child(a.login.clone())))))
-                .when(!info.source_ref.is_empty(), |d| d.child(div().flex().items_center().gap_1().font_family(mono.clone()).child(info.source_ref.clone()).child(icon(ic::ARROW_FORWARD, 14.0, p.muted)).child(info.base_ref.clone()))))
-            .child(div().flex().flex_col().gap_2().p_4().rounded_md().border_1().border_color(p.border).bg(p.surface)
+                .when(!info.source_ref.is_empty(), |d| d.child(div().flex().items_center().gap_1().font_family(mono.clone()).child(info.source_ref.clone()).child(icon(ic::ARROW_FORWARD, 14.0, p.muted)).child(info.base_ref.clone())))))
+            .child(sec(div().flex().flex_col().gap_2().p_4().rounded_md().border_1().border_color(p.border).bg(p.surface).when_some(tint(2), |d, c| d.bg(c))
                 .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("Description"))
-                .child(if info.description.trim().is_empty() { div().text_color(p.muted).child("No description.").into_any_element() } else { markdown_view(&markdown::parse(&info.description), &p, &mono).into_any_element() }))
-            .child(div().flex().items_center().justify_between().child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child("Conversation")).child(badge(format!("{}", list.len()), p.muted, p.hover)))
-                .child(icon_text_btn("ov-add", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); }))))
-            .when(list.is_empty(), |d| d.child(div().text_sm().text_color(p.muted).child("No general comments yet.")))
+                .child(if info.description.trim().is_empty() { div().text_color(p.muted).child("No description.").into_any_element() } else { markdown_view(&markdown::parse(&info.description), &p, &mono).into_any_element() })))
+            .child(sec(div().flex().items_center().justify_between().child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child("Conversation")).child(badge(format!("{}", list.len()), p.muted, p.hover)))
+                .child(icon_text_btn("ov-add", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))))
+            .when(list.is_empty(), |d| d.child(sec(div().text_sm().text_color(p.muted).child("No general comments yet."))))
             .children(list)
-            .child(div().text_xs().text_color(p.muted).child("Open Changes (O) to review the files. Comments on specific lines are in the diff."))).into_any_element();
+            .child(sec(div().text_xs().text_color(p.muted).child("Open Changes (O) to review the files. Comments on specific lines are in the diff."))).into_any_element();
         let bar = div().absolute().bottom(px(16.0)).left_0().right_0().flex().justify_center().child(
             div().flex().items_center().gap_2().px_3().py_2().rounded_lg().bg(p.surface).border_1().border_color(p.border).shadow_lg()
                 .child(icon_text_btn("ov-code", ic::DIFFERENCE, "Review the changes", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.page = Page::Code; cx.notify(); })))
@@ -1265,7 +1374,7 @@ impl View {
                         let n = (this.hx - dx).clamp(0.0, max); if n != this.hx { this.hx = n; cx.notify(); }
                     }
                 }))
-                .child(list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| this.render_row(ix, cx))).size_full()).into_any_element()
+                .child(list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| { let el = this.render_row(ix, cx); match this.row_tint(ix) { Some(c) => div().w_full().bg(c).child(el).into_any_element(), None => el } })).size_full()).into_any_element()
         };
         let scrollbar = if self.md.is_none() { self.scrollbar(cx) } else { None };
         let hscrollbar = self.hscrollbar(cx);

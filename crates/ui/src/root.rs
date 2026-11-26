@@ -15,6 +15,8 @@ use perusal_providers::{RemoteMr, Role, StateFilter};
 pub enum Initial { Home, Local(String, String, Option<String>), Url(String) }
 
 #[derive(Clone, Copy, PartialEq)]
+enum CloseChoice { Cancel, Submit, Keep, Discard }
+#[derive(Clone, Copy, PartialEq)]
 enum HTab { Recent, Mine }
 #[derive(Clone, Copy, PartialEq)]
 enum OTab { Url, Local, Browse }
@@ -25,6 +27,20 @@ enum Remote { All, Local, GitHub, GitLab }
 #[derive(Clone, Copy, PartialEq)]
 enum St { All, Open, Merged, Closed }
 
+/// Payload of a dragged tab (its position and title, for the drag preview).
+#[derive(Clone)]
+struct DraggedTab { from: usize, title: SharedString, pal: Pal }
+struct DragTab { t: DraggedTab }
+impl gpui::Render for DragTab {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.t.pal;
+        div().px_3().h(px(30.0)).flex().items_center().rounded_md().border_1().border_color(p.accent).bg(p.surface).text_sm().font_weight(FontWeight::MEDIUM).text_color(p.fg).shadow_lg().child(self.t.title.clone())
+    }
+}
+
+/// A pending "leave this review?" question. `quit` means the window is closing and the next unfinished tab is asked after this one.
+struct CloseReq { view: gpui::EntityId, quit: bool }
+
 struct TabItem { key: String, title: String, ci: String, view: Entity<View>, _sub: Subscription }
 
 pub struct Root {
@@ -33,7 +49,7 @@ pub struct Root {
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>, r_search: Input, m_search: Input,
     recent: Vec<RecentRow>, r_remote: Remote, r_state: St,
-    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
+    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, close_req: Option<CloseReq>, mine_saved: perusal_app::mine::Saved, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
     mrs: Vec<(u64, String, String)>, busy: bool, token_host: Option<String>, retry_url: Option<String>, msg: Option<(NKind, String)>,
 }
 
@@ -45,8 +61,9 @@ impl Root {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut r = Root { decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None, r_search: Input::new(""), m_search: Input::new(""),
-            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
+            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, close_req: None, mine_saved: perusal_app::mine::Saved::default(), mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
+        r.restore_mine();
         r.refresh_recent();
         if r.settings.home_tab.start(r.recent.len()) == perusal_app::settings::HomeTab::Mine { r.htab = HTab::Mine; r.load_mine(cx); }
         // repaint when a background avatar download finishes
@@ -58,6 +75,23 @@ impl Root {
         }
         if !r.settings.onboarded { r.open_settings(true, cx); }
         r
+    }
+    /// Loads the remembered My reviews filters.
+    fn restore_mine(&mut self) {
+        let s = model::load_mine_state();
+        self.mine_remote = match s.remote.as_str() { "github" => Remote::GitHub, "gitlab" => Remote::GitLab, _ => Remote::All };
+        self.mine_state = match s.state.as_str() { "merged" => StateFilter::Merged, "closed" => StateFilter::Closed, "all" => StateFilter::All, _ => StateFilter::Open };
+        self.mine_role = if s.reviewer { Role::ReviewRequested } else { Role::Reviewable };
+        self.mine_sel = s.sel(); self.m_search.f.set(&s.query); self.mine_saved = s;
+    }
+    /// Writes the My reviews filters when they changed (called every frame; cheap compare).
+    fn sync_mine_state(&mut self) {
+        let mut s = perusal_app::mine::Saved {
+            remote: match self.mine_remote { Remote::GitHub => "github", Remote::GitLab => "gitlab", _ => "all" }.into(),
+            state: match self.mine_state { StateFilter::Merged => "merged", StateFilter::Closed => "closed", StateFilter::All => "all", StateFilter::Open => "open" }.into(),
+            reviewer: self.mine_role == Role::ReviewRequested, query: self.m_search.f.text.clone(), ..Default::default() };
+        s.set_sel(&self.mine_sel);
+        if s != self.mine_saved { model::save_mine_state(&s); self.mine_saved = s; }
     }
     fn refresh_recent(&mut self) { if let Ok(s) = Store::open(&model::db_path()) { self.recent = s.recent_rows().unwrap_or_default(); } }
     fn toast(&mut self, kind: NKind, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -108,6 +142,69 @@ impl Root {
             Err(OpenErr::Msg(m)) => self.say(NKind::Error, m),
         }
         cx.notify();
+    }
+    fn tab_index(&self, id: gpui::EntityId) -> Option<usize> { self.tabs.iter().position(|t| t.view.entity_id() == id) }
+    /// Closes a tab, first asking what to do with the review when leaving would lose work.
+    fn request_close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get(i) else { return };
+        if t.view.read(cx).unfinished().is_some() { self.close_req = Some(CloseReq { view: t.view.entity_id(), quit: false }); self.active = Some(i); cx.notify(); }
+        else { self.close_tab(i, cx); }
+    }
+    /// Called when the window is asked to close: true when it may close now, false while a question about an unfinished review is open.
+    fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.tabs.iter().position(|t| t.view.read(cx).unfinished().is_some()) {
+            None => true,
+            Some(i) => { self.close_req = Some(CloseReq { view: self.tabs[i].view.entity_id(), quit: true }); self.active = Some(i); cx.notify(); false }
+        }
+    }
+    /// Moves on after a choice: when quitting, ask about the next unfinished review, otherwise leave.
+    fn after_close_choice(&mut self, quit: bool, cx: &mut Context<Self>) {
+        if !quit { return; }
+        if self.request_quit(cx) { cx.quit(); }
+    }
+    fn resolve_close(&mut self, choice: CloseChoice, cx: &mut Context<Self>) {
+        let Some(req) = self.close_req.take() else { return };
+        let Some(i) = self.tab_index(req.view) else { cx.notify(); return };
+        match choice {
+            CloseChoice::Cancel => {}
+            CloseChoice::Submit => { self.active = Some(i); let v = self.tabs[i].view.clone(); v.update(cx, |v, cx| v.begin_finish(cx)); }
+            CloseChoice::Keep => { self.close_tab(i, cx); self.after_close_choice(req.quit, cx); }
+            CloseChoice::Discard => {
+                let id = self.tabs[i].view.read(cx).review_id();
+                if let Ok(s) = Store::open(&model::db_path()) { let _ = s.discard(id); }
+                self.close_tab(i, cx); self.after_close_choice(req.quit, cx);
+            }
+        }
+        cx.notify();
+    }
+    /// The "leave this review?" dialog.
+    fn close_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let req = self.close_req.as_ref()?; let i = self.tab_index(req.view)?; let p = self.pal;
+        let v = self.tabs[i].view.read(cx); let (drafts, viewed, total) = v.unfinished()?; let remote = v.is_remote();
+        let title = self.tabs[i].title.clone();
+        let mut lines = vec![];
+        if drafts > 0 { lines.push(format!("{drafts} comment draft{} not posted", if drafts == 1 { "" } else { "s" })); }
+        if viewed < total { lines.push(format!("{viewed} of {total} files viewed")); }
+        let hint = if self.close_req.as_ref().map(|r| r.quit).unwrap_or(false) { "Perusal is closing." } else { "" };
+        Some(deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.55)).occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .child(div().flex().flex_col().gap_3().w(px(560.0)).p_5().rounded_lg().text_color(p.fg).font_family(self.fonts.ui.clone()).text_size(px(14.0)).border_1().border_color(p.border).bg(p.surface).shadow_lg()
+                .child(div().flex().items_center().gap_2().child(icon(ic::WARNING, 22.0, p.warn)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("You have not finished this review")))
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(title))
+                .child(div().flex().flex_col().gap_1().text_sm().text_color(p.muted).children(lines.into_iter().map(|l| div().child(format!("• {l}")))).children((!hint.is_empty()).then(|| div().child(hint))))
+                .child(div().text_xs().text_color(p.muted).child("Keep for later saves everything on this computer and lists the review under Recent reviews."))
+                .child(div().flex().flex_wrap().justify_end().gap_2()
+                    .child(icon_text_btn("cl-cancel", ic::CLOSE, "Cancel", Btn::Ghost, &p).on_click(cx.listener(|t, _, _, cx| t.resolve_close(CloseChoice::Cancel, cx))))
+                    .child(icon_text_btn("cl-discard", ic::DELETE, "Discard", Btn::Secondary, &p).on_click(cx.listener(|t, _, _, cx| t.resolve_close(CloseChoice::Discard, cx))))
+                    .child(icon_text_btn("cl-keep", ic::BOOKMARK_BORDER, "Keep for later", Btn::Secondary, &p).on_click(cx.listener(|t, _, _, cx| t.resolve_close(CloseChoice::Keep, cx))))
+                    .child(icon_text_btn("cl-submit", ic::SEND, if remote { "Submit" } else { "Finish" }, Btn::Primary, &p).on_click(cx.listener(|t, _, _, cx| t.resolve_close(CloseChoice::Submit, cx)))))))
+            .with_priority(60).into_any_element())
+    }
+    /// Drag-and-drop: moves tab `from` to position `to`.
+    fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() { return; }
+        let t = self.tabs.remove(from); self.tabs.insert(to, t);
+        self.active = perusal_app::tabs::reordered_active(self.active, from, to); cx.notify();
     }
     fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         if i >= self.tabs.len() { return; }
@@ -248,9 +345,12 @@ impl Root {
             let ci = kit::ci_badge(&t.ci, &p).map(|_| { let c = match t.ci.as_str() { "passed" => p.success, "failed" => p.danger, "running" => p.warn, _ => p.muted }; div().size(px(8.0)).rounded_full().bg(c) });
             div().id(("tab", i)).group("tab").flex().items_center().gap_2().pl_3().pr_1().h(px(36.0)).max_w(px(240.0)).min_w(px(110.0)).cursor_pointer().border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).bg(if on { p.bg } else { gpui::transparent_black() }).hover(move |s| s.bg(p.hover))
                 .on_click(cx.listener(move |this, _, _, cx| { this.active = Some(i); cx.notify(); }))
-                .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| { this.close_tab(i, cx); cx.stop_propagation(); }))
+                .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| { this.request_close_tab(i, cx); cx.stop_propagation(); }))
+                .on_drag(DraggedTab { from: i, title: t.title.clone().into(), pal: p }, |d, _, _, cx| cx.new(|_| DragTab { t: d.clone() }))
+                .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(p.accent.opacity(0.22)))
+                .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| this.move_tab(d.from, i, cx)))
                 .children(ci).child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).child(t.title.clone()))
-                .child(icon_btn(("tabx", i), ic::CLOSE, "Close this tab (Ctrl+W)", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.close_tab(i, cx); cx.stop_propagation(); })))
+                .child(icon_btn(("tabx", i), ic::CLOSE, "Close this tab (Ctrl+W)", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.request_close_tab(i, cx); cx.stop_propagation(); })))
         }).collect();
         let custom = self.settings.custom_titlebar;
         let max = window.is_maximized();
@@ -265,7 +365,9 @@ impl Root {
         div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(drag)
             .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |w| w.minimize_window()))
                 .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |w| w.zoom_window()))
-                .child(ctl("win-close", ic::CLOSE, "Close", true, cx, |w| w.remove_window())))
+                .child(kit::tip(div().id("win-close").flex().items_center().justify_center().w(px(46.0)).h(px(36.0)).cursor_pointer().hover(|x| x.bg(gpui::rgb(0xe81123))).child(icon(ic::CLOSE, 16.0, p.fg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, w, cx| { if this.request_quit(cx) { w.remove_window(); } cx.notify(); })), "Close", &p)))
     }
 
     fn recent_filtered(&self) -> Vec<RecentRow> {
@@ -485,22 +587,25 @@ impl Render for Root {
         let p = self.pal;
         let decor: WindowDecorations = if self.settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server };
         if self.decor != decor { self.decor = decor; w.request_decorations(decor); }
+        self.sync_mine_state();
         let resizable = self.settings.custom_titlebar && !w.is_maximized() && !w.is_fullscreen();
         let strip = self.tab_strip(w, cx);
         let body = match self.active.and_then(|i| self.tabs.get(i)) { Some(t) => div().flex().flex_col().flex_1().min_h_0().child(t.view.clone()).into_any_element(), None => self.render_home(cx).into_any_element() };
         let toasts = self.toast_stack(cx);
         let settings = self.settings_view.clone();
+        let close_modal = self.close_modal(cx);
         div().relative().size_full().flex().flex_col().bg(p.bg).font_family(self.fonts.ui.clone()).text_size(px(14.0)).track_focus(&self.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { if this.mine_dd.is_some() { this.mine_dd = None; if this.hf == Some(Hf::DSearch) { this.hf = None; } cx.notify(); }
                 if this.hf.is_some() { if this.renaming.is_some() { this.commit_rename(cx); } this.hf = None; cx.notify(); } }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 let ks = &ev.keystroke; let ctrl = ks.modifiers.control || ks.modifiers.platform;
+                if this.close_req.is_some() { if ks.key == "escape" { this.resolve_close(CloseChoice::Cancel, cx); } return; }
                 if let Some(sv) = this.settings_view.clone() { sv.update(cx, |v, cx| v.key(ev, cx)); return; }
                 if ctrl && ks.key == "tab" { this.cycle(if ks.modifiers.shift { -1 } else { 1 }, cx); return; }
-                if ctrl && ks.key == "w" { if let Some(a) = this.active { this.close_tab(a, cx); } return; }
+                if ctrl && ks.key == "w" { if let Some(a) = this.active { this.request_close_tab(a, cx); } return; }
                 if let Some(t) = this.active.and_then(|i| this.tabs.get(i)) { let v = t.view.clone(); v.update(cx, |v, cx| v.key(ev, cx)); } else { this.home_key(ev, cx); }
             }))
-            .child(strip).child(body).children(settings).children(toasts)
+            .child(strip).child(body).children(settings).children(close_modal).children(toasts)
             .when(resizable, |d| {
                 let edge = |id: &'static str, e: ResizeEdge, c: CursorStyle| div().id(id).absolute().cursor(c).on_mouse_down(MouseButton::Left, move |_, w, cx| { w.start_window_resize(e); cx.stop_propagation(); });
                 let t = px(5.0); let k = px(12.0);
@@ -527,6 +632,8 @@ pub fn run(initial: Initial) {
             window_decorations: Some(if custom { WindowDecorations::Client } else { WindowDecorations::Server }),
             icon: kit::window_icon(), titlebar: Some(TitlebarOptions { title: Some("Perusal".into()), appears_transparent: true, ..Default::default() }), ..Default::default() }, move |window, cx| {
             let root = cx.new(|cx| Root::new(initial, fonts, cx));
+            let r2 = root.clone();
+            window.on_window_should_close(cx, move |_, cx| r2.update(cx, |r, cx| r.request_quit(cx)));
             window.focus(&root.read(cx).focus.clone(), cx);
             root
         }).unwrap();

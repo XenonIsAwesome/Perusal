@@ -44,6 +44,9 @@ pub fn prompts() -> perusal_agents::Prompts {
     ONCE.call_once(|| perusal_agents::ensure_prompt_files(&prompts_dir()));
     perusal_agents::Prompts::new(prompts_dir())
 }
+/// My reviews filters, remembered globally.
+pub fn load_mine_state() -> perusal_app::mine::Saved { std::fs::read_to_string(config_dir().join("ui_state.toml")).map(|s| perusal_app::mine::Saved::from_toml(&s)).unwrap_or_default() }
+pub fn save_mine_state(s: &perusal_app::mine::Saved) { let _ = std::fs::create_dir_all(config_dir()); let _ = std::fs::write(config_dir().join("ui_state.toml"), s.to_toml()); }
 pub fn load_settings() -> perusal_app::settings::Settings { std::fs::read_to_string(config_dir().join("settings.toml")).map(|s| perusal_app::settings::Settings::from_toml(&s)).unwrap_or_default() }
 pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::create_dir_all(config_dir()); let _ = std::fs::write(config_dir().join("settings.toml"), s.to_toml()); }
 /// Where the read-only code snapshot for agents lives, per review and head.

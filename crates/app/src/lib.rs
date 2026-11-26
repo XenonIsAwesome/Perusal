@@ -4,6 +4,7 @@ pub mod banner;
 pub mod ci;
 pub mod deeplink;
 pub mod filterbar;
+pub mod find;
 pub mod graph;
 pub mod hosts;
 pub mod events;
