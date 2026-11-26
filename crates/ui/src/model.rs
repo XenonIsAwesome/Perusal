@@ -39,7 +39,7 @@ pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::cre
 /// Where the read-only code snapshot for agents lives, per review and head.
 pub fn snapshot_dir(review: i64, rev: &str) -> PathBuf { data_dir().join("snapshots").join(format!("{review}-{}", rev[..rev.len().min(12)].replace('/', "_"))) }
 pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
-pub fn token_store() -> FileStore { FileStore { dir: config_dir().join("tokens") } }
+pub fn token_store() -> perusal_providers::auth::KeyringStore { perusal_providers::auth::KeyringStore::detect(FileStore { dir: config_dir().join("tokens") }) }
 pub fn token_for(host: &str) -> Option<String> { token_store().get(host).or_else(|| std::env::var("PERUSAL_TOKEN").ok().filter(|t| !t.is_empty())) }
 
 fn provider(r: &MrRef, token: String) -> Result<Box<dyn Provider>, String> {
