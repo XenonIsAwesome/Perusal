@@ -130,6 +130,21 @@ pub fn icon(i: Icon, size: f32, color: Hsla) -> Div {
     div().font_family("Material Icons").text_size(px(size)).line_height(px(size)).size(px(size)).flex().items_center().justify_center().flex_none().text_color(color).child(i.0.to_string())
 }
 
+/// A small circular spinner: a ring of dots that fade in turn, so it reads as spinning.
+pub fn spinner(p: &Pal, size: f32) -> Div {
+    let (c, n) = (p.accent, 8usize); let r = size / 2.0 - 2.0;
+    div().relative().size(px(size)).flex_none().children((0..n).map(|i| {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        div().absolute().left(px(size / 2.0 + r * a.sin() - 1.5)).top(px(size / 2.0 - r * a.cos() - 1.5)).size(px(3.0)).rounded_full().bg(c)
+            .with_animation(("spin", i), Animation::new(Duration::from_millis(900)).repeat(), move |d, t| d.opacity(1.0 - 0.85 * (t - i as f32 / n as f32).rem_euclid(1.0)))
+    }).collect::<Vec<_>>())
+}
+/// A thin indeterminate progress bar along the bottom edge of its (relatively positioned) parent.
+pub fn indeterminate_bar(p: &Pal) -> Div {
+    div().absolute().bottom_0().left_0().right_0().h(px(2.0)).overflow_hidden()
+        .child(div().absolute().top_0().h_full().w(gpui::relative(0.3)).bg(p.accent).with_animation("indet", Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.left(gpui::relative(t * 1.3 - 0.3))))
+}
+
 /// Small copy button for error messages: puts the whole message on the clipboard.
 pub fn copy_btn(id: impl Into<gpui::ElementId>, text: String, p: &Pal) -> Stateful<Div> {
     icon_btn(id, crate::icons::CONTENT_COPY, "Copy this message", Btn::Ghost, p).on_click(move |_, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); cx.stop_propagation(); })

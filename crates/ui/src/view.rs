@@ -117,14 +117,15 @@ impl View {
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        View { refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        let mut v = View { refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
-            verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
+            verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m };
+        v.report_moved(); v
     }
     pub fn key_id(&self) -> String { self.m.remote.clone().map(|u| format!("remote:{u}")).unwrap_or_else(|| format!("local:{}#{}", self.m.repo.display(), self.m.branch)) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
@@ -526,6 +527,16 @@ impl View {
         match st { Some(Ok(s)) => self.apply_remote(s, cx), Some(Err(e)) => self.note(NKind::Error, format!("Could not refresh the request from the host: {e}"), None), None => {} }
         self.flush(cx); cx.notify();
     }
+    /// Tells the user what following a newer head changed (viewed marks dropped, drafts that could not follow their lines).
+    fn report_moved(&mut self) {
+        let Some(mv) = self.m.moved.take() else { return };
+        if !mv.unmarked.is_empty() {
+            let (n, one) = (mv.unmarked.len(), mv.unmarked.len() == 1);
+            let names = mv.unmarked.iter().take(5).cloned().collect::<Vec<_>>().join(", ") + if n > 5 { ", …" } else { "" };
+            self.note(NKind::Info, format!("{n} viewed file{} changed since you reviewed {}, so {} unmarked: {names}", if one { "" } else { "s" }, if one { "it" } else { "them" }, if one { "it was" } else { "they were" }), None);
+        }
+        if mv.lost > 0 { self.note(NKind::Warning, format!("{} draft{} could not follow {} lines to the new commits and keep the old line numbers.", mv.lost, if mv.lost == 1 { "" } else { "s" }, if mv.lost == 1 { "its" } else { "their" }), None); }
+    }
     /// Swaps in a freshly opened model of the same review, carrying over the view settings, filter and sort; drafts follow their lines to the new head.
     fn adopt_model(&mut self, mut new: Model) {
         let tip = |m: &Model| m.graph.rows.iter().find(|r| r.in_mr).map(|r| r.sha.clone()).unwrap_or_default();
@@ -533,19 +544,27 @@ impl View {
         let (old_head, new_head) = (self.m.branch.clone(), new.branch.clone());
         new.vm.dir_order = self.m.vm.dir_order; new.vm.grouping = self.m.vm.grouping; new.vm.rules = self.m.vm.rules.clone(); new.vm.mark_on_next = self.m.vm.mark_on_next; new.vm.hide_whitespace = self.m.vm.hide_whitespace;
         let (f, s) = (self.m.vm.filter.clone(), self.m.vm.sort.clone()); let _ = new.vm.set_filter(&f); let _ = new.vm.set_sort(&s);
-        let mut lost = 0;
-        if new.mr.is_some() && old_head != new_head {
-            let repo = new.repo.clone();
-            let content = |file: &str, old: bool| perusal_gitops::show(&repo, if old { &old_head } else { &new_head }, file);
-            lost = new.store.move_head(new.vm.review, &new_head, &content).map(|l| l.len()).unwrap_or(0);
-        }
+        // a remote model already followed the new head when it was opened (viewed marks of changed files dropped, drafts moved); a local branch is handled here
+        let moved = new.moved.take();
+        if new.mr.is_none() {
+            let new_tip_now = tip(&new);
+            let (o_head, n_head) = (if old_tip.is_empty() { old_head.clone() } else { old_tip.clone() }, if new_tip_now.is_empty() { new_head.clone() } else { new_tip_now });
+            let mut unmarked: Vec<String> = vec![];
+            if o_head != n_head || self.m.base_sha != new.base_sha {
+                for f in self.m.vm.files.iter().filter(|f| f.viewed) {
+                    if perusal_gitops::file_changed_between(&new.repo, &self.m.base_sha, &o_head, &new.base_sha, &n_head, &f.path) { unmarked.push(f.path.clone()); }
+                }
+            }
+            for path in &unmarked { if let Some(i) = new.vm.files.iter().position(|f| &f.path == path) { new.vm.set_viewed(&new.store, i, false); } }
+            new.moved = Some(model::Moved { unmarked, lost: 0 });
+        } else { new.moved = moved; }
         new.vm.sync_review_state(&new.store); let _ = new.vm.refresh();
         let (new_tip, new_n) = (tip(&new), new.graph.rows.iter().filter(|r| r.in_mr).count());
         self.m = new; self.snap.head = self.m.branch.clone();
         self.collapsed_files.clear(); self.forced.clear(); self.multi.clear(); self.clear_selection(); self.reload();
+        self.report_moved();
         if old_tip != new_tip {
-            self.note(NKind::Success, format!("Refreshed: now {new_n} commit{} (was {old_n}). Drafts and viewed marks were kept.", if new_n == 1 { "" } else { "s" }), None);
-            if lost > 0 { self.note(NKind::Warning, format!("{lost} draft{} could not follow {} lines to the new commits and keep the old line numbers.", if lost == 1 { "" } else { "s" }, if lost == 1 { "its" } else { "their" }), None); }
+            self.note(NKind::Success, format!("Refreshed: now {new_n} commit{} (was {old_n}). Drafts were kept.", if new_n == 1 { "" } else { "s" }), None);
         } else { self.note(NKind::Info, "Already up to date.", None); }
     }
     fn apply_remote(&mut self, s: model::RemoteState, cx: &mut Context<Self>) {
@@ -961,7 +980,7 @@ impl View {
         };
         let ci = ci_badge(&self.ci, &p).map(|b| b.on_click(cx.listener(|this, _, _, _| { if let Some(u) = this.ci_url() { let _ = model::open_url(&u); } })));
         let local_mr = self.local_mr.clone().map(|u| icon_text_btn("open-mr", ic::OPEN_IN_NEW, "Open the PR", Btn::Secondary, &p).on_click(cx.listener(move |_, _, _, _| { let _ = model::open_url(&u); })));
-        div().flex().items_center().gap_3().px_4().h(px(52.0)).bg(p.surface).border_b_1().border_color(p.border)
+        div().relative().flex().items_center().gap_3().px_4().h(px(52.0)).bg(p.surface).border_b_1().border_color(p.border)
             .child(icon_btn("home", ic::HOME, "Back to Home (Esc)", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::Home))))
             .child(title)
             .children(self.m.remote.clone().map(|u| { let label = u.trim_start_matches("https://").to_string(); let hv = p.hover; let t = tip(div().id("mr-link").flex().items_center().gap_1().px_2().py(px(1.0)).rounded_full().text_xs().border_1().border_color(p.border).text_color(p.accent).cursor_pointer().hover(move |x| x.bg(hv)).child(label).child(icon(ic::OPEN_IN_NEW, 12.0, p.accent)), "Open on the host in your browser", &p); t.on_click(cx.listener(move |_, _, _, _| { let _ = model::open_url(&u); })) }))
@@ -969,8 +988,12 @@ impl View {
             .children(ci).children(local_mr)
             .child(div().flex_1())
             .when(ndrafts > 0, |d| d.child(badge(format!("{ndrafts} draft{}", if ndrafts == 1 { "" } else { "s" }), p.accent, p.accent.opacity(0.15))))
-            .child({ let b = icon_btn("refresh-mr", ic::REFRESH, if self.refreshing { "Refreshing…" } else if self.m.mr.is_some() { "Refresh: fetch new commits, CI and comments (R)" } else { "Refresh: re-read the branch (R)" }, Btn::Secondary, &p);
-                if self.refreshing { b.opacity(0.5) } else { b.on_click(cx.listener(|this, _, _, cx| { this.refresh(cx); })) } })
+            .child(if self.refreshing {
+                tip(div().id("refresh-mr").size(px(30.0)).flex().items_center().justify_center().flex_none().rounded_md().border_1().border_color(p.accent).bg(p.surface).child(kit::spinner(&p, 18.0)), "Refreshing…", &p)
+            } else {
+                icon_btn("refresh-mr", ic::REFRESH, if self.m.mr.is_some() { "Refresh: fetch new commits, CI and comments (R)" } else { "Refresh: re-read the branch (R)" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.refresh(cx); }))
+            })
+            .children(self.refreshing.then(|| kit::indeterminate_bar(&p)))
             .child(if reviewing { icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element() }
                 else { icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element() })
             .child(icon_btn("settings", ic::SETTINGS, "Settings (s)", Btn::Secondary, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings))))

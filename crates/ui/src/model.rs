@@ -5,6 +5,11 @@ use perusal_app::settings::HostCfg;
 use perusal_providers::{auth::{FileStore, TokenStore}, github::GitHub, gitlab::GitLab, Ci, Kind, MrRef, Provider, RemoteMr, Role, StateFilter, Thread};
 use std::path::{Path, PathBuf};
 
+/// What opening an updated request changed in the saved review: files whose viewed mark was dropped because they changed, and drafts
+/// that could not follow their lines to the new head.
+#[derive(Debug, Default, Clone)]
+pub struct Moved { pub unmarked: Vec<String>, pub lost: usize }
+
 pub struct Model {
     pub repo: PathBuf, pub base_sha: String, pub branch: String, pub store: Store, pub vm: ReviewVm, pub graph: GraphVm, pub title: String,
     pub remote: Option<String>,
@@ -16,6 +21,8 @@ pub struct Model {
     pub mr_state: String,
     /// Host metadata of the MR when it was opened (description for the overview).
     pub info: Option<perusal_providers::MrInfo>,
+    /// Set when this open found the request on a newer head than the saved review.
+    pub moved: Option<Moved>,
 }
 
 #[derive(Debug)]
@@ -80,7 +87,27 @@ impl Model {
         let title = store.review_title(review).ok().filter(|t| !t.is_empty()).unwrap_or(title);
         let vm = ReviewVm::new(&store, review, files);
         let graph = GraphVm::load(&repo, &base_sha, &rev, 6)?;
-        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new(), info: None })
+        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new(), info: None, moved: None })
+    }
+
+    /// The saved review is pinned to the head it was last opened on. When the request has a newer head: drop the viewed mark of every file
+    /// that differs between the two heads (changed content is not reviewed content) and move drafts along with their lines.
+    fn follow_head(&mut self) {
+        let review = self.vm.review; let new_head = self.branch.clone();
+        let Ok(old) = self.store.pinned_head(review) else { return };
+        if old.is_empty() || old == new_head { return; }
+        let mut unmarked = vec![];
+        for path in self.store.viewed(review).unwrap_or_default() {
+            if perusal_gitops::show(&self.repo, &old, &path) != perusal_gitops::show(&self.repo, &new_head, &path) {
+                match self.vm.files.iter().position(|f| f.path == path) { Some(i) => self.vm.set_viewed(&self.store, i, false), None => { let _ = self.store.set_viewed(review, &path, false); } }
+                unmarked.push(path);
+            }
+        }
+        let repo = self.repo.clone();
+        let content = |f: &str, was_old: bool| perusal_gitops::show(&repo, if was_old { &old } else { &new_head }, f);
+        let lost = self.store.move_head(review, &new_head, &content).map(|l| l.len()).unwrap_or(0);
+        self.vm.sync_review_state(&self.store); let _ = self.vm.refresh();
+        self.moved = Some(Moved { unmarked, lost });
     }
 
     pub fn open_local(repo: &Path, branch: &str, base: Option<&str>) -> Result<Self, OpenErr> {
@@ -110,7 +137,7 @@ impl Model {
         let canon = canonical(&r);
         let mut m = Self::finish(dir, base_sha, head, &format!("remote:{canon}"), info.title.clone(), Some(canon))?;
         crate::avatars::learn_info(&r.kind, &r.host, &info);
-        m.info = Some(info.clone()); m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); Ok(m)
+        m.info = Some(info.clone()); m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); m.follow_head(); Ok(m)
     }
 
     /// Reopens a review from the recent list using its stored key.

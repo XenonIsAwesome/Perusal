@@ -147,12 +147,31 @@ pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> {
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
+/// True when what a review shows for `path` differs between two states of the request: the file at the old and new head, or at the old and
+/// new merge-base (a moved target branch changes the diff too). Used to drop the "viewed" mark of a file that changed under the reviewer.
+pub fn file_changed_between(dir: &Path, old_base: &str, old_head: &str, new_base: &str, new_head: &str, path: &str) -> bool {
+    show(dir, old_head, path) != show(dir, new_head, path) || show(dir, old_base, path) != show(dir, new_base, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test] fn base64_matches_known() { assert_eq!(b64(b"x-access-token:abc"), "eC1hY2Nlc3MtdG9rZW46YWJj"); assert_eq!(b64(b"ab"), "YWI="); assert_eq!(b64(b"a"), "YQ=="); }
     #[test] fn redacts() { assert_eq!(redact("fatal: https://u:tok@host/x.git bad"), "fatal: https://***@host/x.git bad"); }
     #[test] fn refspecs() { assert!(mr_refspec(true, 5).contains("merge-requests/5")); assert!(mr_refspec(false, 5).contains("pull/5")); }
+    #[test] fn detects_files_changed_between_heads() {
+        let d = std::env::temp_dir().join(format!("perusal-fc-{}", std::process::id())); let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap();
+        let g = |a: &[&str]| { git(&d, ["-c", "user.name=t", "-c", "user.email=t@t"].iter().chain(a).copied().collect::<Vec<_>>().as_slice()).unwrap() };
+        g(&["init", "-q", "-b", "main"]); std::fs::write(d.join("keep"), "k").unwrap(); std::fs::write(d.join("edit"), "1").unwrap(); g(&["add", "-A"]); g(&["commit", "-qm", "base"]);
+        let base = g(&["rev-parse", "HEAD"]).trim().to_string();
+        g(&["checkout", "-qb", "pr"]); std::fs::write(d.join("edit"), "2").unwrap(); g(&["commit", "-qam", "one"]); let h1 = g(&["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(d.join("edit"), "3").unwrap(); std::fs::write(d.join("new"), "n").unwrap(); g(&["add", "-A"]); g(&["commit", "-qm", "two"]); let h2 = g(&["rev-parse", "HEAD"]).trim().to_string();
+        assert!(file_changed_between(&d, &base, &h1, &base, &h2, "edit"));   // edited again
+        assert!(!file_changed_between(&d, &base, &h1, &base, &h2, "keep"));  // untouched
+        assert!(file_changed_between(&d, &base, &h1, &base, &h2, "new"));    // appeared
+        assert!(!file_changed_between(&d, &base, &h2, &base, &h2, "edit"));  // same state
+        let _ = std::fs::remove_dir_all(&d);
+    }
     #[test] fn clone_fetch_and_commits() {
         let d = std::env::temp_dir().join(format!("perusal-go-{}", std::process::id())); let _ = std::fs::remove_dir_all(&d);
         let up = d.join("up"); std::fs::create_dir_all(&up).unwrap();
