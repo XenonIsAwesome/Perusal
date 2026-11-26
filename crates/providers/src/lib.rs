@@ -60,9 +60,9 @@ pub struct MrInfo { pub title: String, pub state: String, pub author: String, pu
     #[serde(default)] pub assignees: Vec<Person>,
     #[serde(default)] pub reviewers: Vec<Person> }
 
-/// Why a merge request is in your list.
+/// Why a merge request is in your list. `Reviewable` is every request in a project you can review in (the default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Role { ReviewRequested, Authored, Assigned }
+pub enum Role { ReviewRequested, Authored, Assigned, Reviewable }
 
 /// Which states to list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

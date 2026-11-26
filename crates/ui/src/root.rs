@@ -5,6 +5,7 @@ use crate::model::{self, Model, OpenErr};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::view::{View, ViewEvent};
 use gpui::{CursorStyle, ResizeEdge, TitlebarOptions, WindowDecorations, deferred, div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, SharedString, Subscription, Window, WindowBounds, WindowOptions};
+use perusal_app::mine::{self, Dim, Sel};
 use perusal_app::notify::{Kind as NKind, Toasts};
 use perusal_app::settings::Settings;
 use perusal_app::theme;
@@ -18,7 +19,7 @@ enum HTab { Recent, Mine }
 #[derive(Clone, Copy, PartialEq)]
 enum OTab { Url, Local, Browse }
 #[derive(Clone, Copy, PartialEq)]
-enum Hf { Url, Repo, Branch, Base, Browse, Token, Rename, RSearch, MSearch }
+enum Hf { Url, Repo, Branch, Base, Browse, Token, Rename, RSearch, MSearch, DSearch }
 #[derive(Clone, Copy, PartialEq)]
 enum Remote { All, Local, GitHub, GitLab }
 #[derive(Clone, Copy, PartialEq)]
@@ -32,7 +33,7 @@ pub struct Root {
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>, r_search: Input, m_search: Input,
     recent: Vec<RecentRow>, r_remote: Remote, r_state: St,
-    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_person: Option<String>, mine_label: Option<String>, mine_hide_drafts: bool,
+    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
     mrs: Vec<(u64, String, String)>, busy: bool, token_host: Option<String>, retry_url: Option<String>, msg: Option<(NKind, String)>,
 }
 
@@ -44,7 +45,7 @@ impl Root {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut r = Root { decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None, r_search: Input::new(""), m_search: Input::new(""),
-            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::ReviewRequested, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_person: None, mine_label: None, mine_hide_drafts: false,
+            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
         r.refresh_recent();
         // repaint when a background avatar download finishes
@@ -176,17 +177,17 @@ impl Root {
         self.mine_loading = true; cx.notify();
         let (hosts, role, state) = (self.settings.hosts.clone(), self.mine_role, self.mine_state);
         let task = cx.background_executor().spawn(async move { model::fetch_my_reviews(&hosts, role, state) });
-        cx.spawn(async move |this, cx| { let (l, e) = task.await; let _ = this.update(cx, |t, cx| { t.mine = l; t.mine_errs = e; t.mine_loading = false; cx.notify(); }); }).detach();
+        cx.spawn(async move |this, cx| { let (l, e, me) = task.await; let _ = this.update(cx, |t, cx| { t.mine = l; t.mine_errs = e; t.mine_me = me; t.mine_loading = false; cx.notify(); }); }).detach();
     }
 
     // ---- input plumbing
-    fn inp(&mut self, f: Hf) -> &mut Input { match f { Hf::Url => &mut self.url, Hf::Repo => &mut self.repo, Hf::Branch => &mut self.branch, Hf::Base => &mut self.base, Hf::Browse => &mut self.browse, Hf::Token => &mut self.token, Hf::Rename => &mut self.rename, Hf::RSearch => &mut self.r_search, Hf::MSearch => &mut self.m_search } }
+    fn inp(&mut self, f: Hf) -> &mut Input { match f { Hf::Url => &mut self.url, Hf::Repo => &mut self.repo, Hf::Branch => &mut self.branch, Hf::Base => &mut self.base, Hf::Browse => &mut self.browse, Hf::Token => &mut self.token, Hf::Rename => &mut self.rename, Hf::RSearch => &mut self.r_search, Hf::MSearch => &mut self.m_search, Hf::DSearch => &mut self.dd_search } }
     fn field_ids(&self) -> Vec<Hf> {
         let mut v = match self.otab { OTab::Url => vec![Hf::Url], OTab::Local => vec![Hf::Repo, Hf::Branch, Hf::Base], OTab::Browse => vec![Hf::Browse] };
         if self.token_host.is_some() { v.push(Hf::Token); } v
     }
     fn enter(&mut self, cx: &mut Context<Self>) {
-        match self.hf { Some(Hf::Url) => self.submit_url(cx), Some(Hf::Repo | Hf::Branch | Hf::Base) => self.open_local(cx), Some(Hf::Browse) => self.browse_list(cx), Some(Hf::Token) => self.save_token(cx), Some(Hf::Rename) => self.commit_rename(cx), Some(Hf::RSearch | Hf::MSearch) => { self.hf = None; cx.notify(); } None => {} }
+        match self.hf { Some(Hf::Url) => self.submit_url(cx), Some(Hf::Repo | Hf::Branch | Hf::Base) => self.open_local(cx), Some(Hf::Browse) => self.browse_list(cx), Some(Hf::Token) => self.save_token(cx), Some(Hf::Rename) => self.commit_rename(cx), Some(Hf::RSearch | Hf::MSearch | Hf::DSearch) => { self.hf = None; cx.notify(); } None => {} }
     }
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.renaming.take() { let t = self.rename.f.text.trim().to_string(); if !t.is_empty() { if let Ok(s) = Store::open(&model::db_path()) { let _ = s.rename_review(id, &t); } } self.refresh_recent(); }
@@ -207,14 +208,14 @@ impl Root {
     // ---- UI pieces
     fn finput(&mut self, id: &'static str, f: Hf, label: &'static str, ph: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal; let focused = self.hf == Some(f); let secret = f == Hf::Token; let fam = self.fonts.ui.clone();
-        let inp = match f { Hf::Url => &self.url, Hf::Repo => &self.repo, Hf::Branch => &self.branch, Hf::Base => &self.base, Hf::Browse => &self.browse, Hf::Token => &self.token, Hf::Rename => &self.rename, Hf::RSearch => &self.r_search, Hf::MSearch => &self.m_search };
+        let inp = match f { Hf::Url => &self.url, Hf::Repo => &self.repo, Hf::Branch => &self.branch, Hf::Base => &self.base, Hf::Browse => &self.browse, Hf::Token => &self.token, Hf::Rename => &self.rename, Hf::RSearch => &self.r_search, Hf::MSearch => &self.m_search, Hf::DSearch => &self.dd_search };
         let el = div().id(id).flex().items_center().px_3().py(px(6.0)).min_h(px(32.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).text_color(p.fg).child(input_text(inp, focused, ph, &p, secret, 1));
         let el = match f {
             Hf::Url => wire_input(el, cx, |t| &mut t.url, |t, _| t.hf = Some(Hf::Url), fam, false), Hf::Repo => wire_input(el, cx, |t| &mut t.repo, |t, _| t.hf = Some(Hf::Repo), fam, false),
             Hf::Branch => wire_input(el, cx, |t| &mut t.branch, |t, _| t.hf = Some(Hf::Branch), fam, false), Hf::Base => wire_input(el, cx, |t| &mut t.base, |t, _| t.hf = Some(Hf::Base), fam, false),
             Hf::Browse => wire_input(el, cx, |t| &mut t.browse, |t, _| t.hf = Some(Hf::Browse), fam, false), Hf::Token => wire_input(el, cx, |t| &mut t.token, |t, _| t.hf = Some(Hf::Token), fam, true),
             Hf::Rename => wire_input(el, cx, |t| &mut t.rename, |t, _| t.hf = Some(Hf::Rename), fam, false),
-            Hf::RSearch | Hf::MSearch => el,
+            Hf::RSearch | Hf::MSearch | Hf::DSearch => el,
         };
         div().flex().flex_col().gap_1().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label)).child(el)
     }
@@ -320,15 +321,48 @@ impl Root {
                 .children(rows)).into_any_element()
     }
 
+    /// A multi-select dropdown (author, assignee or label): choices are OR-ed, and only values still present after the other filters are offered.
+    fn multi_dd(&self, d: Dim, name: &'static str, items: &[perusal_app::search::Item], cx: &mut Context<Self>) -> gpui::AnyElement {
+        let p = self.pal; let open = self.mine_dd == Some(d); let fam = self.fonts.ui.clone();
+        let remote = match self.mine_remote { Remote::GitHub => Some("github"), Remote::GitLab => Some("gitlab"), _ => None };
+        let people = d != Dim::Label; let q = self.dd_search.f.text.to_lowercase();
+        let mut opts = mine::options(items, d, remote, &self.mine_sel, &self.m_search.f.text);
+        if people { opts.insert(0, mine::ME.to_string()); }
+        let opts: Vec<String> = opts.into_iter().filter(|o| q.is_empty() || (if o == mine::ME { "me".to_string() } else { o.to_lowercase() }).contains(&q)).collect();
+        let sel = self.mine_sel.set(d).clone();
+        let id = d as usize;
+        let rows: Vec<_> = opts.iter().enumerate().map(|(i, o)| {
+            let on = sel.contains(o); let v = o.clone();
+            let label = if o == mine::ME { "Me".to_string() } else { o.clone() };
+            div().id(("mdd-item", id * 1000 + i)).flex().items_center().gap_2().px_3().py(px(6.0)).cursor_pointer().hover(move |x| x.bg(p.hover)).text_sm()
+                .child(icon(if on { ic::CHECK_BOX } else { ic::CHECK_BOX_OUTLINE_BLANK }, 18.0, if on { p.accent } else { p.muted }))
+                .children(people.then(|| kit::avatar(&if o == mine::ME { self.mine_me.values().next().cloned().unwrap_or_else(|| "me".into()) } else { o.clone() }, 20.0)))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .on_click(cx.listener(move |t, _, _, cx| { t.mine_sel.toggle(d, &v); cx.notify(); }))
+        }).collect();
+        let focused = self.hf == Some(Hf::DSearch);
+        let search = wire_input(div().id(("mdd-search", id)).flex().items_center().gap_2().mx_2().my_1().px_2().py(px(4.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg)
+            .child(icon(ic::SEARCH, 15.0, p.muted)).child(div().flex_1().min_w_0().child(input_text(&self.dd_search, focused, "Filter", &p, false, 1))), cx, |t| &mut t.dd_search, |t, _| t.hf = Some(Hf::DSearch), fam, false);
+        let empty = rows.is_empty();
+        div().relative().child(kit::dd_button(("mdd", id), mine::summary(name, &sel), open, &p).min_w(px(130.0))
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .on_click(cx.listener(move |t, _, _, cx| { if t.mine_dd == Some(d) { t.mine_dd = None; t.hf = None; } else { t.mine_dd = Some(d); t.dd_search.f.clear(); t.hf = Some(Hf::DSearch); } cx.notify(); })))
+            .children(open.then(|| deferred(div().absolute().top(px(36.0)).left_0().w(px(280.0)).flex().flex_col().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .child(search).child(div().id(("mdd-list", id)).max_h(px(300.0)).overflow_y_scroll().children(rows)
+                    .when(empty, |x| x.child(div().px_3().py_2().text_xs().text_color(p.muted).child("Nothing to choose from with the current filters")))))
+                .with_priority(30))).into_any_element()
+    }
+
     fn render_mine(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = self.pal;
         let signed = self.settings.hosts.iter().any(|h| model::token_for(&h.host).is_some());
-        let (person, label_f, hide_drafts) = (self.mine_person.clone(), self.mine_label.clone(), self.mine_hide_drafts);
-        let rows: Vec<_> = self.mine.iter().filter(|m| match self.mine_remote { Remote::All | Remote::Local => true, Remote::GitHub => m.kind == perusal_providers::Kind::GitHub, Remote::GitLab => m.kind == perusal_providers::Kind::GitLab })
-            .filter(|m| !(hide_drafts && m.draft))
-            .filter(|m| person.as_ref().map(|u| mr_people(m).iter().any(|x| x.eq_ignore_ascii_case(u))).unwrap_or(true))
-            .filter(|m| label_f.as_ref().map(|l| m.labels.iter().any(|x| x == l)).unwrap_or(true))
-            .filter(|m| perusal_app::search::matches_item(&self.m_search.f.text, &mr_item(m))).cloned().enumerate().map(|(i, m)| {
+        let sbox = self.search_box("mine-search", Hf::MSearch, "Search text, or author: assignee: label: is:draft", cx);
+        let items: Vec<perusal_app::search::Item> = self.mine.iter().map(|m| mr_item(m, &self.mine_me)).collect();
+        let remote = match self.mine_remote { Remote::GitHub => Some("github"), Remote::GitLab => Some("gitlab"), _ => None };
+        let (sel, query) = (self.mine_sel.clone(), self.m_search.f.text.clone());
+        let rows: Vec<_> = self.mine.iter().zip(&items).filter(|(_, it)| mine::passes(it, remote, &sel, &query, None)).map(|(m, _)| m.clone()).enumerate().map(|(i, m)| {
             let url = m.url.clone(); let dot = self.state_dot(&m.state);
             let when: String = m.updated.chars().take(10).collect();
             let assignees: Vec<_> = m.assignees.iter().take(3).map(|a| kit::avatar(&a.login, 20.0)).collect();
@@ -346,39 +380,23 @@ impl Root {
                 .child(icon(ic::CHEVRON_RIGHT, 18.0, p.muted))
         }).collect();
         let n = rows.len();
-        let sbox = self.search_box("mine-search", Hf::MSearch, "Search text, or author: assignee: reviewer: label: is:draft", cx);
+        let (dd_author, dd_assignee, dd_label) = (self.multi_dd(Dim::Author, "Author", &items, cx), self.multi_dd(Dim::Assignee, "Assignee", &items, cx), self.multi_dd(Dim::Label, "Label", &items, cx));
+        let reviewer_on = self.mine_role == Role::ReviewRequested;
+        let any_sel = !self.mine_sel.is_empty();
         let chips = |this: &Self| div().flex().flex_col().gap_2().px_4().py_2().border_b_1().border_color(p.border)
-            .child(div().flex().flex_wrap().items_center().gap_2()
-                .child(div().text_xs().text_color(p.muted).child("Show"))
-                .children([(Role::ReviewRequested, "To review"), (Role::Authored, "Created by me"), (Role::Assigned, "Assigned to me")].map(|(r, l)| this.chip(("mr", r as usize), l.into(), this.mine_role == r).on_click(cx.listener(move |t, _, _, cx| { t.mine_role = r; t.load_mine(cx); }))))
+            .child(div().flex().flex_wrap().items_center().gap_2().child(dd_author).child(dd_assignee).child(dd_label)
+                .child(this.chip_with("m-rev", Some(icon(if reviewer_on { ic::CHECK_BOX } else { ic::CHECK_BOX_OUTLINE_BLANK }, 16.0, if reviewer_on { p.accent } else { p.muted }).into_any_element()), "Only MRs I'm a reviewer on".into(), reviewer_on)
+                    .on_click(cx.listener(|t, _, _, cx| { t.mine_role = if t.mine_role == Role::ReviewRequested { Role::Reviewable } else { Role::ReviewRequested }; t.load_mine(cx); })))
+                .children(any_sel.then(|| this.chip("m-clear", "Clear filters".into(), false).on_click(cx.listener(|t, _, _, cx| { t.mine_sel = Sel::default(); cx.notify(); }))))
                 .child(div().flex_1()).child(icon_btn("mine-refresh", ic::REFRESH, "Refresh", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.mine_loading = false; this.load_mine(cx); }))))
             .child(div().flex().flex_wrap().items_center().gap_2()
                 .child(div().text_xs().text_color(p.muted).child("Remote"))
                 .children([(Remote::All, "All"), (Remote::GitHub, "GitHub"), (Remote::GitLab, "GitLab")].map(|(r, l)| this.chip(("mrr", r as usize), l.into(), this.mine_remote == r).on_click(cx.listener(move |t, _, _, cx| { t.mine_remote = r; cx.notify(); }))))
                 .child(div().w(px(10.0))).child(div().text_xs().text_color(p.muted).child("State"))
-                .children([(StateFilter::Open, "Open"), (StateFilter::Merged, "Merged"), (StateFilter::Closed, "Closed"), (StateFilter::All, "All")].map(|(s, l)| this.chip(("mrs", s as usize), l.into(), this.mine_state == s).on_click(cx.listener(move |t, _, _, cx| { t.mine_state = s; t.load_mine(cx); })))));
-        let people_chips = |this: &Self| {
-            let mut count: std::collections::BTreeMap<String, usize> = Default::default();
-            for m in &this.mine { for u in mr_people(m) { if !u.is_empty() { *count.entry(u).or_default() += 1; } } }
-            let mut v: Vec<(String, usize)> = count.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0))); v.truncate(8); v
-        };
-        let label_chips = |this: &Self| {
-            let mut count: std::collections::BTreeMap<String, usize> = Default::default();
-            for m in &this.mine { for l in &m.labels { *count.entry(l.clone()).or_default() += 1; } }
-            let mut v: Vec<(String, usize)> = count.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0))); v.truncate(8); v
-        };
-        let (ppl, lbls) = (people_chips(self), label_chips(self));
-        let extra = div().flex().flex_col().gap_2().px_4().pb_2().border_b_1().border_color(p.border)
-            .when(!ppl.is_empty(), |d| d.child(div().flex().flex_wrap().items_center().gap_2().child(div().text_xs().text_color(p.muted).child("Person"))
-                .children(ppl.into_iter().enumerate().map(|(i, (u, _))| { let on = self.mine_person.as_deref() == Some(u.as_str()); let u2 = u.clone();
-                    self.chip_with(("mp", i), Some(kit::avatar(&u, 18.0)), u, on).on_click(cx.listener(move |t, _, _, cx| { t.mine_person = if on { None } else { Some(u2.clone()) }; cx.notify(); })) }))))
-            .child(div().flex().flex_wrap().items_center().gap_2()
-                .children((!lbls.is_empty()).then(|| div().text_xs().text_color(p.muted).child("Label")))
-                .children(lbls.into_iter().enumerate().map(|(i, (l, _))| { let on = self.mine_label.as_deref() == Some(l.as_str()); let l2 = l.clone();
-                    self.chip(("ml", i), l, on).on_click(cx.listener(move |t, _, _, cx| { t.mine_label = if on { None } else { Some(l2.clone()) }; cx.notify(); })) }))
-                .child(self.chip("mhd", "Hide drafts".into(), self.mine_hide_drafts).on_click(cx.listener(|t, _, _, cx| { t.mine_hide_drafts = !t.mine_hide_drafts; cx.notify(); }))));
+                .children([(StateFilter::Open, "Open"), (StateFilter::Merged, "Merged"), (StateFilter::Closed, "Closed"), (StateFilter::All, "All")].map(|(s, l)| this.chip(("mrs", s as usize), l.into(), this.mine_state == s).on_click(cx.listener(move |t, _, _, cx| { t.mine_state = s; t.load_mine(cx); })))))
+            .children(reviewer_on.then(|| div().text_xs().text_color(p.muted).child("GitHub has no dependable reviewer list, so GitHub still lists every pull request you can review.")));
         let errs: Vec<_> = self.mine_errs.iter().map(|(h, e)| div().flex().items_start().gap_2().px_4().py_2().text_sm().text_color(p.danger).child(icon(ic::ERROR_OUTLINE, 16.0, p.danger)).child(div().flex_1().min_w_0().child(format!("{h}: {e}")))).collect();
-        div().flex().flex_col().flex_1().min_h_0().child(sbox).child(chips(self)).child(extra).children(errs)
+        div().flex().flex_col().flex_1().min_h_0().child(sbox).child(chips(self)).children(errs)
             .child(div().id("mine-list").flex_1().min_h_0().overflow_y_scroll().bg(p.bg)
                 .when(!signed, |d| d.child(div().flex().flex_col().items_center().justify_center().gap_3().py(px(60.0)).px_6().text_color(p.muted)
                     .child(icon(ic::LOGIN, 36.0, p.muted)).child(div().text_lg().text_color(p.fg).child("Sign in to see your reviews")).child(div().text_sm().child("Connect GitHub or GitLab and your pull and merge requests appear here, with the same filters those sites have."))
@@ -472,7 +490,7 @@ impl Render for Root {
         let toasts = self.toast_stack(cx);
         let settings = self.settings_view.clone();
         div().relative().size_full().flex().flex_col().bg(p.bg).font_family(self.fonts.ui.clone()).text_size(px(14.0)).track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { if this.hf.is_some() { if this.renaming.is_some() { this.commit_rename(cx); } this.hf = None; cx.notify(); } }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { if this.mine_dd.is_some() { this.mine_dd = None; if this.hf == Some(Hf::DSearch) { this.hf = None; } cx.notify(); } if this.hf.is_some() { if this.renaming.is_some() { this.commit_rename(cx); } this.hf = None; cx.notify(); } }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 let ks = &ev.keystroke; let ctrl = ks.modifiers.control || ks.modifiers.platform;
                 if let Some(sv) = this.settings_view.clone() { sv.update(cx, |v, cx| v.key(ev, cx)); return; }
@@ -514,9 +532,8 @@ pub fn run(initial: Initial) {
     });
 }
 
-/// Everyone attached to a request: author, assignees and reviewers.
-fn mr_people(m: &RemoteMr) -> Vec<String> { std::iter::once(m.author.clone()).chain(m.assignees.iter().chain(&m.reviewers).map(|p| p.login.clone())).collect() }
-fn mr_item(m: &RemoteMr) -> perusal_app::search::Item<'_> {
+fn mr_item<'a>(m: &'a RemoteMr, mes: &'a std::collections::HashMap<String, String>) -> perusal_app::search::Item<'a> {
     perusal_app::search::Item { title: &m.title, host: &m.host, project: &m.project, number: m.number, author: &m.author, state: &m.state, kind: if m.kind == perusal_providers::Kind::GitLab { "gitlab" } else { "github" },
-        assignees: m.assignees.iter().map(|p| p.login.as_str()).collect(), reviewers: m.reviewers.iter().map(|p| p.login.as_str()).collect(), labels: m.labels.iter().map(String::as_str).collect(), description: &m.description, draft: m.draft }
+        assignees: m.assignees.iter().map(|p| p.login.as_str()).collect(), reviewers: m.reviewers.iter().map(|p| p.login.as_str()).collect(), labels: m.labels.iter().map(String::as_str).collect(), description: &m.description, draft: m.draft,
+        me: mes.get(&m.host).map(String::as_str) }
 }

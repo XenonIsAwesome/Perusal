@@ -8,6 +8,7 @@ pub mod graph;
 pub mod hosts;
 pub mod events;
 pub mod markdown;
+pub mod mine;
 pub mod notify;
 pub mod search;
 pub mod settings;

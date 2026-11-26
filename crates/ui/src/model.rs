@@ -217,19 +217,24 @@ pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
 pub fn ci_label(c: &Ci) -> &'static str { match c { Ci::None => "none", Ci::Pending => "pending", Ci::Running => "running", Ci::Passed => "passed", Ci::Failed => "failed", Ci::Canceled => "canceled" } }
 
 /// The user's reviews across every host they are signed in to. Hosts without a token are skipped; failures are reported per host.
-pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> (Vec<RemoteMr>, Vec<(String, String)>) {
-    let (mut all, mut errs) = (vec![], vec![]);
-    let Ok(rt) = rt() else { return (all, errs) };
+/// Also returns the signed-in login per host (for the "Me" choices). GitHub pull requests have no dependable reviewer list here, so the
+/// "reviewer" toggle lists every pull request in repositories you can review in, same as the default.
+pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> (Vec<RemoteMr>, Vec<(String, String)>, std::collections::HashMap<String, String>) {
+    let (mut all, mut errs, mut mes) = (vec![], vec![], std::collections::HashMap::new());
+    let Ok(rt) = rt() else { return (all, errs, mes) };
     for h in hosts {
         let Some(token) = token_for(&h.host) else { continue };
         let kind = if h.kind == "gitlab" { Kind::GitLab } else { Kind::GitHub };
+        let is_gh = kind == Kind::GitHub;
         let r = MrRef { kind, host: h.host.clone(), project: String::new(), number: 0 };
         let p = match provider(&r, token) { Ok(p) => p, Err(e) => { errs.push((h.host.clone(), e)); continue } };
+        if let Ok(u) = rt.block_on(p.current_user()) { if !u.is_empty() { crate::avatars::set_me(&h.host, &u); mes.insert(h.host.clone(), u); } }
+        let role = if is_gh && role == Role::ReviewRequested { Role::Reviewable } else { role };
         match rt.block_on(p.my_reviews(&h.host, role, state)) { Ok(mut l) => all.append(&mut l), Err(e) => errs.push((h.host.clone(), e.to_string())) }
     }
     all.sort_by(|a, b| b.updated.cmp(&a.updated));
     crate::avatars::learn_mrs(&all);
-    (all, errs)
+    (all, errs, mes)
 }
 
 /// Signed-in user for a host (validates the token).

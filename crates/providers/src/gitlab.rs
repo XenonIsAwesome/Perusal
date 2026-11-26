@@ -5,6 +5,24 @@ use serde_json::{json, Value};
 pub struct GitLab { pub http: reqwest::Client, pub api: String, pub token: String }
 
 impl GitLab {
+    /// Every merge request in the projects you are at least a Developer in (the ones you can review with effect), newest activity first.
+    /// Capped at the 40 most recently active projects with 30 merge requests each; projects are queried concurrently and one failing project is skipped.
+    async fn reviewable(&self, host: &str, state: StateFilter) -> Result<Vec<RemoteMr>> {
+        let projects: Vec<Value> = check(self.req(reqwest::Method::GET, "/projects?membership=true&min_access_level=30&archived=false&simple=true&order_by=last_activity_at&sort=desc&per_page=40").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let st = match state { StateFilter::Open => "opened", StateFilter::Merged => "merged", StateFilter::Closed => "closed", StateFilter::All => "all" };
+        let mut set = tokio::task::JoinSet::new();
+        for id in projects.iter().filter_map(|p| p["id"].as_u64()) {
+            let (http, api, token) = (self.http.clone(), self.api.clone(), self.token.clone());
+            set.spawn(async move {
+                let g = GitLab { http, api, token };
+                let v: Vec<Value> = check(g.req(reqwest::Method::GET, &format!("/projects/{id}/merge_requests?state={st}&order_by=updated_at&sort=desc&per_page=30")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                Ok::<_, Error>(v)
+            });
+        }
+        let mut out = vec![];
+        while let Some(r) = set.join_next().await { if let Ok(Ok(list)) = r { out.extend(list.iter().map(|m| mr_row(m, host))); } }
+        Ok(out)
+    }
     pub fn api_base(host: &str) -> String { format!("https://{host}/api/v4") }
     fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder { let r = self.http.request(m, format!("{}{path}", self.api)); if self.token.is_empty() { r } else { r.header("PRIVATE-TOKEN", &self.token) } }
     fn mr(r: &MrRef) -> String { format!("/projects/{}/merge_requests/{}", utf8_percent_encode(&r.project, NON_ALPHANUMERIC), r.number) }
@@ -114,24 +132,27 @@ impl Provider for GitLab {
     }
     async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>> {
         if self.token.is_empty() { return Err(Error::Unauthorized); }
+        if role == Role::Reviewable { return self.reviewable(host, state).await; }
         let me = self.current_user().await?;
-        let who = match role { Role::ReviewRequested => format!("reviewer_username={me}"), Role::Authored => "scope=created_by_me".into(), Role::Assigned => "scope=assigned_to_me".into() };
+        let who = match role { Role::ReviewRequested => format!("reviewer_username={me}"), Role::Authored => "scope=created_by_me".into(), Role::Assigned => "scope=assigned_to_me".into(), Role::Reviewable => String::new() };
         let scope = if matches!(role, Role::ReviewRequested) { "&scope=all" } else { "" };
         let st = match state { StateFilter::Open => "opened", StateFilter::Merged => "merged", StateFilter::Closed => "closed", StateFilter::All => "all" };
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/merge_requests?{who}{scope}&state={st}&order_by=updated_at&sort=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
-        Ok(v.iter().map(|m| {
-            let web = m["web_url"].as_str().unwrap_or("");
-            let project = web.split_once("://").map(|x| x.1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
-            let state = match m["state"].as_str() { Some("opened") => "open", Some("merged") => "merged", _ => "closed" };
-            // Some instances report http:// web_urls (TLS terminated by a proxy); always use the https host the user connected to.
-            let number = m["iid"].as_u64().unwrap_or(0);
-            let url = if project.is_empty() { web.to_string() } else { format!("https://{host}/{project}/-/merge_requests/{number}") };
-            RemoteMr { url, title: m["title"].as_str().unwrap_or("").into(), project, number, author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
-                state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab,
-                author_avatar: m.pointer("/author/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&m["assignees"], "username"), reviewers: people(&m["reviewers"], "username"),
-                labels: m["labels"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect(), description: m["description"].as_str().unwrap_or("").into(), draft: m["draft"].as_bool() == Some(true) }
-        }).collect())
+        Ok(v.iter().map(|m| mr_row(m, host)).collect())
     }
+}
+
+/// One listed merge request as a row. Some instances report http:// web_urls (TLS terminated by a proxy); always use the https host the user connected to.
+fn mr_row(m: &Value, host: &str) -> RemoteMr {
+    let web = m["web_url"].as_str().unwrap_or("");
+    let project = web.split_once("://").map(|x| x.1).and_then(|r| r.split_once('/')).map(|x| x.1).and_then(|p| p.split("/-/").next()).unwrap_or("").to_string();
+    let state = match m["state"].as_str() { Some("opened") => "open", Some("merged") => "merged", _ => "closed" };
+    let number = m["iid"].as_u64().unwrap_or(0);
+    let url = if project.is_empty() { web.to_string() } else { format!("https://{host}/{project}/-/merge_requests/{number}") };
+    RemoteMr { url, title: m["title"].as_str().unwrap_or("").into(), project, number, author: m.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").into(),
+        state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab,
+        author_avatar: m.pointer("/author/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&m["assignees"], "username"), reviewers: people(&m["reviewers"], "username"),
+        labels: m["labels"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(String::from)).collect(), description: m["description"].as_str().unwrap_or("").into(), draft: m["draft"].as_bool() == Some(true) }
 }
 
 /// A discussion is resolved when it has resolvable notes and all of them are resolved; a note without a `resolvable` field counts as resolvable.

@@ -14,6 +14,37 @@ impl GitHub {
 }
 
 impl GitHub {
+    /// Every pull request in the repositories you can push to (the ones you can review with effect), newest activity first.
+    /// Capped at the 40 most recently pushed repositories with 30 pull requests each; repositories are queried concurrently
+    /// and one failing repository is skipped.
+    async fn reviewable(&self, host: &str, state: StateFilter) -> Result<Vec<RemoteMr>> {
+        let repos: Vec<Value> = check(self.req(reqwest::Method::GET, "/user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let names: Vec<String> = repos.iter().filter(|r| r["archived"].as_bool() != Some(true) && r.pointer("/permissions/push").and_then(|x| x.as_bool()).unwrap_or(false)).filter_map(|r| r["full_name"].as_str().map(String::from)).take(40).collect();
+        let st = match state { StateFilter::Open => "open", StateFilter::All => "all", _ => "closed" };
+        let mut set = tokio::task::JoinSet::new();
+        for n in names {
+            let (http, api, token) = (self.http.clone(), self.api.clone(), self.token.clone());
+            set.spawn(async move {
+                let g = GitHub { http, api, token };
+                let v: Vec<Value> = check(g.req(reqwest::Method::GET, &format!("/repos/{n}/pulls?state={st}&sort=updated&direction=desc&per_page=30")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                Ok::<_, Error>((n, v))
+            });
+        }
+        let mut out = vec![];
+        while let Some(r) = set.join_next().await {
+            let Ok(Ok((project, list))) = r else { continue };
+            for p in list {
+                let merged = !p["merged_at"].is_null();
+                let state_s = if merged { "merged" } else if p["state"] == "open" { "open" } else { "closed" };
+                if (state == StateFilter::Merged && !merged) || (state == StateFilter::Closed && merged) { continue; }
+                out.push(RemoteMr { url: p["html_url"].as_str().unwrap_or("").into(), title: p["title"].as_str().unwrap_or("").into(), project: project.clone(), number: p["number"].as_u64().unwrap_or(0),
+                    author: p.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state_s.into(), updated: p["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub,
+                    author_avatar: p.pointer("/user/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&p["assignees"], "login"), reviewers: people(&p["requested_reviewers"], "login"),
+                    labels: p["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: p["body"].as_str().unwrap_or("").into(), draft: p["draft"].as_bool() == Some(true) });
+            }
+        }
+        Ok(out)
+    }
     /// Database ids of the first comment of every resolved review thread (paged GraphQL, capped at 50 pages); empty on any failure.
     async fn resolved_roots(&self, r: &MrRef) -> Vec<u64> {
         let Some((owner, name)) = r.project.split_once('/') else { return vec![] };
@@ -141,7 +172,8 @@ impl Provider for GitHub {
     }
     async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>> {
         if self.token.is_empty() { return Err(Error::Unauthorized); }
-        let r = match role { Role::ReviewRequested => "review-requested:@me", Role::Authored => "author:@me", Role::Assigned => "assignee:@me" };
+        if role == Role::Reviewable { return self.reviewable(host, state).await; }
+        let r = match role { Role::ReviewRequested => "review-requested:@me", Role::Authored => "author:@me", Role::Assigned => "assignee:@me", Role::Reviewable => "" };
         let st = match state { StateFilter::Open => "+is:open", StateFilter::Merged => "+is:merged", StateFilter::Closed => "+is:closed+is:unmerged", StateFilter::All => "" };
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/search/issues?q=is:pr+{r}{st}&sort=updated&order=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v["items"].as_array().cloned().unwrap_or_default().iter().map(|i| {

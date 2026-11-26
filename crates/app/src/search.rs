@@ -9,7 +9,9 @@ pub fn matches(query: &str, fields: &[&str]) -> bool {
 
 /// What the My reviews search sees of one request.
 pub struct Item<'a> { pub title: &'a str, pub host: &'a str, pub project: &'a str, pub number: u64, pub author: &'a str, pub state: &'a str, pub kind: &'a str,
-    pub assignees: Vec<&'a str>, pub reviewers: Vec<&'a str>, pub labels: Vec<&'a str>, pub description: &'a str, pub draft: bool }
+    pub assignees: Vec<&'a str>, pub reviewers: Vec<&'a str>, pub labels: Vec<&'a str>, pub description: &'a str, pub draft: bool,
+    /// Login of the signed-in user on this item's host (for the "Me" choice of the people filters).
+    pub me: Option<&'a str> }
 
 /// Search with qualifiers. `author:bob`, `assignee:me-or-name`, `reviewer:x`, `label:bug`, `project:grp/app`, `host:corp`, `state:open`,
 /// `kind:github` (or `gitlab`), `is:draft`, `-is:draft`, `in:description`-style text always also searches the overview text.
@@ -47,7 +49,7 @@ mod tests { use super::*;
         assert!(!matches("login alice", &f) && !matches("zzz", &f));
     }
     fn item<'a>() -> Item<'a> { Item { title: "Fix login", host: "gitlab.corp", project: "grp/app", number: 7, author: "bob", state: "open", kind: "gitlab",
-        assignees: vec!["alice"], reviewers: vec!["carol"], labels: vec!["bug", "p1"], description: "Rewrites the session cache", draft: true } }
+        assignees: vec!["alice"], reviewers: vec!["carol"], labels: vec!["bug", "p1"], description: "Rewrites the session cache", draft: true, me: None } }
     #[test] fn qualifiers_and_overview_text() {
         let i = item();
         assert!(matches_item("", &i) && matches_item("author:BOB assignee:ali reviewer:car label:bug", &i) && matches_item("cache", &i) && matches_item("is:draft kind:gitlab state:open", &i));

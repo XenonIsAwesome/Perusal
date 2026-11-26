@@ -208,3 +208,22 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4/discussions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":"d","notes":[{"system":false,"body":"hi","author":{"username":"u","avatar_url":"https://a/u.png"}}]}]))).mount(&s).await;
     let t = gl(&s).threads(&glref()).await.unwrap(); assert_eq!(t[0].avatars, vec!["https://a/u.png".to_string()]);
 }
+#[tokio::test] async fn github_reviewable_lists_pulls_of_repos_you_can_push_to() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"full_name":"o/rw","permissions":{"push":true}}, {"full_name":"o/ro","permissions":{"push":false}}, {"full_name":"o/old","archived":true,"permissions":{"push":true}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/rw/pulls")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"html_url":"https://x/o/rw/pull/1","title":"A","number":1,"state":"open","merged_at":null,"updated_at":"2026","user":{"login":"al"},"assignees":[],"labels":[{"name":"bug"}],"body":"b","draft":false,"requested_reviewers":[{"login":"me"}]}]))).expect(1).mount(&s).await;
+    let l = gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await.unwrap();
+    assert_eq!(l.len(), 1); assert_eq!((l[0].project.as_str(), l[0].reviewers[0].login.as_str(), l[0].labels[0].as_str()), ("o/rw", "me", "bug"));
+}
+#[tokio::test] async fn gitlab_reviewable_lists_mrs_of_projects_with_developer_access() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7},{"id":8}]))).mount(&s).await;
+    for id in [7, 8] {
+        Mock::given(method("GET")).and(path(format!("/projects/{id}/merge_requests"))).respond_with(ResponseTemplate::new(if id == 8 { 403 } else { 200 }).set_body_json(json!([
+            {"web_url":"https://h/g/p/-/merge_requests/3","iid":3,"title":"T","state":"opened","updated_at":"2026","author":{"username":"u"},"assignees":[],"reviewers":[],"labels":["x"],"description":"","draft":false}]))).mount(&s).await;
+    }
+    let l = gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await.unwrap();
+    assert_eq!(l.len(), 1); assert_eq!((l[0].project.as_str(), l[0].number), ("g/p", 3));
+}
