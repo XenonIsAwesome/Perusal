@@ -19,9 +19,12 @@ impl GitLab {
                 Ok::<_, Error>(v)
             });
         }
-        let mut out = vec![];
-        while let Some(r) = set.join_next().await { if let Ok(Ok(list)) = r { out.extend(list.iter().map(|m| mr_row(m, host))); } }
-        Ok(out)
+        let (mut out, mut first_err, mut ok_any) = (vec![], None, false);
+        while let Some(r) = set.join_next().await {
+            match r { Ok(Ok(list)) => { ok_any = true; out.extend(list.iter().map(|m| mr_row(m, host))); } Ok(Err(e)) => { first_err.get_or_insert(e); } Err(_) => {} }
+        }
+        // every project failing (rate limit, expired token) is an error, not an empty list
+        match first_err { Some(e) if !ok_any => Err(e), _ => Ok(out) }
     }
     pub fn api_base(host: &str) -> String { format!("https://{host}/api/v4") }
     fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder { let r = self.http.request(m, format!("{}{path}", self.api)); if self.token.is_empty() { r } else { r.header("PRIVATE-TOKEN", &self.token) } }

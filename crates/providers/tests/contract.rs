@@ -227,3 +227,23 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     let l = gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await.unwrap();
     assert_eq!(l.len(), 1); assert_eq!((l[0].project.as_str(), l[0].number), ("g/p", 3));
 }
+#[tokio::test] async fn github_reviewable_errors_when_every_repo_fails() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"full_name":"o/a","permissions":{"push":true}},{"full_name":"o/b","permissions":{"push":true}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/a/pulls")).respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30")).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/b/pulls")).respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30")).mount(&s).await;
+    assert!(matches!(gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await, Err(Error::RateLimited(Some(30)))));
+}
+#[tokio::test] async fn github_reviewable_keeps_results_when_only_some_repos_fail() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"full_name":"o/a","permissions":{"push":true}},{"full_name":"o/b","permissions":{"push":true}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/a/pulls")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"html_url":"https://x/o/a/pull/1","title":"A","number":1,"state":"open","merged_at":null,"updated_at":"2026","user":{"login":"u"},"assignees":[],"labels":[],"body":"","draft":false}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/b/pulls")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
+    assert_eq!(gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await.unwrap().len(), 1);
+}
+#[tokio::test] async fn gitlab_reviewable_errors_when_every_project_fails() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7},{"id":8}]))).mount(&s).await;
+    for id in [7, 8] { Mock::given(method("GET")).and(path(format!("/projects/{id}/merge_requests"))).respond_with(ResponseTemplate::new(401)).mount(&s).await; }
+    assert!(matches!(gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await, Err(Error::Unauthorized)));
+}

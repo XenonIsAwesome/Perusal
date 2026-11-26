@@ -60,7 +60,7 @@ impl Store {
     /// New work after a submit makes the review unfinished again.
     fn reopen(&self, review: i64) { let _ = self.conn.execute("UPDATE reviews SET state='open' WHERE id=?1 AND state='submitted'", params![review]); }
     pub fn set_viewed(&self, review: i64, path: &str, viewed: bool) -> Result<()> {
-        self.reopen(review);
+        if viewed { self.reopen(review); } // un-viewing is not new work
         if viewed { self.conn.execute("INSERT OR IGNORE INTO viewed VALUES(?1,?2)", params![review, path])?; }
         else { self.conn.execute("DELETE FROM viewed WHERE review=?1 AND path=?2", params![review, path])?; }
         self.log(review, &format!("viewed {path} {viewed}"))
@@ -170,6 +170,7 @@ mod tests {
         s.add_draft(r, None, None, "x", false).unwrap(); assert!(s.unfinished(r).unwrap());
         s.set_state(r, "submitted").unwrap(); assert!(!s.unfinished(r).unwrap());
         s.add_draft(r, None, None, "more", false).unwrap(); assert!(s.unfinished(r).unwrap()); // new work reopens it
+        s.set_state(r, "submitted").unwrap(); s.set_viewed(r, "a", false).unwrap(); assert!(!s.unfinished(r).unwrap()); // un-viewing keeps a submitted review closed
         s.discard(r).unwrap(); assert!(s.ui(r).unwrap().is_none());
     }
     #[test] fn review_lifecycle() {

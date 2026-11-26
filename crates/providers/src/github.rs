@@ -30,9 +30,10 @@ impl GitHub {
                 Ok::<_, Error>((n, v))
             });
         }
-        let mut out = vec![];
+        let (mut out, mut first_err, mut ok_any) = (vec![], None, false);
         while let Some(r) = set.join_next().await {
-            let Ok(Ok((project, list))) = r else { continue };
+            let (project, list) = match r { Ok(Ok(v)) => v, Ok(Err(e)) => { first_err.get_or_insert(e); continue } Err(_) => continue };
+            ok_any = true;
             for p in list {
                 let merged = !p["merged_at"].is_null();
                 let state_s = if merged { "merged" } else if p["state"] == "open" { "open" } else { "closed" };
@@ -43,7 +44,8 @@ impl GitHub {
                     labels: p["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: p["body"].as_str().unwrap_or("").into(), draft: p["draft"].as_bool() == Some(true) });
             }
         }
-        Ok(out)
+        // every repository failing (rate limit, expired token) is an error, not an empty list
+        match first_err { Some(e) if !ok_any => Err(e), _ => Ok(out) }
     }
     /// Database ids of the first comment of every resolved review thread (paged GraphQL, capped at 50 pages); empty on any failure.
     async fn resolved_roots(&self, r: &MrRef) -> Vec<u64> {
