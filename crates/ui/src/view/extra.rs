@@ -25,6 +25,80 @@ impl View {
     /// Quit prompt: Submit opens the finish dialog.
     pub fn open_finish(&mut self, cx: &mut Context<Self>) { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; cx.notify(); }
 
+    // ---------- host thread actions (go to the host immediately)
+    pub(super) fn run_pending_host(&mut self, cx: &mut Context<Self>) { if let Some(a) = self.pending_host.take() { self.host_act(a, cx); } }
+    pub(super) fn open_host_composer(&mut self, t: HostTarget, text: &str) {
+        self.comment.f.set(text); self.comment.f.multiline = true;
+        self.composer = Some(Comp { editing: None, global: true, preview: false, host: Some(t) }); self.focus = Some(Fid::Comment);
+    }
+    pub(super) fn host_act(&mut self, a: model::HostAct, cx: &mut Context<Self>) {
+        let Some(mr) = self.m.mr.clone() else { return };
+        let ok = match &a { model::HostAct::Reply { .. } => "Reply posted.", model::HostAct::Resolve { resolved: true, .. } => "Thread resolved.", model::HostAct::Resolve { .. } => "Thread reopened.",
+            model::HostAct::React { .. } => "Reaction added.", model::HostAct::Edit { .. } => "Comment updated.", model::HostAct::Delete { .. } => "Comment deleted.", model::HostAct::RequestReview(_) => "Review requested." };
+        let task = cx.background_executor().spawn(async move { model::host_action(&mr, a) });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |t, cx| { match r { Ok(()) => { t.note(NKind::Success, ok, None); t.refresh_now(cx); } Err(e) => t.note(NKind::Error, format!("The host refused that: {e}"), None) } t.flush(cx); cx.notify(); });
+        }).detach();
+    }
+    /// One immediate fetch of threads/CI/state (after a thread action).
+    pub(super) fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        let Some(mr) = self.m.mr.clone() else { return };
+        let task = cx.background_executor().spawn(async move { model::fetch_remote_state(&mr) });
+        cx.spawn(async move |this, cx| { if let Ok(s) = task.await { let _ = this.update(cx, |t, cx| { t.apply_remote(s, cx); t.flush(cx); cx.notify(); }); } }).detach();
+    }
+    pub(super) fn thread_buttons(&self, key: &str, h: &HostThread, resolved: bool, mine: bool, kind: perusal_providers::Kind, cx: &mut Context<Self>) -> gpui::Div {
+        let p = self.pal; let tid = h.id.clone(); let first = h.comment_ids.first().cloned();
+        let mut row = div().flex().items_center().gap_1();
+        { let tid = tid.clone(); row = row.child(icon_btn(SharedString::from(format!("rp-{key}")), ic::REPLY, "Reply to this thread", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_host_composer(HostTarget::Reply(tid.clone()), ""); cx.stop_propagation(); cx.notify(); }))); }
+        if let Some(rid) = h.resolve_id.clone() {
+            row = row.child(icon_btn(SharedString::from(format!("rs-{key}")), if resolved { ic::UNDO } else { ic::CHECK_CIRCLE }, if resolved { "Unresolve this thread" } else { "Resolve this thread" }, Btn::Ghost, &p)
+                .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Resolve { thread: rid.clone(), resolved: !resolved }, cx); cx.stop_propagation(); })));
+        }
+        if let Some(cid) = first.clone() {
+            let tid = tid.clone();
+            row = row.child(icon_btn(SharedString::from(format!("re-{key}")), ic::THUMB_UP, "React with 👍", Btn::Ghost, &p)
+                .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::React { thread: tid.clone(), comment: cid.clone(), emoji: model::thumbs_up(kind).to_string() }, cx); cx.stop_propagation(); })));
+        }
+        if mine { if let Some(cid) = first {
+            let (t1, c1, t2, c2) = (tid.clone(), cid.clone(), tid, cid);
+            let k = key.to_string();
+            row = row.child(icon_btn(SharedString::from(format!("he-{k}")), ic::EDIT, "Edit your comment on the host", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| {
+                    let body = this.threads.iter().find(|t| t.id == t1).and_then(|t| t.comments.first().map(|c| c.1.clone())).unwrap_or_default();
+                    this.open_host_composer(HostTarget::Edit(t1.clone(), c1.clone()), &body); cx.stop_propagation(); cx.notify(); })))
+                .child(icon_btn(SharedString::from(format!("hd-{k}")), ic::DELETE, "Delete your comment on the host", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Delete { thread: t2.clone(), comment: c2.clone() }, cx); cx.stop_propagation(); })));
+        } }
+        row
+    }
+    pub(super) fn reply_buttons(&self, key: &str, i: usize, tid: String, cid: Option<String>, body: &str, cx: &mut Context<Self>) -> gpui::Div {
+        let p = self.pal; let Some(cid) = cid else { return div() }; let body = body.to_string();
+        let (t1, c1, t2, c2) = (tid.clone(), cid.clone(), tid, cid);
+        div().flex().items_center().gap_1()
+            .child(icon_btn(SharedString::from(format!("hre-{key}-{i}")), ic::EDIT, "Edit your reply", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_host_composer(HostTarget::Edit(t1.clone(), c1.clone()), &body); cx.stop_propagation(); cx.notify(); })))
+            .child(icon_btn(SharedString::from(format!("hrd-{key}-{i}")), ic::DELETE, "Delete your reply", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Delete { thread: t2.clone(), comment: c2.clone() }, cx); cx.stop_propagation(); })))
+    }
+
+    // ---------- request a review
+    pub(super) fn reviewers_key(&mut self, key: &str, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match key {
+            "escape" => { self.rev_open = false; self.focus = None; }
+            "enter" => {
+                let users: Vec<String> = self.rev_in.f.text.split(|c: char| c == ',' || c.is_whitespace()).map(|u| u.trim().trim_start_matches('@').to_string()).filter(|u| !u.is_empty()).collect();
+                self.rev_open = false; self.focus = None;
+                if !users.is_empty() { self.host_act(model::HostAct::RequestReview(users), cx); }
+            }
+            _ => { field_key(&mut self.rev_in.f, ks, cx); }
+        }
+    }
+    pub(super) fn reviewers_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.pal;
+        let input = self.winp(Fid::Reviewers, div().id("rev-in").flex().items_center().gap_2().px_4().py_3()
+            .child(icon(ic::PERSON_ADD, 18.0, p.muted)).child(div().flex_1().min_w_0().child(input_text(&self.rev_in, true, "Usernames, separated by commas", &p, false, 1))), cx);
+        let body = div().flex().flex_col().child(div().px_4().pt_3().text_sm().font_weight(FontWeight::SEMIBOLD).child("Request a review")).child(input)
+            .child(div().px_4().pb_3().text_xs().text_color(p.muted).child("Press Enter to ask these people to review. Also works to re-request a review after changes."));
+        self.modal("rev-card", 520.0, body, cx, |t| { t.rev_open = false; t.focus = None; })
+    }
+
     pub(super) fn run_action(&mut self, a: &str, cx: &mut Context<Self>) {
         match a {
             "next_file" => self.step(1), "prev_file" => self.step(-1), "toggle_viewed" => self.toggle_viewed(), "next_batch" => self.next(), "prev_batch" => self.back(),

@@ -6,7 +6,7 @@ pub mod auth;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind { GitHub, GitLab }
 
 #[derive(Debug, Clone, PartialEq)]

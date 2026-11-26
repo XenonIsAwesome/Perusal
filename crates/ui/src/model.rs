@@ -191,7 +191,34 @@ pub fn desktop_notify(title: &str, body: &str) {
 }
 
 // ---- remote state, listing, accounts
-pub struct RemoteState { pub info: perusal_providers::MrInfo, pub ci: Ci, pub threads: Vec<Thread> }
+pub struct RemoteState { pub info: perusal_providers::MrInfo, pub ci: Ci, pub threads: Vec<Thread>, /// login of the signed-in user (to know which comments are editable)
+    pub me: Option<String> }
+
+/// A change to an existing thread or to the reviewer list; these go to the host immediately, outside the pending review.
+#[derive(Clone, Debug)]
+pub enum HostAct {
+    Reply { thread: String, body: String }, Resolve { thread: String, resolved: bool }, React { thread: String, comment: String, emoji: String },
+    Edit { thread: String, comment: String, body: String }, Delete { thread: String, comment: String }, RequestReview(Vec<String>),
+}
+/// The reaction used by the quick 👍 button on each host.
+pub fn thumbs_up(kind: perusal_providers::Kind) -> &'static str { match kind { perusal_providers::Kind::GitHub => "+1", perusal_providers::Kind::GitLab => "thumbsup" } }
+
+pub fn host_action(mr: &MrRef, a: HostAct) -> Result<(), String> {
+    let token = token_for(&mr.host).ok_or_else(|| format!("No access token for {}. Open the review from Home to enter one.", mr.host))?;
+    let p = provider(mr, token)?; let rt = rt()?;
+    let r = match a {
+        HostAct::Reply { thread, body } => rt.block_on(p.reply(mr, &thread, &body)),
+        HostAct::Resolve { thread, resolved } => rt.block_on(p.resolve(mr, &thread, resolved)),
+        HostAct::React { thread, comment, emoji } => rt.block_on(p.react(mr, &thread, &comment, &emoji)),
+        HostAct::Edit { thread, comment, body } => rt.block_on(p.edit_comment(mr, &thread, &comment, &body)),
+        HostAct::Delete { thread, comment } => rt.block_on(p.delete_comment(mr, &thread, &comment)),
+        HostAct::RequestReview(users) => rt.block_on(p.request_review(mr, &users)),
+    };
+    r.map_err(|e| match e {
+        perusal_providers::Error::Unauthorized => format!("{} rejected the token. Enter a new one from Home.", mr.host),
+        other => other.to_string(),
+    })
+}
 
 pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
     let token = token_for(&mr.host).unwrap_or_default();
@@ -199,7 +226,8 @@ pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
     let info = rt.block_on(p.mr_info(mr)).map_err(|e| e.to_string())?;
     let ci = rt.block_on(p.ci(mr, &info.head_sha)).unwrap_or(Ci::None);
     let threads = rt.block_on(p.threads(mr)).unwrap_or_default();
-    Ok(RemoteState { info, ci, threads })
+    let me = if mr.host.is_empty() { None } else { rt.block_on(p.current_user()).ok().filter(|u| !u.is_empty()) };
+    Ok(RemoteState { info, ci, threads, me })
 }
 pub fn ci_label(c: &Ci) -> &'static str { match c { Ci::None => "none", Ci::Pending => "pending", Ci::Running => "running", Ci::Passed => "passed", Ci::Failed => "failed", Ci::Canceled => "canceled" } }
 
