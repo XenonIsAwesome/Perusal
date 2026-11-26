@@ -50,7 +50,7 @@ pub fn palette<'a>(commands: &[&'a str], query: &str) -> Vec<&'a str> {
 #[cfg(test)]
 mod tests { use super::*;
     #[test] fn overrides_conflicts_vim() {
-        let m = load("[keys]\ncomment = \"m\"\n", false).unwrap(); assert_eq!(action_for(&m, "m"), Some("comment")); assert_eq!(action_for(&m, "c"), None);
+        let m = load("[keys]\ncomment = \"z\"\n", false).unwrap(); assert_eq!(action_for(&m, "z"), Some("comment")); assert_eq!(action_for(&m, "c"), None);
         assert!(load("[keys]\ncomment = \"v\"\n", false).unwrap_err().contains("bound to both"));
         assert!(load("[keys]\nbogus = \"z\"\n", false).unwrap_err().contains("unknown action"));
         assert_eq!(load("", true).unwrap()["next_file"], "j");
