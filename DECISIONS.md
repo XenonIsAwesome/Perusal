@@ -70,3 +70,4 @@
 - Diff horizontal scroll: long code lines scroll sideways with the trackpad/wheel x delta, one shared offset for all rows (code cells clip and shift; gutters stay put). The max offset comes from the widest rendered line (chars x 0.6 em, monospace estimate), and the offset resets when the shown batch changes. Review title: clicking the title text enters rename mode, same as the pencil button.
 - Diff horizontal scrollbar: a draggable track floats just above the bottom bar when any rendered line overflows (click the track to jump, drag the thumb); the review title shows a hover highlight (background + accent border) to signal click-to-rename.
 - Collapsed file-level and outdated comments now show as gutter icons (anchored to file header / last row) like line comments, instead of full-width cards.
+- GitHub threads: resolved state now read via GraphQL reviewThreads (REST lacks it), so resolved threads start collapsed; failures are ignored.

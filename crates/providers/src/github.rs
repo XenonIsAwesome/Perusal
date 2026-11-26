@@ -30,6 +30,22 @@ impl Provider for GitHub {
             if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); }
             else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)] }); }
         }
+        // the REST API does not say which review threads are resolved; ask GraphQL (best effort)
+        if let Some((owner, name)) = r.project.split_once('/') {
+            let gql = if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) };
+            let q = json!({"query": "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{databaseId}}}}}}}",
+                "variables": {"o": owner, "n": name, "p": r.number}});
+            if let Ok(resp) = check(self.http.post(&gql).bearer_auth(&self.token).json(&q).send().await).await {
+                if let Ok(v) = resp.json::<Value>().await {
+                    for n in v.pointer("/data/repository/pullRequest/reviewThreads/nodes").and_then(|x| x.as_array()).into_iter().flatten() {
+                        if n["isResolved"].as_bool() != Some(true) { continue; }
+                        if let Some(id) = n.pointer("/comments/nodes/0/databaseId").and_then(|x| x.as_u64()) {
+                            if let Some(t) = out.iter_mut().find(|t| t.id == id.to_string()) { t.resolved = true; }
+                        }
+                    }
+                }
+            }
+        }
         // general conversation on the pull request (issue comments); optional, so a failure here keeps the inline threads
         if let Ok(resp) = check(self.req(reqwest::Method::GET, &format!("/repos/{}/issues/{}/comments?per_page=100", r.project, r.number)).send().await).await {
             if let Ok(list) = resp.json::<Vec<Value>>().await {
