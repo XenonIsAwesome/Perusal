@@ -137,7 +137,9 @@ impl View {
     /// Palette matches as (action, label), best first.
     fn palette_hits(&self) -> Vec<(&'static str, &'static str)> {
         let labels: Vec<&'static str> = keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "palette").map(|(_, _, l)| *l).collect();
-        keymap::palette(&labels, self.pal_in.f.text.trim()).into_iter().filter_map(|l| keymap::ACTIONS.iter().find(|(_, _, x)| *x == l).map(|(a, _, l)| (*a, *l))).collect()
+        let q = self.pal_in.f.text.trim();
+        let ordered = if q.is_empty() { labels.clone() } else { keymap::palette(&labels, q) };
+        ordered.into_iter().filter_map(|l| keymap::ACTIONS.iter().find(|(_, _, x)| *x == l).map(|(a, _, l)| (*a, *l))).collect()
     }
     pub(super) fn palette_key(&mut self, key: &str, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         let hits = self.palette_hits();
@@ -152,7 +154,7 @@ impl View {
 
     fn modal(&self, id: &'static str, w: f32, body: gpui::Div, cx: &mut Context<Self>, on_close: fn(&mut Self)) -> AnyElement {
         let p = self.pal;
-        let card = div().id(id).flex().flex_col().w(px(w)).max_h(px(640.0)).rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_hidden()
+        let card = div().id(id).flex().flex_col().w(px(w)).max_h(px(640.0)).rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_y_scroll()
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation())).child(body);
         deferred(div().absolute().top_0().left_0().size_full().flex().items_start().justify_center().pt(px(90.0)).bg(gpui::black().opacity(0.45)).occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { on_close(this); cx.notify(); })).child(card)).with_priority(25).into_any_element()
@@ -177,7 +179,7 @@ impl View {
         let p = self.pal;
         let mut rows: Vec<(String, String)> = keymap::ACTIONS.iter().map(|(a, _, l)| (show_key(self.keys.get(*a).map(String::as_str).unwrap_or("")), l.to_string())).collect();
         rows.extend([("Esc".to_string(), "Back to Home / clear selection / stop the agent".to_string()), ("Ctrl + / Ctrl -".into(), "Zoom in / out (Ctrl+0 resets)".into()), ("Ctrl+W".into(), "Close this tab".into())]);
-        let list = div().flex().flex_col().px_4().py_2().gap(px(2.0)).children(rows.into_iter().map(|(k, l)| div().flex().items_center().gap_3().py(px(3.0)).child(div().w(px(110.0)).flex_none().child(kbd_s(&k, &p))).child(div().text_sm().child(l))));
+        let list = div().flex().flex_col().px_4().py_2().gap(px(2.0)).children(rows.into_iter().map(|(k, l)| div().flex().items_center().gap_3().py(px(1.0)).child(div().w(px(120.0)).flex_none().flex().child(kbd_s(&k, &p))).child(div().text_sm().child(l))));
         let head = div().flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(p.border).child(icon(ic::KEYBOARD, 20.0, p.accent)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).flex_1().child("Keyboard shortcuts"))
             .child(div().text_xs().text_color(p.muted).child("Rebind in keymap.toml"));
         self.modal("help-card", 560.0, div().flex().flex_col().child(head).child(list), cx, |t| t.help_open = false)
