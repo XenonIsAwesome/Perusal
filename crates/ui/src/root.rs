@@ -92,13 +92,7 @@ impl Root {
                 let v = cx.new(|_| View::new(m, settings, fonts));
                 let key = v.read(cx).key_id();
                 if let Some(i) = self.tabs.iter().position(|t| t.key == key) { self.active = Some(i); self.msg = None; cx.notify(); return; }
-                let sub = cx.subscribe(&v, |this, v, ev: &ViewEvent, cx| match ev {
-                    ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
-                    ViewEvent::OpenSettings => this.open_settings(false, cx),
-                    ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
-                    ViewEvent::Renamed(t) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.title = t.clone(); } this.refresh_recent(); cx.notify(); }
-                    ViewEvent::Ci(c) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.ci = c.clone(); } cx.notify(); }
-                });
+                let sub = Self::subscribe_view(&v, cx);
                 v.update(cx, |v, cx| v.start_polling(cx));
                 self.tabs.push(TabItem { key, title, ci: String::new(), view: v, _sub: sub }); self.active = Some(self.tabs.len() - 1); self.msg = None; self.token_host = None; self.refresh_recent();
             }
@@ -106,6 +100,39 @@ impl Root {
             Err(OpenErr::Msg(m)) => self.say(NKind::Error, m),
         }
         cx.notify();
+    }
+    /// Moves one tab's review to the MR's current head (drafts re-anchored, changed files unmarked) and swaps in the new view.
+    fn move_tab(&mut self, id: gpui::EntityId, url: String, old_head: String, cx: &mut Context<Self>) {
+        self.toast(NKind::Info, "Fetching the latest commits…".to_string(), cx);
+        let task = cx.background_executor().spawn(async move { Model::move_to_latest(&url, &old_head) });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |t, cx| {
+                match r {
+                    Ok((m, msg)) => {
+                        let Some(i) = t.tabs.iter().position(|x| x.view.entity_id() == id) else { return };
+                        let (fonts, settings) = (t.fonts.clone(), t.settings.clone());
+                        let v = cx.new(|_| View::new(m, settings, fonts)); let sub = Self::subscribe_view(&v, cx);
+                        v.update(cx, |v, cx| v.start_polling(cx));
+                        t.tabs[i].title = v.read(cx).tab_title(); t.tabs[i].view = v; t.tabs[i]._sub = sub;
+                        t.toast(NKind::Success, msg, cx);
+                    }
+                    Err(OpenErr::NeedsToken { host, .. }) => t.toast(NKind::Error, format!("Sign in to {host} from Settings to move this review."), cx),
+                    Err(OpenErr::Msg(m)) => t.toast(NKind::Error, m, cx),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn subscribe_view(v: &Entity<View>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(v, |this, v, ev: &ViewEvent, cx| match ev {
+                    ViewEvent::MoveHead { url, old_head } => this.move_tab(v.entity_id(), url.clone(), old_head.clone(), cx),
+                    ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
+                    ViewEvent::OpenSettings => this.open_settings(false, cx),
+                    ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
+                    ViewEvent::Renamed(t) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.title = t.clone(); } this.refresh_recent(); cx.notify(); }
+                    ViewEvent::Ci(c) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.ci = c.clone(); } cx.notify(); }
+        })
     }
     /// Tabs with unsent drafts: (tab index, title, draft count, remote).
     fn pending(&self, cx: &App) -> Vec<(usize, String, usize, bool)> {

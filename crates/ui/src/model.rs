@@ -99,6 +99,17 @@ impl Model {
         m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); Ok(m)
     }
 
+    /// Moves a remote review from `old_head` to the MR's current head: fetches it, re-anchors drafts, drops viewed marks of
+    /// changed files, then reopens the model so the view model reflects the stored state. The string says what happened.
+    pub fn move_to_latest(url: &str, old_head: &str) -> Result<(Self, String), OpenErr> {
+        let m = Self::open_remote(url)?;
+        if m.branch == old_head { return Ok((m, "Already on the latest commit.".into())); }
+        let rep = perusal_app::movehead::move_review(&m.store, m.vm.review, &m.repo, old_head, &m.branch).map_err(OpenErr::Msg)?;
+        let msg = perusal_app::movehead::summary(&rep);
+        drop(m);
+        Ok((Self::open_remote(url)?, msg))
+    }
+
     /// Reopens a review from the recent list using its stored key.
     pub fn reopen(key: &str) -> Result<Self, OpenErr> {
         if let Some(u) = key.strip_prefix("remote:") { return Self::open_remote(u); }

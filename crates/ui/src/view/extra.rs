@@ -78,6 +78,22 @@ impl View {
             .child(icon_btn(SharedString::from(format!("hrd-{key}-{i}")), ic::DELETE, "Delete your reply", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Delete { thread: t2.clone(), comment: c2.clone() }, cx); cx.stop_propagation(); })))
     }
 
+    /// Banner under the header: the host moved on (new commits or a force-push) or the MR was merged/closed.
+    pub(super) fn head_banner(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let p = self.pal;
+        let closed = matches!(self.m.mr_state.as_str(), "merged" | "closed") && self.m.mr.is_some();
+        if self.head_dismissed || (self.new_head.is_none() && !closed) { return None; }
+        let text = if self.new_head.is_some() { "This merge request has new commits or was force-pushed. You are reviewing the version you opened; your drafts and viewed marks can move with you.".to_string() }
+            else { format!("This merge request was {}. You can still finish the review.", self.m.mr_state) };
+        let col = if self.new_head.is_some() { p.warn } else { p.muted };
+        let url = self.m.remote.clone(); let old = self.m.branch.clone();
+        Some(div().flex().items_center().gap_3().px_4().py(px(6.0)).bg(col.opacity(0.14)).border_b_1().border_color(col)
+            .child(icon(ic::SYNC, 18.0, col)).child(div().flex_1().min_w_0().text_sm().child(text))
+            .children(self.new_head.is_some().then(|| icon_text_btn("move-head", ic::REFRESH, "Move to latest", Btn::Primary, &p).on_click(cx.listener(move |_, _, _, cx| {
+                if let Some(u) = url.clone() { cx.emit(ViewEvent::MoveHead { url: u, old_head: old.clone() }); } }))))
+            .child(icon_btn("head-later", ic::CLOSE, "Dismiss", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.head_dismissed = true; cx.notify(); }))))
+    }
+
     // ---------- request a review
     pub(super) fn reviewers_key(&mut self, key: &str, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         match key {

@@ -7,6 +7,7 @@ pub mod graph;
 pub mod hosts;
 pub mod events;
 pub mod markdown;
+pub mod movehead;
 pub mod notify;
 pub mod settings;
 pub mod keymap;

@@ -49,11 +49,11 @@ enum RowKind { FileHeader, Rendered(Vec<markdown::Block>), Collapsed(String, boo
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32> }
 
-pub enum ViewEvent { Home, OpenSettings, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
+pub enum ViewEvent { Home, OpenSettings, MoveHead { url: String, old_head: String }, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
 impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
-    rev_open: bool, rev_in: Input, pending_host: Option<model::HostAct>, me: Option<String>, keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_in: Input, pal_idx: usize, help_open: bool,
+    new_head: Option<String>, head_dismissed: bool, rev_open: bool, rev_in: Input, pending_host: Option<model::HostAct>, me: Option<String>, keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_in: Input, pal_idx: usize, help_open: bool,
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds,
@@ -104,7 +104,7 @@ impl View {
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
-        let mut v = View { rev_open: false, rev_in: Input::new(""), pending_host: None, me: None, keys, palette_open: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        let mut v = View { new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), pending_host: None, me: None, keys, palette_open: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
@@ -472,6 +472,8 @@ impl View {
             self.note(kind, e.body.clone(), e.important.then_some(e.key));
         }
         if now.head != self.m.branch && prev.head == self.m.branch { /* surfaced once as a notice above; the review stays pinned */ }
+        let nh = (self.m.mr.is_some() && !now.head.is_empty() && now.head != self.m.branch).then(|| now.head.clone());
+        if nh != self.new_head { self.head_dismissed = false; self.new_head = nh; }
         self.m.mr_state = now.state.clone(); let _ = self.m.store.set_mr_state(self.m.vm.review, &now.state);
         let ci = now.ci.clone().unwrap_or_default();
         if ci != self.ci { self.ci = ci.clone(); cx.emit(ViewEvent::Ci(ci)); }
@@ -706,7 +708,7 @@ impl Render for View {
                     let frac = ((y - oy - grab) / travel).clamp(0.0, 1.0); this.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.notify();
                 }
             }))
-            .child(top).child(progress).child(filter)
+            .child(top).children(self.head_banner(cx)).child(progress).child(filter)
             .child(div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol))
             .child(footer)
             .children(overlay)

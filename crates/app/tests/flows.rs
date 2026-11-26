@@ -39,3 +39,20 @@ fn commit(d: &Path, f: &str, c: &str, m: &str) { std::fs::write(d.join(f), c).un
     assert_eq!(banner("open", &old_head, &new_head, &anc), Banner::ForcePushed { new_head: new_head.clone() });
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test] fn move_review_keeps_drafts_and_unmarks_changed_files() {
+    use perusal_app::movehead::*;
+    let d = repo("move"); commit(&d, "f.rs", "a\nb\nc\nd\n", "base"); commit(&d, "g.rs", "1\n2\n", "g"); g(&d, &["checkout", "-qb", "feat"]);
+    commit(&d, "f.rs", "a\nb\nc\nd\ne\n", "feature work"); let old_head = g(&d, &["rev-parse", "feat"]);
+    // a plain new commit changes g.rs only
+    commit(&d, "g.rs", "1\n2\n3\n", "more"); let new_head = g(&d, &["rev-parse", "feat"]);
+    let s = Store::memory().unwrap(); let r = s.open_review("k", "t", &old_head, 2).unwrap();
+    s.add_draft(r, Some("f.rs"), Some((2, 2)), "on b", false).unwrap(); s.set_viewed(r, "f.rs", true).unwrap(); s.set_viewed(r, "g.rs", true).unwrap();
+    let rep = move_review(&s, r, &d, &old_head, &new_head).unwrap();
+    assert!(!rep.force_pushed); assert_eq!(rep.kept, 1); assert!(rep.lost.is_empty()); assert_eq!(rep.unviewed, vec!["g.rs".to_string()]);
+    assert_eq!(s.viewed(r).unwrap(), vec!["f.rs".to_string()]); assert_eq!(s.pinned_head(r).unwrap(), new_head);
+    // rewritten history is reported as a force-push
+    g(&d, &["reset", "-q", "--hard", &old_head]); commit(&d, "f.rs", "TOP\na\nb\nc\nd\ne\n", "rewritten"); let forced = g(&d, &["rev-parse", "feat"]);
+    let rep = move_review(&s, r, &d, &new_head, &forced).unwrap(); assert!(rep.force_pushed); assert_eq!(rep.kept, 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
