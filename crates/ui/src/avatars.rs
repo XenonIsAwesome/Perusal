@@ -30,6 +30,11 @@ fn path_of(url: &str) -> PathBuf {
 /// The downloaded file, if there is one.
 pub fn cached(url: &str) -> Option<PathBuf> { let p = path_of(url); std::fs::metadata(&p).ok().filter(|m| m.len() > 0).map(|_| p) }
 
+/// Cheap sanity check so an HTML error page or truncated reply is never cached as a picture (it would stay broken until deleted).
+fn looks_like_image(b: &[u8]) -> bool {
+    b.starts_with(&[0x89, b'P', b'N', b'G']) || b.starts_with(&[0xFF, 0xD8, 0xFF]) || b.starts_with(b"GIF8") || (b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP")
+}
+
 fn host_of(url: &str) -> Option<&str> { url.strip_prefix("https://")?.split(['/', '?', '#']).next() }
 
 /// Starts a background download unless the file exists, one is running, or it failed earlier this run. Only https URLs are fetched, and the
@@ -42,7 +47,7 @@ pub fn request(url: &str) {
         let tok = host_of(&url).and_then(|h| model::token_store().get(h));
         let res = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())
             .and_then(|rt| rt.block_on(perusal_providers::fetch_avatar(&url, tok.as_deref().map(|t| ("PRIVATE-TOKEN", t)))).map_err(|e| e.to_string()));
-        let ok = res.map(|bytes| { let p = path_of(&url); let _ = std::fs::create_dir_all(p.parent().unwrap()); std::fs::write(&p, bytes).is_ok() }).unwrap_or(false);
+        let ok = res.map(|bytes| looks_like_image(&bytes).then_some(bytes).ok_or(())).ok().and_then(Result::ok).map(|bytes| { let p = path_of(&url); let _ = std::fs::create_dir_all(p.parent().unwrap()); std::fs::write(&p, bytes).is_ok() }).unwrap_or(false);
         let mut s = state().lock().unwrap(); s.inflight.remove(&url); if !ok { s.failed.insert(url); }
         VERSION.fetch_add(1, Ordering::Relaxed);
     });

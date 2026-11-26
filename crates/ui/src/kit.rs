@@ -140,10 +140,10 @@ pub fn avatar_with(name: &str, url: Option<&str>, size: f32) -> gpui::AnyElement
     let sw = perusal_app::avatar::swatch(name); let letters = perusal_app::avatar::initials(name);
     let c = |v: [u8; 3]| -> Hsla { rgb(((v[0] as u32) << 16) | ((v[1] as u32) << 8) | v[2] as u32).into() };
     let (bg, fg) = (c(sw.bg), c(sw.fg));
-    let place = move || div().size(px(size)).flex_none().rounded_full().bg(bg).text_color(fg).flex().items_center().justify_center().font_weight(FontWeight::SEMIBOLD).text_size(px(size * 0.42)).line_height(px(size)).child(letters.clone());
+    let place = std::rc::Rc::new(move || div().size(px(size)).flex_none().rounded_full().bg(bg).text_color(fg).flex().items_center().justify_center().font_weight(FontWeight::SEMIBOLD).text_size(px(size * 0.42)).line_height(px(size)).child(letters.clone()));
     if let Some(u) = url {
         if let Some(path) = crate::avatars::cached(u) {
-            return div().size(px(size)).flex_none().rounded_full().overflow_hidden().child(gpui::img(path).size(px(size)).object_fit(gpui::ObjectFit::Cover).with_fallback(move || place().into_any_element())).into_any_element();
+            return div().size(px(size)).flex_none().rounded_full().overflow_hidden().child(gpui::img(path).size(px(size)).object_fit(gpui::ObjectFit::Cover).with_loading({ let p = place.clone(); move || p().into_any_element() }).with_fallback(move || place().into_any_element())).into_any_element();
         }
         crate::avatars::request(u);
     }
