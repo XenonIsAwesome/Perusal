@@ -56,3 +56,17 @@ fn commit(d: &Path, f: &str, c: &str, m: &str) { std::fs::write(d.join(f), c).un
     let rep = move_review(&s, r, &d, &new_head, &forced).unwrap(); assert!(rep.force_pushed); assert_eq!(rep.kept, 1);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test] fn selected_commits_give_the_revisions_to_diff() {
+    let d = repo("revs"); commit(&d, "a", "1\n", "base"); g(&d, &["checkout", "-qb", "feat"]);
+    commit(&d, "x", "x\n", "c1"); commit(&d, "x", "x\ny\n", "c2"); commit(&d, "x", "x\ny\nz\n", "c3");
+    let base = perusal_gitops::local_base(&d, "feat", None).unwrap();
+    let mut gv = GraphVm::load(&d, &base, "feat", 3).unwrap();
+    assert!(gv.revs().is_none());
+    gv.click(1); let (old, new) = gv.revs().unwrap(); // the middle commit c2
+    assert_eq!(show(&d, &old, "x").unwrap(), "x\n"); assert_eq!(show(&d, &new, "x").unwrap(), "x\ny\n");
+    gv.select_range(0, 2); let (old, new) = gv.revs().unwrap(); // c3 down to c1
+    assert!(show(&d, &old, "x").is_none()); assert_eq!(show(&d, &new, "x").unwrap(), "x\ny\nz\n");
+    gv.clear(); assert!(gv.revs().is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}

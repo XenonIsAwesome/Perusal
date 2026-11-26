@@ -199,8 +199,10 @@ impl View {
         let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None, marks: vec![] };
         for &fi in &batch {
             let f = self.m.vm.files[fi].clone();
-            let old = perusal_gitops::show(&self.m.repo, &self.m.base_sha, &f.path).unwrap_or_default();
-            let new = perusal_gitops::show(&self.m.repo, &self.m.branch, &f.path).unwrap_or_default();
+            // with a commit or range selected in the graph the diff shows only that range's changes
+            let (old_rev, new_rev) = self.diff_revs();
+            let old = perusal_gitops::show(&self.m.repo, &old_rev, &f.path).unwrap_or_default();
+            let new = perusal_gitops::show(&self.m.repo, &new_rev, &f.path).unwrap_or_default();
             if batch.len() == 1 && self.md_rendered && !f.symlink {
                 let src = if new.is_empty() { old } else { new }; self.md = Some(markdown::parse_located(&src)); self.md_src = src; self.base.clear(); self.rows.clear(); return;
             }
@@ -454,7 +456,23 @@ impl View {
         let mut added: Option<i64> = None;
         if let Some(id) = c.editing { let _ = self.m.store.edit_draft(id, &text); self.note(NKind::Success, "Comment updated.", None); if publish { added = Some(id); } }
         else {
-            let sel = if c.global { None } else { self.selection() };
+            let mut sel = if c.global { None } else { self.selection() };
+            // while scoped to commits, line numbers belong to that commit's version: map them onto the review head or refuse
+            if let Some(s) = sel.as_mut() {
+                if self.m.vm.commit_scope.is_some() { if let Some((_, new_rev)) = self.m.graph.revs() {
+                    let mapped = if s.old_side { None } else {
+                        let (a, b) = (perusal_gitops::show(&self.m.repo, &new_rev, &s.file).unwrap_or_default(), perusal_gitops::show(&self.m.repo, &self.m.branch, &s.file).unwrap_or_default());
+                        perusal_diff::text::reanchor(&a, &b, (s.start, s.end))
+                    };
+                    match mapped {
+                        Some((a, b)) => { s.start = a; s.end = b; }
+                        None => {
+                            self.note(NKind::Warning, "Those lines were changed by a later commit, so the comment cannot be placed on the review head. Clear the commit scope (x) and comment there.", None);
+                            self.open_composer(false, None); self.comment.f.set(&text); return;
+                        }
+                    }
+                } }
+            }
             match (sel, self.current_file(), c.global) {
                 (Some(s), _, _) => { added = self.m.store.add_draft_side(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false, s.old_side).ok(); self.note(NKind::Success, format!("Draft added on {}:{}-{}{}", s.file, s.start, s.end, if s.old_side { " (removed lines)" } else { "" }), None); }
                 (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); added = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false).ok(); self.note(NKind::Success, format!("Draft added on {path}"), None); }
@@ -469,6 +487,10 @@ impl View {
     fn next(&mut self) { self.m.vm.next(&self.m.store); self.reload(); }
     fn back(&mut self) { self.m.vm.back(); self.reload(); }
     fn step(&mut self, d: i32) { let n = self.m.vm.batch_count() as i32; if n > 0 { self.m.vm.cursor = (self.m.vm.cursor as i32 + d).rem_euclid(n) as usize; self.reload(); } }
+    /// (old, new) revisions the diff compares: the whole review, or the commit range selected in the graph.
+    fn diff_revs(&self) -> (String, String) {
+        match self.m.vm.commit_scope.as_ref().and(self.m.graph.revs()) { Some(r) => r, None => (self.m.base_sha.clone(), self.m.branch.clone()) }
+    }
     fn clear_scope(&mut self) { self.m.graph.clear(); self.m.vm.commit_scope = None; let _ = self.m.vm.refresh(); self.reload(); }
     fn pick_commit(&mut self, i: usize, shift: bool) { self.page = Page::Code;
         if self.m.graph.selection == Some((i, i)) && !shift { self.clear_scope(); return; }
