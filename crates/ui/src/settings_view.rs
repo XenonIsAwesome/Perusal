@@ -238,7 +238,9 @@ impl SettingsView {
         div().relative().child(dd_button(("dd", id as usize), current.to_string(), open, &p)
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; this.focus = None; cx.notify(); })))
-            .children(open.then(|| deferred(div().absolute().top(px(36.0)).right_0().min_w(px(220.0)).max_h(px(260.0)).overflow_hidden().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(hint).children(items)).with_priority(30))).into_any_element()
+            .children(open.then(|| deferred(div().absolute().top(px(36.0)).right_0().min_w(px(220.0)).flex().flex_col().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude()
+                // the search hint stays put; only the options scroll
+                .children(hint).child(div().id(("dd-list", id as usize)).max_h(px(260.0)).overflow_y_scroll().flex().flex_col().children(items))).with_priority(30))).into_any_element()
     }
 
     /// The "type to search" line at the top of an open dropdown.
@@ -264,7 +266,8 @@ impl SettingsView {
         div().relative().child(dd_button(("pk", id as usize), current.to_string(), open, &p)
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .on_click(cx.listener(move |this, _, _, cx| { this.dd = if this.dd == Some(id) { None } else { Some(id) }; this.focus = None; cx.notify(); })))
-            .children(open.then(|| deferred(div().id(("pk-list", id as usize)).absolute().top(px(36.0)).right_0().min_w(px(260.0)).max_h(px(320.0)).overflow_y_scroll().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude().children(hint).children(items)).with_priority(30))).into_any_element()
+            .children(open.then(|| deferred(div().absolute().top(px(36.0)).right_0().min_w(px(260.0)).flex().flex_col().rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().py_1().occlude()
+                .children(hint).child(div().id(("pk-list", id as usize)).max_h(px(320.0)).overflow_y_scroll().flex().flex_col().children(items))).with_priority(30))).into_any_element()
     }
 
     fn accounts_section(&mut self, cx: &mut Context<Self>) -> gpui::Div {
