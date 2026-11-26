@@ -58,7 +58,7 @@ impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
-    md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
+    refreshing: bool, md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
@@ -117,7 +117,7 @@ impl View {
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        View { md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        View { refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
@@ -507,6 +507,47 @@ impl View {
             }
         }).detach();
     }
+    /// Re-fetches the request (new commits, state, CI, threads) and reloads the review on the latest head, keeping drafts, viewed marks, filter and sort.
+    /// Local branch reviews re-read the branch instead.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.refreshing { return; }
+        self.refreshing = true; cx.notify();
+        let (remote, repo, branch, base, mr) = (self.m.remote.clone(), self.m.repo.clone(), self.m.branch.clone(), self.m.base_sha.clone(), self.m.mr.clone());
+        let task = cx.background_executor().spawn(async move {
+            let m = match &remote { Some(u) => Model::open_remote(u), None => Model::open_local(&repo, &branch, Some(&base)) };
+            let st = mr.as_ref().map(model::fetch_remote_state);
+            (m, st)
+        });
+        cx.spawn(async move |this, cx| { let (m, st) = task.await; let _ = this.update(cx, |t, cx| t.finish_refresh(m, st, cx)); }).detach();
+    }
+    fn finish_refresh(&mut self, m: Result<Model, model::OpenErr>, st: Option<Result<model::RemoteState, String>>, cx: &mut Context<Self>) {
+        self.refreshing = false;
+        match m { Ok(new) => self.adopt_model(new), Err(e) => self.note(NKind::Error, format!("Could not refresh: {e}"), None) }
+        match st { Some(Ok(s)) => self.apply_remote(s, cx), Some(Err(e)) => self.note(NKind::Error, format!("Could not refresh the request from the host: {e}"), None), None => {} }
+        self.flush(cx); cx.notify();
+    }
+    /// Swaps in a freshly opened model of the same review, carrying over the view settings, filter and sort; drafts follow their lines to the new head.
+    fn adopt_model(&mut self, mut new: Model) {
+        let tip = |m: &Model| m.graph.rows.iter().find(|r| r.in_mr).map(|r| r.sha.clone()).unwrap_or_default();
+        let (old_tip, old_n) = (tip(&self.m), self.m.graph.rows.iter().filter(|r| r.in_mr).count());
+        let (old_head, new_head) = (self.m.branch.clone(), new.branch.clone());
+        new.vm.dir_order = self.m.vm.dir_order; new.vm.grouping = self.m.vm.grouping; new.vm.rules = self.m.vm.rules.clone(); new.vm.mark_on_next = self.m.vm.mark_on_next; new.vm.hide_whitespace = self.m.vm.hide_whitespace;
+        let (f, s) = (self.m.vm.filter.clone(), self.m.vm.sort.clone()); let _ = new.vm.set_filter(&f); let _ = new.vm.set_sort(&s);
+        let mut lost = 0;
+        if new.mr.is_some() && old_head != new_head {
+            let repo = new.repo.clone();
+            let content = |file: &str, old: bool| perusal_gitops::show(&repo, if old { &old_head } else { &new_head }, file);
+            lost = new.store.move_head(new.vm.review, &new_head, &content).map(|l| l.len()).unwrap_or(0);
+        }
+        new.vm.sync_review_state(&new.store); let _ = new.vm.refresh();
+        let (new_tip, new_n) = (tip(&new), new.graph.rows.iter().filter(|r| r.in_mr).count());
+        self.m = new; self.snap.head = self.m.branch.clone();
+        self.collapsed_files.clear(); self.forced.clear(); self.multi.clear(); self.clear_selection(); self.reload();
+        if old_tip != new_tip {
+            self.note(NKind::Success, format!("Refreshed: now {new_n} commit{} (was {old_n}). Drafts and viewed marks were kept.", if new_n == 1 { "" } else { "s" }), None);
+            if lost > 0 { self.note(NKind::Warning, format!("{lost} draft{} could not follow {} lines to the new commits and keep the old line numbers.", if lost == 1 { "" } else { "s" }, if lost == 1 { "its" } else { "their" }), None); }
+        } else { self.note(NKind::Info, "Already up to date.", None); }
+    }
     fn apply_remote(&mut self, s: model::RemoteState, cx: &mut Context<Self>) {
         let now = Snapshot { state: model::norm_state(&s.info.state), head: s.info.head_sha.clone(), ci: Some(model::ci_label(&s.ci).to_string()).filter(|c| c != "none") };
         let title = self.m.title.clone();
@@ -796,6 +837,7 @@ impl View {
             "s" => { cx.emit(ViewEvent::OpenSettings); }
             "f" if !self.instant() => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
             "m" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
+            "r" | "f5" => self.refresh(cx),
             "u" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
             "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
             "t" => self.toggle_tree(), "n" => self.step(1), "p" => self.step(-1), "x" => self.clear_scope(),
@@ -927,6 +969,8 @@ impl View {
             .children(ci).children(local_mr)
             .child(div().flex_1())
             .when(ndrafts > 0, |d| d.child(badge(format!("{ndrafts} draft{}", if ndrafts == 1 { "" } else { "s" }), p.accent, p.accent.opacity(0.15))))
+            .child({ let b = icon_btn("refresh-mr", ic::REFRESH, if self.refreshing { "Refreshing…" } else if self.m.mr.is_some() { "Refresh: fetch new commits, CI and comments (R)" } else { "Refresh: re-read the branch (R)" }, Btn::Secondary, &p);
+                if self.refreshing { b.opacity(0.5) } else { b.on_click(cx.listener(|this, _, _, cx| { this.refresh(cx); })) } })
             .child(if reviewing { icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element() }
                 else { icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element() })
             .child(icon_btn("settings", ic::SETTINGS, "Settings (s)", Btn::Secondary, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings))))
