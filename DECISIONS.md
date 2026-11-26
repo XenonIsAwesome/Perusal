@@ -71,3 +71,4 @@
 - Diff horizontal scrollbar: a draggable track floats just above the bottom bar when any rendered line overflows (click the track to jump, drag the thumb); the review title shows a hover highlight (background + accent border) to signal click-to-rename.
 - Collapsed file-level and outdated comments now show as gutter icons (anchored to file header / last row) like line comments, instead of full-width cards.
 - GitHub threads: resolved state now read via GraphQL reviewThreads (REST lacks it), so resolved threads start collapsed; failures are ignored.
+- Submit: remote review comments on lines outside the diff are folded into the review summary (file:line prefix) instead of failing the whole review with GitHub 422 'Line could not be resolved'.

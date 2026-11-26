@@ -583,7 +583,14 @@ impl View {
                 (Some(f), Some(a), Some(b)) => {
                     let (old, new) = (perusal_gitops::show(&self.m.repo, &self.m.base_sha, f).unwrap_or_default(), perusal_gitops::show(&self.m.repo, &self.m.branch, f).unwrap_or_default());
                     let (start_old, end_old) = (perusal_diff::text::old_line_for_new(&old, &new, a), perusal_diff::text::old_line_for_new(&old, &new, b));
-                    comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old })
+                    // hosts reject inline comments on lines outside the diff ("Line could not be resolved"), so those go into the summary instead
+                    let shown: HashSet<u32> = diff_lines(&old, &new, 3).iter().filter_map(|l| l.new_no).collect();
+                    if self.m.mr.is_some() && !(shown.contains(&a) && shown.contains(&b)) {
+                        let at = if a == b { format!("{f}:{a}") } else { format!("{f}:{a}-{b}") };
+                        summary.push_str(&format!("\n\n**{at}**: {}", d.body));
+                    } else {
+                        comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old })
+                    }
                 }
                 (Some(f), _, _) => { summary.push_str(&format!("\n\n**{f}**: {}", d.body)); }
                 _ => { summary.push_str(&format!("\n\n{}", d.body)); }
