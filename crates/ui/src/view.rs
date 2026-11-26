@@ -1073,7 +1073,7 @@ impl View {
         let draft = c.draft; let orig = c.orig.clone();
         let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(text), &p, &mono, orig.as_deref()).text_sm().into_any_element() } };
         let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
-        div().flex().w_full().pl(px(110.0)).pr_3().py(px(4.0)).child(
+        div().flex().w_full().px_2().py(px(4.0)).child(
             div().id(SharedString::from(format!("card-{}", c.key))).flex().flex_col().flex_1().min_w_0().rounded_md()
                 .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = hv.map(|(a, b)| (cfi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == hv).unwrap_or(false) { this.hover_c = None; } cx.notify(); })).border_1().border_color(p.border).border_l_4().border_color(accent).bg(p.surface).overflow_hidden()
                 .child(div().flex().items_center().gap_2().px_3().py(px(5.0)).bg(p.hover.opacity(0.5))
