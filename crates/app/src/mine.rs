@@ -39,7 +39,8 @@ pub fn options(items: &[Item], d: Dim, remote: Option<&str>, sel: &Sel, query: &
     let mut count: std::collections::BTreeMap<String, usize> = Default::default();
     for it in items.iter().filter(|it| passes(it, remote, sel, query, Some(d))) {
         let vals: Vec<&str> = match d { Dim::Author => vec![it.author], Dim::Assignee => it.assignees.clone(), Dim::Label => it.labels.clone() };
-        for v in vals { if !v.is_empty() { *count.entry(v.to_string()).or_default() += 1; } }
+        // the signed-in user is the "Me" choice, not a second entry under their own login
+        for v in vals { if !v.is_empty() && !it.me.map(|m| m.eq_ignore_ascii_case(v)).unwrap_or(false) { *count.entry(v.to_string()).or_default() += 1; } }
     }
     for v in sel.set(d) { if v != ME { count.entry(v.clone()).or_default(); } }
     let mut v: Vec<(String, usize)> = count.into_iter().collect();
@@ -76,8 +77,11 @@ mod tests { use super::*;
         assert_eq!(options(&items, Dim::Label, Some("github"), &none, ""), vec!["bug"]);
         // authors only from items that pass the assignee filter; the author filter's own choice does not hide its siblings
         let mut s = Sel::default(); s.toggle(Dim::Assignee, "cy");
-        assert_eq!(options(&items, Dim::Author, None, &s, ""), vec!["al", "me1"]);
-        s.toggle(Dim::Author, "al"); assert_eq!(options(&items, Dim::Author, None, &s, ""), vec!["al", "me1"]);
+        assert_eq!(options(&items, Dim::Author, None, &s, ""), vec!["al"]);
+        s.toggle(Dim::Author, "al"); assert_eq!(options(&items, Dim::Author, None, &s, ""), vec!["al"]);
+        // your own login is offered as Me only (it.me is "me1" here)
+        let own = vec![it("me1", vec!["me1", "zz"], vec![], "github")];
+        assert_eq!(options(&own, Dim::Author, None, &none, ""), Vec::<String>::new()); assert_eq!(options(&own, Dim::Assignee, None, &none, ""), vec!["zz"]);
         // a selected value that no longer exists stays listed so it can be removed
         let mut s = Sel::default(); s.toggle(Dim::Label, "gone"); assert!(options(&items, Dim::Label, None, &s, "").contains(&"gone".to_string()));
     }
