@@ -17,16 +17,9 @@ pub(super) fn load_keys(vim: bool) -> (BTreeMap<String, String>, Option<String>)
 fn show_key(k: &str) -> String { k.replace("Ctrl+p", "Ctrl+P") }
 
 impl View {
-    pub fn draft_count(&self) -> usize { self.m.store.drafts(self.m.vm.review).map(|d| d.len()).unwrap_or(0) }
-    pub fn is_remote(&self) -> bool { self.m.remote.is_some() }
     pub fn tab_title(&self) -> String { self.m.title.clone() }
-    /// Quit prompt: Discard.
-    pub fn discard_drafts(&mut self) { for d in self.m.store.drafts(self.m.vm.review).unwrap_or_default() { let _ = self.m.store.delete_draft(d.id); } }
-    /// Quit prompt: Submit opens the finish dialog.
-    pub fn open_finish(&mut self, cx: &mut Context<Self>) { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; cx.notify(); }
 
     // ---------- host thread actions (go to the host immediately)
-    pub(super) fn run_pending_host(&mut self, cx: &mut Context<Self>) { if let Some(a) = self.pending_host.take() { self.host_act(a, cx); } }
     pub(super) fn open_host_composer(&mut self, t: HostTarget, text: &str) {
         self.comment.f.set(text); self.comment.f.multiline = true;
         self.composer = Some(Comp { editing: None, global: true, preview: false, host: Some(t) }); self.focus = Some(Fid::Comment);
@@ -118,7 +111,7 @@ impl View {
     pub(super) fn run_action(&mut self, a: &str, cx: &mut Context<Self>) {
         match a {
             "next_file" => self.step(1), "prev_file" => self.step(-1), "toggle_viewed" => self.toggle_viewed(), "next_batch" => self.next(), "prev_batch" => self.back(),
-            "comment" => { self.open_composer(false, None); }
+            "comment" => { self.open_composer(self.page == Page::Overview && self.info.is_some(), None); }
             "ask_ai" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
             "focus_filter" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
             "toggle_grouping" => { self.settings.group_related = !self.settings.group_related; self.save_settings(); self.m.vm.grouping = self.settings.group_related; let _ = self.m.vm.refresh(); self.reload(); }
@@ -126,7 +119,9 @@ impl View {
             "toggle_split" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
             "toggle_markdown" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
             "clear_scope" => self.clear_scope(),
-            "finish" => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
+            "finish" => { if !self.instant() { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; } }
+            "overview" => { if self.info.is_some() { self.page = if self.page == Page::Overview { Page::Code } else { Page::Overview }; cx.notify(); } }
+            "refresh" => self.refresh(cx),
             "settings" => cx.emit(ViewEvent::OpenSettings),
             "palette" => { self.palette_open = true; self.pal_in.f.clear(); self.pal_idx = 0; self.focus = Some(Fid::Palette); }
             "help" => { self.help_open = true; }

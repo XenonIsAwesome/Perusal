@@ -14,18 +14,59 @@ impl GitHub {
 }
 
 impl GitHub {
-    fn graphql_url(&self) -> String { if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) } }
-    /// root comment id -> (review thread node id, is resolved)
-    async fn graphql_threads(&self, r: &MrRef) -> Result<std::collections::HashMap<String, (String, bool)>> {
-        let (owner, name) = r.project.split_once('/').unwrap_or((r.project.as_str(), ""));
-        let q = json!({"query": "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}",
-            "variables": {"o": owner, "n": name, "p": r.number}});
-        let v: Value = check(self.http.post(self.graphql_url()).bearer_auth(&self.token).json(&q).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
-        let mut m = std::collections::HashMap::new();
-        for n in v.pointer("/data/repository/pullRequest/reviewThreads/nodes").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
-            if let (Some(id), Some(db)) = (n["id"].as_str(), n.pointer("/comments/nodes/0/databaseId").and_then(|x| x.as_u64())) { m.insert(db.to_string(), (id.to_string(), n["isResolved"].as_bool() == Some(true))); }
+    /// Every pull request in the repositories you can push to (the ones you can review with effect), newest activity first.
+    /// Capped at the 40 most recently pushed repositories with 30 pull requests each; repositories are queried concurrently
+    /// and one failing repository is skipped.
+    async fn reviewable(&self, host: &str, state: StateFilter) -> Result<Vec<RemoteMr>> {
+        let repos: Vec<Value> = check(self.req(reqwest::Method::GET, "/user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let names: Vec<String> = repos.iter().filter(|r| r["archived"].as_bool() != Some(true) && r.pointer("/permissions/push").and_then(|x| x.as_bool()).unwrap_or(false)).filter_map(|r| r["full_name"].as_str().map(String::from)).take(40).collect();
+        let st = match state { StateFilter::Open => "open", StateFilter::All => "all", _ => "closed" };
+        let mut set = tokio::task::JoinSet::new();
+        for n in names {
+            let (http, api, token) = (self.http.clone(), self.api.clone(), self.token.clone());
+            set.spawn(async move {
+                let g = GitHub { http, api, token };
+                let v: Vec<Value> = check(g.req(reqwest::Method::GET, &format!("/repos/{n}/pulls?state={st}&sort=updated&direction=desc&per_page=30")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                Ok::<_, Error>((n, v))
+            });
         }
-        Ok(m)
+        let (mut out, mut first_err, mut ok_any) = (vec![], None, false);
+        while let Some(r) = set.join_next().await {
+            let (project, list) = match r { Ok(Ok(v)) => v, Ok(Err(e)) => { first_err.get_or_insert(e); continue } Err(_) => continue };
+            ok_any = true;
+            for p in list {
+                let merged = !p["merged_at"].is_null();
+                let state_s = if merged { "merged" } else if p["state"] == "open" { "open" } else { "closed" };
+                if (state == StateFilter::Merged && !merged) || (state == StateFilter::Closed && merged) { continue; }
+                out.push(RemoteMr { url: p["html_url"].as_str().unwrap_or("").into(), title: p["title"].as_str().unwrap_or("").into(), project: project.clone(), number: p["number"].as_u64().unwrap_or(0),
+                    author: p.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state_s.into(), updated: p["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub,
+                    author_avatar: p.pointer("/user/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&p["assignees"], "login"), reviewers: people(&p["requested_reviewers"], "login"),
+                    labels: p["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: p["body"].as_str().unwrap_or("").into(), draft: p["draft"].as_bool() == Some(true) });
+            }
+        }
+        // every repository failing (rate limit, expired token) is an error, not an empty list
+        match first_err { Some(e) if !ok_any => Err(e), _ => Ok(out) }
+    }
+    fn graphql_url(&self) -> String { if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) } }
+    /// Review threads by the database id of their first comment: (GraphQL node id, resolved). Paged (capped at 50 pages); empty on any failure.
+    async fn graphql_threads(&self, r: &MrRef) -> std::collections::HashMap<String, (Option<String>, bool)> {
+        let mut m = std::collections::HashMap::new();
+        let Some((owner, name)) = r.project.split_once('/') else { return m };
+        let gql = self.graphql_url(); let mut cursor = Value::Null;
+        for _ in 0..50 {
+            let q = json!({"query": "query($o:String!,$n:String!,$p:Int!,$c:String){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100,after:$c){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}",
+                "variables": {"o": owner, "n": name, "p": r.number, "c": cursor}});
+            let Ok(resp) = check(self.http.post(&gql).bearer_auth(&self.token).json(&q).send().await).await else { break };
+            let Ok(v) = resp.json::<Value>().await else { break };
+            let Some(rt) = v.pointer("/data/repository/pullRequest/reviewThreads") else { break };
+            for n in rt["nodes"].as_array().into_iter().flatten() {
+                if let Some(db) = n.pointer("/comments/nodes/0/databaseId").and_then(|x| x.as_u64()) { m.insert(db.to_string(), (n["id"].as_str().map(String::from), n["isResolved"].as_bool() == Some(true))); }
+            }
+            if rt.pointer("/pageInfo/hasNextPage").and_then(|x| x.as_bool()) != Some(true) { break; }
+            cursor = rt.pointer("/pageInfo/endCursor").cloned().unwrap_or(Value::Null);
+            if cursor.is_null() { break; }
+        }
+        m
     }
 }
 
@@ -35,20 +76,27 @@ impl Provider for GitHub {
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let state = if v["merged"].as_bool() == Some(true) { "merged".into() } else { s("/state") };
-        Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url") })
+        Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url"), description: s("/body"), source_ref: s("/head/ref"),
+            author_avatar: s("/user/avatar_url"), assignees: people(&v["assignees"], "login"), reviewers: people(&v["requested_reviewers"], "login") })
     }
     async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}/comments", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let mut out: Vec<Thread> = Vec::new();
         for c in v {
             let root = c["in_reply_to_id"].as_u64().map(|x| x.to_string()).unwrap_or(c["id"].to_string());
-            let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string();
+            let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string(); let av = c["user"]["avatar_url"].as_str().unwrap_or("").to_string();
             let cid = c["id"].to_string();
-            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); t.comment_ids.push(cid); }
-            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)], comment_ids: vec![cid], node_id: None }); }
+            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); t.avatars.push(av); t.comment_ids.push(cid); }
+            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)], avatars: vec![av], comment_ids: vec![cid], node_id: None }); }
         }
-        // Resolved state and the ids needed to resolve live only in GraphQL; failing here keeps the plain threads.
-        if let Ok(map) = self.graphql_threads(r).await { for t in out.iter_mut() { if let Some((node, done)) = map.get(&t.id) { t.node_id = Some(node.clone()); t.resolved = *done; } } }
+        // the REST API does not say which review threads are resolved nor gives their GraphQL ids; ask GraphQL (best effort)
+        for (root, (node, done)) in self.graphql_threads(r).await { if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.node_id = node; t.resolved = done; } }
+        // general conversation on the pull request (issue comments); optional, so a failure here keeps the inline threads
+        if let Ok(resp) = check(self.req(reqwest::Method::GET, &format!("/repos/{}/issues/{}/comments?per_page=100", r.project, r.number)).send().await).await {
+            if let Ok(list) = resp.json::<Vec<Value>>().await {
+                for c in list { out.push(Thread { id: format!("i{}", c["id"]), path: None, line: None, resolved: false, comments: vec![(c["user"]["login"].as_str().unwrap_or("").to_string(), c["body"].as_str().unwrap_or("").to_string())], avatars: vec![c["user"]["avatar_url"].as_str().unwrap_or("").to_string()], comment_ids: vec![], node_id: None }); }
+            }
+        }
         Ok(out)
     }
     /// One review call carrying all comments, so a failure leaves nothing posted.
@@ -58,7 +106,15 @@ impl Provider for GitHub {
             json!({"path": c.path, "start_line": c.start_line, "line": c.end_line, "side": if c.old_side { "LEFT" } else { "RIGHT" }, "start_side": if c.old_side { "LEFT" } else { "RIGHT" }, "body": c.body})
         } else { json!({"path": c.path, "line": c.end_line, "side": if c.old_side { "LEFT" } else { "RIGHT" }, "body": c.body}) }).collect();
         let body = json!({"commit_id": s.head_sha, "body": s.summary, "event": event, "comments": comments});
-        check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/{}/reviews", r.project, r.number)).json(&body).send().await).await.map(|_| ())
+        // A review with nothing to say (no summary, no inline comments, a plain Comment verdict) is rejected by GitHub; skip it when only general comments remain.
+        if !(s.verdict == Verdict::Comment && s.summary.is_empty() && s.comments.is_empty() && !s.general.is_empty()) {
+            check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/{}/reviews", r.project, r.number)).json(&body).send().await).await?;
+        }
+        // General comments are conversation threads (issue comments), posted after the review that carries the verdict.
+        for g in &s.general {
+            check(self.req(reqwest::Method::POST, &format!("/repos/{}/issues/{}/comments", r.project, r.number)).json(&json!({"body": g})).send().await).await?;
+        }
+        Ok(())
     }
     async fn ci(&self, r: &MrRef, sha: &str) -> Result<Ci> {
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/repos/{}/commits/{sha}/check-runs", r.project)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
@@ -120,7 +176,8 @@ impl Provider for GitHub {
     }
     async fn my_reviews(&self, host: &str, role: Role, state: StateFilter) -> Result<Vec<RemoteMr>> {
         if self.token.is_empty() { return Err(Error::Unauthorized); }
-        let r = match role { Role::ReviewRequested => "review-requested:@me", Role::Authored => "author:@me", Role::Assigned => "assignee:@me" };
+        if role == Role::Reviewable { return self.reviewable(host, state).await; }
+        let r = match role { Role::ReviewRequested => "review-requested:@me", Role::Authored => "author:@me", Role::Assigned => "assignee:@me", Role::Reviewable => "" };
         let st = match state { StateFilter::Open => "+is:open", StateFilter::Merged => "+is:merged", StateFilter::Closed => "+is:closed+is:unmerged", StateFilter::All => "" };
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/search/issues?q=is:pr+{r}{st}&sort=updated&order=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         Ok(v["items"].as_array().cloned().unwrap_or_default().iter().map(|i| {
@@ -128,7 +185,9 @@ impl Provider for GitHub {
             let state = if merged { "merged" } else if i["state"] == "open" { "open" } else { "closed" };
             let project = i["repository_url"].as_str().and_then(|u| u.split("/repos/").nth(1)).unwrap_or("").to_string();
             RemoteMr { url: i["html_url"].as_str().unwrap_or("").into(), title: i["title"].as_str().unwrap_or("").into(), project, number: i["number"].as_u64().unwrap_or(0),
-                author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub }
+                author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub,
+                author_avatar: i.pointer("/user/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&i["assignees"], "login"), reviewers: vec![],
+                labels: i["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: i["body"].as_str().unwrap_or("").into(), draft: i["draft"].as_bool() == Some(true) }
         }).collect())
     }
 }

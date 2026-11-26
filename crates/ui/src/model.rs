@@ -5,6 +5,11 @@ use perusal_app::settings::HostCfg;
 use perusal_providers::{auth::{FileStore, TokenStore}, github::GitHub, gitlab::GitLab, Ci, Kind, MrRef, Provider, RemoteMr, Role, StateFilter, Thread};
 use std::path::{Path, PathBuf};
 
+/// What opening an updated request changed in the saved review: files whose viewed mark was dropped because they changed, and drafts
+/// that could not follow their lines to the new head.
+#[derive(Debug, Default, Clone)]
+pub struct Moved { pub unmarked: Vec<String>, pub lost: usize }
+
 pub struct Model {
     pub repo: PathBuf, pub base_sha: String, pub branch: String, pub store: Store, pub vm: ReviewVm, pub graph: GraphVm, pub title: String,
     pub remote: Option<String>,
@@ -14,6 +19,10 @@ pub struct Model {
     pub web_url: Option<String>,
     /// MR state when opened (open, merged, closed).
     pub mr_state: String,
+    /// Host metadata of the MR when it was opened (description for the overview).
+    pub info: Option<perusal_providers::MrInfo>,
+    /// Set when this open found the request on a newer head than the saved review.
+    pub moved: Option<Moved>,
 }
 
 #[derive(Debug)]
@@ -34,6 +43,17 @@ pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
 pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
+/// Editable prompt templates (`~/.config/perusal/prompts`); the defaults and an AGENTS.md are written there on first use.
+pub fn prompts_dir() -> PathBuf { config_dir().join("prompts") }
+/// Prompt templates with the user's overrides. Creates the folder and missing default files once per run.
+pub fn prompts() -> perusal_agents::Prompts {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| perusal_agents::ensure_prompt_files(&prompts_dir()));
+    perusal_agents::Prompts::new(prompts_dir())
+}
+/// My reviews filters, remembered globally.
+pub fn load_mine_state() -> perusal_app::mine::Saved { std::fs::read_to_string(config_dir().join("ui_state.toml")).map(|s| perusal_app::mine::Saved::from_toml(&s)).unwrap_or_default() }
+pub fn save_mine_state(s: &perusal_app::mine::Saved) { let _ = std::fs::create_dir_all(config_dir()); let _ = std::fs::write(config_dir().join("ui_state.toml"), s.to_toml()); }
 pub fn load_settings() -> perusal_app::settings::Settings { std::fs::read_to_string(config_dir().join("settings.toml")).map(|s| perusal_app::settings::Settings::from_toml(&s)).unwrap_or_default() }
 pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::create_dir_all(config_dir()); let _ = std::fs::write(config_dir().join("settings.toml"), s.to_toml()); }
 /// Where the read-only code snapshot for agents lives, per review and head.
@@ -67,7 +87,27 @@ impl Model {
         let title = store.review_title(review).ok().filter(|t| !t.is_empty()).unwrap_or(title);
         let vm = ReviewVm::new(&store, review, files);
         let graph = GraphVm::load(&repo, &base_sha, &rev, 6)?;
-        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new() })
+        Ok(Model { repo, base_sha, branch: rev, store, vm, graph, title, remote, mr: None, web_url: None, mr_state: String::new(), info: None, moved: None })
+    }
+
+    /// The saved review is pinned to the head it was last opened on. When the request has a newer head: drop the viewed mark of every file
+    /// that differs between the two heads (changed content is not reviewed content) and move drafts along with their lines.
+    fn follow_head(&mut self) {
+        let review = self.vm.review; let new_head = self.branch.clone();
+        let Ok(old) = self.store.pinned_head(review) else { return };
+        if old.is_empty() || old == new_head { return; }
+        let mut unmarked = vec![];
+        for path in self.store.viewed(review).unwrap_or_default() {
+            if perusal_gitops::show(&self.repo, &old, &path) != perusal_gitops::show(&self.repo, &new_head, &path) {
+                match self.vm.files.iter().position(|f| f.path == path) { Some(i) => self.vm.set_viewed(&self.store, i, false), None => { let _ = self.store.set_viewed(review, &path, false); } }
+                unmarked.push(path);
+            }
+        }
+        let repo = self.repo.clone();
+        let content = |f: &str, was_old: bool| perusal_gitops::show(&repo, if was_old { &old } else { &new_head }, f);
+        let lost = self.store.move_head(review, &new_head, &content).map(|l| l.len()).unwrap_or(0);
+        self.vm.sync_review_state(&self.store); let _ = self.vm.refresh();
+        self.moved = Some(Moved { unmarked, lost });
     }
 
     pub fn open_local(repo: &Path, branch: &str, base: Option<&str>) -> Result<Self, OpenErr> {
@@ -96,7 +136,8 @@ impl Model {
         let base_sha = perusal_gitops::merge_base(&dir, "refs/perusal/base", &head)?;
         let canon = canonical(&r);
         let mut m = Self::finish(dir, base_sha, head, &format!("remote:{canon}"), info.title.clone(), Some(canon))?;
-        m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); Ok(m)
+        crate::avatars::learn_info(&r.kind, &r.host, &info);
+        m.info = Some(info.clone()); m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); m.follow_head(); Ok(m)
     }
 
     /// Moves a remote review from `old_head` to the MR's current head: fetches it, re-anchors drafts, drops viewed marks of
@@ -249,24 +290,34 @@ pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
     let info = rt.block_on(p.mr_info(mr)).map_err(|e| e.to_string())?;
     let ci = rt.block_on(p.ci(mr, &info.head_sha)).unwrap_or(Ci::None);
     let threads = rt.block_on(p.threads(mr)).unwrap_or_default();
+    crate::avatars::learn_info(&mr.kind, &mr.host, &info); crate::avatars::learn_threads(&mr.kind, &mr.host, &threads);
     let me = if mr.host.is_empty() { None } else { rt.block_on(p.current_user()).ok().filter(|u| !u.is_empty()) };
+    if let Some(u) = &me { crate::avatars::set_me(&mr.host, u); }
     Ok(RemoteState { info, ci, threads, me })
 }
 pub fn ci_label(c: &Ci) -> &'static str { match c { Ci::None => "none", Ci::Pending => "pending", Ci::Running => "running", Ci::Passed => "passed", Ci::Failed => "failed", Ci::Canceled => "canceled" } }
 
 /// The user's reviews across every host they are signed in to. Hosts without a token are skipped; failures are reported per host.
-pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> (Vec<RemoteMr>, Vec<(String, String)>) {
-    let (mut all, mut errs) = (vec![], vec![]);
-    let Ok(rt) = rt() else { return (all, errs) };
+/// Also returns the signed-in login per host (for the "Me" choices). GitHub pull requests have no dependable reviewer list here, so the
+/// "reviewer" toggle lists every pull request in repositories you can review in, same as the default.
+/// Requests, per-host errors, and the signed-in login per host.
+pub type MineResult = (Vec<RemoteMr>, Vec<(String, String)>, std::collections::HashMap<String, String>);
+pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> MineResult {
+    let (mut all, mut errs, mut mes) = (vec![], vec![], std::collections::HashMap::new());
+    let Ok(rt) = rt() else { return (all, errs, mes) };
     for h in hosts {
         let Some(token) = token_for(&h.host) else { continue };
         let kind = if h.kind == "gitlab" { Kind::GitLab } else { Kind::GitHub };
+        let is_gh = kind == Kind::GitHub;
         let r = MrRef { kind, host: h.host.clone(), project: String::new(), number: 0 };
         let p = match provider(&r, token) { Ok(p) => p, Err(e) => { errs.push((h.host.clone(), e)); continue } };
+        if let Ok(u) = rt.block_on(p.current_user()) { if !u.is_empty() { crate::avatars::set_me(&h.host, &u); mes.insert(h.host.clone(), u); } }
+        let role = if is_gh && role == Role::ReviewRequested { Role::Reviewable } else { role };
         match rt.block_on(p.my_reviews(&h.host, role, state)) { Ok(mut l) => all.append(&mut l), Err(e) => errs.push((h.host.clone(), e.to_string())) }
     }
     all.sort_by(|a, b| b.updated.cmp(&a.updated));
-    (all, errs)
+    crate::avatars::learn_mrs(&all);
+    (all, errs, mes)
 }
 
 /// Signed-in user for a host (validates the token).
@@ -322,10 +373,10 @@ mod tests {
 /// Asks the configured agent to write a filter, sort or grouping rule (blocking; run it on a background thread).
 /// The answer is validated with the real parsers before it is returned: `[expr]` or `[label, pattern]`.
 pub fn run_gen(s: &perusal_app::settings::Settings, kind: perusal_agents::GenKind, request: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<String>, String> {
-    use perusal_agents::{gen_prompt, launch_with, on_path, parse_generated, GenKind, Options};
+    use perusal_agents::{launch_with, on_path, parse_generated, GenKind, Options};
     if request.trim().is_empty() { return Err("Describe what you want first.".into()); }
     let reference = if kind == GenKind::GroupRule { String::new() } else { perusal_filter::reference() };
-    let prompt = gen_prompt(kind, request.trim(), &reference);
+    let prompt = prompts().generate(kind, request.trim(), &reference);
     let l = launch_with(&s.agent, &s.agent_command, &prompt, &Options { model: s.model.clone(), effort: s.effort.clone(), path: s.agent_path.clone() }).ok_or("No agent configured. Choose one in Settings.")?;
     if !on_path(&l.program) { return Err(format!("`{}` was not found on your PATH. Install it or pick another agent in Settings.", l.program)); }
     let dir = std::env::temp_dir().join("perusal-gen"); let _ = std::fs::create_dir_all(&dir);

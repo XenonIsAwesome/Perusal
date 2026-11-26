@@ -20,7 +20,7 @@ target/release/perusal https://github.com/o/r/pull/1  # straight into a remote r
 ```
 Home: click the tabs (pull request URL, local branch, browse remote), paste with Ctrl+V, Enter opens. Tab / Shift+Tab move between fields. Esc in a review returns Home.
 Remote reviews need a token for private repos (the app asks and stores it in the OS keychain when `secret-tool` is installed, otherwise under `~/.config/perusal/tokens`, mode 0600).
-Data lives in `~/.local/share/perusal` (override with `PERUSAL_HOME`; `PERUSAL_CA_FILE` adds a CA certificate).
+Data lives in `~/.local/share/perusal` (override with `PERUSAL_HOME`; the system CA store is trusted; `PERUSAL_CA_FILE` adds one more CA certificate).
 Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl+P` command palette, `?` all shortcuts, `Ctrl +/-/0` zoom. Rebind them in `~/.config/perusal/keymap.toml` (`[keys]`, e.g. `comment = "z"`).
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
 and `libwayland-dev` to build. `perusal-cli` is the headless harness.
