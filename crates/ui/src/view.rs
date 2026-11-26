@@ -283,18 +283,21 @@ impl View {
             let fi = self.current_file()?; let (lo, hi) = (a.min(b), a.max(b));
             let (first, last) = (blocks.get(lo)?.first_line, blocks.get(hi)?.last_line);
             let snippet: String = self.md_src.lines().skip(first.saturating_sub(1) as usize).take((last + 1 - first) as usize).collect::<Vec<_>>().join("\n");
-            return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: first, end: last, snippet });
+            return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: first, end: last, snippet, old_side: false });
         }
         let (a, b) = self.sel?; let fi = self.rows.iter().find(|r| r.ord == Some(a))?.fi;
         let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
+        let (mut olo, mut ohi) = (u32::MAX, 0u32);
         for r in self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)) {
             let lines: Vec<&Line> = match &r.kind { RowKind::Uni(l) => vec![&l.line], RowKind::Split(l, rr) => l.iter().chain(rr.iter()).map(|x| &x.line).collect(), _ => vec![] };
             for l in lines {
-                if let Some(n) = l.new_no.or(l.old_no) { lo = lo.min(n); hi = hi.max(n); }
+                if let Some(n) = l.new_no { lo = lo.min(n); hi = hi.max(n); } else if let Some(n) = l.old_no { olo = olo.min(n); ohi = ohi.max(n); }
                 snippet.push_str(match l.kind { Kind::Added => "+", Kind::Removed => "-", Kind::Context => " " }); snippet.push_str(&l.text); snippet.push('\n');
             }
         }
-        (hi > 0).then(|| Selection { file: self.m.vm.files[fi].path.clone(), start: lo, end: hi, snippet })
+        // only removed lines selected: the comment belongs on the old side; mixed selections anchor on their new lines
+        if hi == 0 && ohi > 0 { return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: olo, end: ohi, snippet, old_side: true }); }
+        (hi > 0).then(|| Selection { file: self.m.vm.files[fi].path.clone(), start: lo, end: hi, snippet, old_side: false })
     }
     /// The selected lines as they will look after the change (for suggested edits).
     fn selection_new_text(&self) -> Option<String> {
@@ -390,7 +393,7 @@ impl View {
         else {
             let sel = if c.global { None } else { self.selection() };
             match (sel, self.current_file(), c.global) {
-                (Some(s), _, _) => { let _ = self.m.store.add_draft(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false); self.note(NKind::Success, format!("Draft added on {}:{}-{}", s.file, s.start, s.end), None); }
+                (Some(s), _, _) => { let _ = self.m.store.add_draft_side(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false, s.old_side); self.note(NKind::Success, format!("Draft added on {}:{}-{}{}", s.file, s.start, s.end, if s.old_side { " (removed lines)" } else { "" }), None); }
                 (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); let _ = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false); self.note(NKind::Success, format!("Draft added on {path}"), None); }
                 _ => { let _ = self.m.store.add_draft(self.m.vm.review, None, None, &text, false); self.note(NKind::Success, "Draft added on the merge request.", None); }
             }
@@ -568,7 +571,7 @@ impl View {
         let mut summary = self.summary.f.text.trim().to_string(); let mut comments = vec![];
         for d in drafts {
             match (&d.file, d.start_line, d.end_line) {
-                (Some(f), Some(a), Some(b)) => comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body }),
+                (Some(f), Some(a), Some(b)) => comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, old_side: d.old_side }),
                 (Some(f), _, _) => { summary.push_str(&format!("\n\n**{f}**: {}", d.body)); }
                 _ => { summary.push_str(&format!("\n\n{}", d.body)); }
             }

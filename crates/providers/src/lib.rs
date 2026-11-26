@@ -49,7 +49,9 @@ pub enum Ci { None, Pending, Running, Passed, Failed, Canceled }
 pub enum Verdict { Approve, RequestChanges, Comment }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: u32, pub body: String }
+pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: u32, pub body: String,
+    /// Line numbers are on the old side of the diff (a comment on a removed line).
+    pub old_side: bool }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: Verdict, pub comments: Vec<InlineComment> }

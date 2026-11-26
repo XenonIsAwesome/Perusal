@@ -55,8 +55,8 @@ impl Provider for GitHub {
     async fn submit(&self, r: &MrRef, s: &Submission) -> Result<()> {
         let event = match s.verdict { Verdict::Approve => "APPROVE", Verdict::RequestChanges => "REQUEST_CHANGES", Verdict::Comment => "COMMENT" };
         let comments: Vec<Value> = s.comments.iter().map(|c| if c.start_line != c.end_line {
-            json!({"path": c.path, "start_line": c.start_line, "line": c.end_line, "side": "RIGHT", "body": c.body})
-        } else { json!({"path": c.path, "line": c.end_line, "side": "RIGHT", "body": c.body}) }).collect();
+            json!({"path": c.path, "start_line": c.start_line, "line": c.end_line, "side": if c.old_side { "LEFT" } else { "RIGHT" }, "start_side": if c.old_side { "LEFT" } else { "RIGHT" }, "body": c.body})
+        } else { json!({"path": c.path, "line": c.end_line, "side": if c.old_side { "LEFT" } else { "RIGHT" }, "body": c.body}) }).collect();
         let body = json!({"commit_id": s.head_sha, "body": s.summary, "event": event, "comments": comments});
         check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/{}/reviews", r.project, r.number)).json(&body).send().await).await.map(|_| ())
     }

@@ -38,7 +38,12 @@ impl Provider for GitLab {
         let refs = |k: &str| mr.pointer(&format!("/diff_refs/{k}")).and_then(|x| x.as_str()).map(String::from);
         let head = refs("head_sha").unwrap_or_else(|| s.head_sha.clone());
         let (base_sha, start_sha) = (refs("base_sha"), refs("start_sha"));
-        let mut bodies: Vec<Value> = s.comments.iter().map(|c| json!({"note": c.body, "position": {"position_type": "text", "old_path": c.path, "new_path": c.path, "new_line": c.end_line, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha}})).collect();
+        let mut bodies: Vec<Value> = s.comments.iter().map(|c| {
+            let mut pos = json!({"position_type": "text", "old_path": c.path, "new_path": c.path, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha});
+            // a comment on a removed line is anchored by its old line number only
+            pos[if c.old_side { "old_line" } else { "new_line" }] = json!(c.end_line);
+            json!({"note": c.body, "position": pos})
+        }).collect();
         if !s.summary.is_empty() { bodies.push(json!({"note": s.summary})); }
         let res: Result<()> = async {
             for b in &bodies {

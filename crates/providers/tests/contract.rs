@@ -7,7 +7,7 @@ fn gh(s: &MockServer) -> GitHub { GitHub { http: reqwest::Client::new(), api: s.
 fn gl(s: &MockServer) -> GitLab { GitLab { http: reqwest::Client::new(), api: s.uri(), token: "t".into() } }
 fn ghref() -> MrRef { MrRef { kind: Kind::GitHub, host: "h".into(), project: "o/r".into(), number: 3 } }
 fn glref() -> MrRef { MrRef { kind: Kind::GitLab, host: "h".into(), project: "g/p".into(), number: 4 } }
-fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into() }] } }
+fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), old_side: false }] } }
 
 #[tokio::test] async fn github_info_and_ci() {
     let s = MockServer::start().await;
@@ -165,4 +165,18 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     let bad = MockServer::start().await;
     Mock::given(method("POST")).respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_client","error_description":"unknown client"}))).mount(&bad).await;
     assert!(auth::device_start_for(&c, &bad.uri(), "x", true).await.unwrap_err().contains("invalid_client"));
+}
+
+#[tokio::test] async fn removed_line_comments_use_the_old_side() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/repos/o/r/pulls/3/reviews")).and(body_partial_json(json!({"comments":[{"path":"a.rs","line":7,"side":"LEFT"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).expect(1).mount(&s).await;
+    let c = InlineComment { path: "a.rs".into(), start_line: 7, end_line: 7, body: "why removed?".into(), old_side: true };
+    gh(&s).submit(&ghref(), &Submission { head_sha: "abc".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![c] }).await.unwrap();
+    let g = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("GET")).and(path(b)).respond_with(ResponseTemplate::new(200).set_body_json(json!({"diff_refs":{"base_sha":"b","start_sha":"s","head_sha":"h"}}))).mount(&g).await;
+    Mock::given(method("POST")).and(path(format!("{b}/draft_notes"))).and(body_partial_json(json!({"position":{"old_line":7}}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":1}))).expect(1).mount(&g).await;
+    Mock::given(method("POST")).and(path(format!("{b}/draft_notes/bulk_publish"))).respond_with(ResponseTemplate::new(204)).mount(&g).await;
+    let c = InlineComment { path: "a.rs".into(), start_line: 7, end_line: 7, body: "why removed?".into(), old_side: true };
+    gl(&g).submit(&glref(), &Submission { head_sha: "h".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![c] }).await.unwrap();
 }
