@@ -432,6 +432,14 @@ impl gpui::Render for SettingsView {
             let theme_dd = self.dropdown(0, &s.theme, themes.clone(), cx, |st, v| st.theme = v);
             let light_dd = self.dropdown(1, &s.theme_light, themes.clone(), cx, |st, v| st.theme_light = v);
             let dark_dd = self.dropdown(2, &s.theme_dark, themes, cx, |st, v| st.theme_dark = v);
+            let font_opts = |cur: &str, all: &[String]| -> Vec<(String, String)> { let mut v: Vec<(String, String)> = vec![("Default".into(), String::new())]; v.extend(all.iter().map(|n| (n.clone(), n.clone()))); let _ = cur; v };
+            let mut all_fonts: Vec<String> = cx.text_system().all_font_names().into_iter().filter(|n| !n.starts_with('.') && n != "Material Icons").collect(); all_fonts.sort(); all_fonts.dedup();
+            let ui_label = if s.ui_font.is_empty() { "Default".to_string() } else { s.ui_font.clone() };
+            let code_label = if s.code_font.is_empty() { "Default".to_string() } else { s.code_font.clone() };
+            let ui_font_dd = self.pick(6, &ui_label, font_opts(&s.ui_font, &all_fonts), cx, |this, v, cx| { this.settings.ui_font = v; this.changed(cx); });
+            let code_font_dd = self.pick(7, &code_label, font_opts(&s.code_font, &all_fonts), cx, |this, v, cx| { this.settings.code_font = v; this.changed(cx); });
+            let lh_opts: Vec<(String, String)> = ["0.9", "1.0", "1.1", "1.25", "1.5"].iter().map(|x| (x.to_string(), x.to_string())).collect();
+            let line_dd = self.pick(8, &format!("{:?}", s.line_height), lh_opts, cx, |this, v, cx| { this.settings.line_height = v.parse().unwrap_or(1.0); this.changed(cx); });
             let accounts = self.accounts_section(cx);
             let ai = self.ai_section(cx, &row);
             let msgbox = self.msg.clone().filter(|_| self.onboarding.is_none()).map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().mt_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })
@@ -500,6 +508,16 @@ impl gpui::Render for SettingsView {
                         .child(div().flex().items_center().gap_2().px_3().py_2().rounded_md().border_1().border_color(p.border).bg(p.surface).child(div().flex_1().min_w_0().text_sm().child(format!("\"{example}\"")))
                             .child(icon_btn("copy-prompt", ic::CONTENT_COPY, "Copy this prompt", Btn::Ghost, &p).on_click(cx.listener(move |_, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(example.to_string())); }))))
                         .child(div().text_xs().text_color(p.muted).child("New valid theme files appear in the dropdown the next time you open Settings.")))
+                    .child(section("Fonts"))
+                    .child(row("UI font", "Used for labels, comments and panels. Takes effect immediately", ui_font_dd))
+                    .child(row("Code font", "Used for diffs, filters and code blocks", code_font_dd))
+                    .child(row("Code line height", "Row height in the diff, as a multiple of the default", line_dd))
+                    .child(row("Font ligatures in code", "Draw combinations such as => and != as single glyphs when the font has them", sw("sw-lig", s.ligatures, cx, |st| st.ligatures = !st.ligatures)))
+                    .child(section("Motion"))
+                    .child(row("Reduce motion", "Show CI and agent activity as static icons instead of pulsing ones (also PERUSAL_REDUCED_MOTION=1)", sw("sw-rm", s.reduced_motion, cx, |st| st.reduced_motion = !st.reduced_motion)))
+                    .child(section("Keyboard"))
+                    .child(row("Vim-style keys", "j and k move between files. Individual keys are rebound in keymap.toml; press ? in a review for the list", sw("sw-vim", s.vim_keys, cx, |st| st.vim_keys = !st.vim_keys)))
+                    .child(row("Keymap file", "Edit [keys] overrides, for example comment = \"m\"", icon_text_btn("open-keymap", ic::KEYBOARD, "Open folder", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let d = model::config_dir(); let _ = std::fs::create_dir_all(&d); if let Err(e) = model::open_dir(&d) { this.say(false, e); } cx.notify(); })).into_any_element()))
                     .child(section("Window"))
                     .child(row("Built-in title bar", "Draw the minimize, maximize and close buttons inside the app. Turn off to use the system title bar and borders", sw("sw-tb", s.custom_titlebar, cx, |st| st.custom_titlebar = !st.custom_titlebar)))
                     .child(section("Setup")).child(row("Run the first-time setup again", "Walks through accounts and the AI agent", icon_text_btn("rerun-ob", ic::ROCKET_LAUNCH, "Start setup", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.onboarding = Some(0); cx.notify(); })).into_any_element())),

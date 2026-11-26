@@ -53,6 +53,18 @@ fn variant_families(cx: &App, ui: &str) -> (Option<SharedString>, Option<SharedS
     (alt(true), alt(false))
 }
 
+/// Process-wide switch for decorative animation (set from settings).
+pub static REDUCED_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn reduced_motion() -> bool { REDUCED_MOTION.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Fonts with the user's chosen families (when installed) taking precedence over the built-in pick.
+pub fn pick_fonts_for(cx: &App, s: &perusal_app::settings::Settings) -> Fonts {
+    let mut f = pick_fonts(cx); let names = cx.text_system().all_font_names();
+    if !s.ui_font.is_empty() && names.iter().any(|n| *n == s.ui_font) { f.ui = s.ui_font.clone().into(); }
+    if !s.code_font.is_empty() && names.iter().any(|n| *n == s.code_font) { f.mono = s.code_font.clone().into(); }
+    f
+}
+
 pub fn pick_fonts(cx: &App) -> Fonts {
     let names = cx.text_system().all_font_names();
     let has = |n: &str| names.iter().any(|x| x == n);
@@ -173,6 +185,7 @@ pub fn seg_icon(id: impl Into<gpui::ElementId>, i: Icon, tooltip: &str, on: bool
 /// Three pulsing dots: an agent is working.
 pub fn loading_dots(p: &Pal) -> Div {
     let c = p.accent;
+    if reduced_motion() { return div().flex().items_center().gap(px(4.0)).children((0..3usize).map(|_| div().size(px(7.0)).rounded_full().bg(c).opacity(0.7)).collect::<Vec<_>>()); }
     div().flex().items_center().gap(px(4.0)).children((0..3usize).map(|i| {
         div().size(px(7.0)).rounded_full().bg(c).with_animation(("dot", i), Animation::new(Duration::from_millis(1200)).repeat(), move |d, t| {
             let phase = ((t * std::f32::consts::TAU) - i as f32 * 0.9).sin() * 0.5 + 0.5; d.opacity(0.2 + 0.8 * phase)
@@ -414,7 +427,7 @@ pub fn ci_badge(state: &str, p: &Pal) -> Option<Stateful<Div>> {
     };
     let b = div().id("ci").flex().items_center().justify_center().size(px(30.0)).rounded_md().cursor_pointer().hover(move |s| s.bg(p.hover));
     let ic = icon(i, 20.0, color);
-    let b = if pulse { b.child(ic.with_animation("ci-pulse", Animation::new(Duration::from_millis(if state == "running" { 2000 } else { 3500 })).repeat(), |d, t| d.opacity(0.35 + 0.65 * ((t * std::f32::consts::TAU).sin() * 0.5 + 0.5)))) } else { b.child(ic) };
+    let b = if pulse && !reduced_motion() { b.child(ic.with_animation("ci-pulse", Animation::new(Duration::from_millis(if state == "running" { 2000 } else { 3500 })).repeat(), |d, t| d.opacity(0.35 + 0.65 * ((t * std::f32::consts::TAU).sin() * 0.5 + 0.5)))) } else { b.child(ic) };
     Some(tip(b, format!("{label}. Click to open the checks page."), p))
 }
 

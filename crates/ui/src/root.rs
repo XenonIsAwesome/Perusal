@@ -1,6 +1,6 @@
 //! Root: the tab strip (Home plus one tab per open review), the Home screen, shared Settings/setup, and notifications.
 use crate::icons as ic;
-use crate::kit::{self, badge, icon, icon_btn, icon_text_btn, input_text, loading_dots, pick_fonts, wire_input, Btn, Fonts, Input, Pal};
+use crate::kit::{self, badge, icon, icon_btn, icon_text_btn, input_text, loading_dots, wire_input, Btn, Fonts, Input, Pal};
 use crate::model::{self, Model, OpenErr};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::view::{View, ViewEvent};
@@ -29,7 +29,7 @@ struct TabItem { key: String, title: String, ci: String, view: Entity<View>, _su
 pub struct Root {
     settings: Settings, decor: WindowDecorations, pal: Pal, fonts: Fonts, focus: FocusHandle,
     tabs: Vec<TabItem>, active: Option<usize>, settings_view: Option<Entity<SettingsView>>, _ssub: Option<Subscription>, toasts: Toasts,
-    htab: HTab, otab: OTab, hf: Option<Hf>,
+    htab: HTab, otab: OTab, hf: Option<Hf>, quit: bool,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>,
     recent: Vec<RecentRow>, r_remote: Remote, r_state: St,
     mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool,
@@ -43,7 +43,7 @@ impl Root {
         let settings = model::load_settings();
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut r = Root { decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
-            htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None,
+            htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), quit: false, url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None,
             recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::ReviewRequested, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false,
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
         r.refresh_recent();
@@ -76,7 +76,9 @@ impl Root {
     fn apply_settings(&mut self, s: Settings, cx: &mut Context<Self>) {
         let theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&theme);
         if let Some(sv) = &self.settings_view { sv.update(cx, |v, _| v.set_pal(Pal::new(&theme))); }
-        for t in &self.tabs { let s2 = s.clone(); t.view.update(cx, |v, _| v.apply_settings(s2)); }
+        kit::REDUCED_MOTION.store(s.motion_reduced(), std::sync::atomic::Ordering::Relaxed);
+        self.fonts = kit::pick_fonts_for(cx, &s); let fonts = self.fonts.clone();
+        for t in &self.tabs { let (s2, f2) = (s.clone(), fonts.clone()); t.view.update(cx, |v, _| v.apply_settings(s2, f2)); }
         self.settings = s; cx.notify();
     }
 
@@ -104,6 +106,37 @@ impl Root {
             Err(OpenErr::Msg(m)) => self.say(NKind::Error, m),
         }
         cx.notify();
+    }
+    /// Tabs with unsent drafts: (tab index, title, draft count, remote).
+    fn pending(&self, cx: &App) -> Vec<(usize, String, usize, bool)> {
+        self.tabs.iter().enumerate().filter_map(|(i, t)| { let v = t.view.read(cx); let n = v.draft_count(); (n > 0).then(|| (i, v.tab_title(), n, v.is_remote())) }).collect()
+    }
+    /// Window close button / Ctrl+Q: ask first when there are unsent drafts (Submit, Keep for later, Discard).
+    fn request_close(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        if self.pending(cx).is_empty() { w.remove_window(); } else { self.quit = true; cx.notify(); }
+    }
+    /// OS-level close (window manager): same prompt; returns whether the window may close now.
+    fn should_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.pending(cx).is_empty() { true } else { self.quit = true; cx.notify(); false }
+    }
+    fn quit_overlay(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let p = self.pal; let pend = self.pending(cx);
+        let first_remote = pend.iter().find(|x| x.3).map(|x| x.0);
+        let total: usize = pend.iter().map(|x| x.2).sum();
+        let list = div().flex().flex_col().gap_1().children(pend.iter().map(|(_, t, n, _)| div().flex().items_center().gap_2().text_sm().child(icon(ic::EDIT_NOTE, 16.0, p.accent)).child(div().flex_1().min_w_0().truncate().child(t.clone())).child(div().text_color(p.muted).child(format!("{n} draft{}", if *n == 1 { "" } else { "s" })))));
+        let card = div().id("quit-card").flex().flex_col().gap_3().w(px(480.0)).p_5().rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .child(div().flex().items_center().gap_2().child(icon(ic::RATE_REVIEW, 22.0, p.accent)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("You have unsent review comments")))
+            .child(div().text_sm().text_color(p.muted).child(format!("{total} draft comment{} will not be lost if you keep them: they are saved on this computer and are here when you reopen the review.", if total == 1 { "" } else { "s" })))
+            .child(list)
+            .child(div().flex().items_center().justify_end().gap_2().pt_2()
+                .child(icon_text_btn("q-cancel", ic::CLOSE, "Cancel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.quit = false; cx.notify(); })))
+                .child(icon_text_btn("q-discard", ic::DELETE, "Discard", Btn::Secondary, &p).on_click(cx.listener(|this, _, w, cx| { for t in &this.tabs { t.view.update(cx, |v, _| v.discard_drafts()); } w.remove_window(); })))
+                .child(icon_text_btn("q-keep", ic::SAVE, "Keep for later", Btn::Secondary, &p).on_click(cx.listener(|_, _, w, _| { w.remove_window(); })))
+                .when(first_remote.is_some(), |d| d.child(icon_text_btn("q-submit", ic::SEND, "Submit…", Btn::Primary, &p).on_click(cx.listener(move |this, _, _, cx| {
+                    this.quit = false; if let Some(i) = first_remote { this.active = Some(i); let v = this.tabs[i].view.clone(); v.update(cx, |v, cx| v.open_finish(cx)); } cx.notify(); })))));
+        gpui::deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.55)).occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.quit = false; cx.notify(); })).child(card)).with_priority(40).into_any_element()
     }
     fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         if i >= self.tabs.len() { return; }
@@ -236,18 +269,18 @@ impl Root {
         }).collect();
         let custom = self.settings.custom_titlebar;
         let max = window.is_maximized();
-        let ctl = |id: &'static str, i: ic::Icon, tip_t: &'static str, danger: bool, cx: &mut Context<Self>, f: fn(&mut Window)| {
+        let ctl = |id: &'static str, i: ic::Icon, tip_t: &'static str, danger: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             let hv = if danger { gpui::rgb(0xe81123).into() } else { p.hover };
             kit::tip(div().id(id).flex().items_center().justify_center().w(px(46.0)).h(px(36.0)).cursor_pointer().hover(move |x| x.bg(hv)).child(icon(i, 16.0, p.fg))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |_, _, w, cx| { f(w); cx.notify(); })), tip_t, &p)
+                .on_click(cx.listener(move |this, _, w, cx| { f(this, w, cx); cx.notify(); })), tip_t, &p)
         };
         // the empty part of the strip drags the window; double click maximizes
         let drag = div().id("strip-drag").flex_1().h(px(36.0)).when(custom, |d| d.on_mouse_down(MouseButton::Left, cx.listener(|_, ev: &gpui::MouseDownEvent, w, _| { if ev.click_count >= 2 { w.zoom_window(); } else { w.start_window_move(); } })));
         div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(drag)
-            .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |w| w.minimize_window()))
-                .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |w| w.zoom_window()))
-                .child(ctl("win-close", ic::CLOSE, "Close", true, cx, |w| w.remove_window())))
+            .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |_, w, _| w.minimize_window()))
+                .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |_, w, _| w.zoom_window()))
+                .child(ctl("win-close", ic::CLOSE, "Close", true, cx, |t, w, cx| t.request_close(w, cx))))
     }
 
     fn recent_filtered(&self) -> Vec<RecentRow> {
@@ -425,12 +458,14 @@ impl Render for Root {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { if this.hf.is_some() { if this.renaming.is_some() { this.commit_rename(cx); } this.hf = None; cx.notify(); } }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 let ks = &ev.keystroke; let ctrl = ks.modifiers.control || ks.modifiers.platform;
+                if this.quit { if ks.key == "escape" { this.quit = false; cx.notify(); } return; }
+                if ctrl && ks.key == "q" && this.settings_view.is_none() { this.request_close(_w, cx); return; }
                 if let Some(sv) = this.settings_view.clone() { sv.update(cx, |v, cx| v.key(ev, cx)); return; }
                 if ctrl && ks.key == "tab" { this.cycle(if ks.modifiers.shift { -1 } else { 1 }, cx); return; }
                 if ctrl && ks.key == "w" { if let Some(a) = this.active { this.close_tab(a, cx); } return; }
                 if let Some(t) = this.active.and_then(|i| this.tabs.get(i)) { let v = t.view.clone(); v.update(cx, |v, cx| v.key(ev, cx)); } else { this.home_key(ev, cx); }
             }))
-            .child(strip).child(body).children(settings).children(toasts)
+            .child(strip).child(body).children(settings).children(toasts).children(self.quit.then(|| self.quit_overlay(cx)))
             .when(resizable, |d| {
                 let edge = |id: &'static str, e: ResizeEdge, c: CursorStyle| div().id(id).absolute().cursor(c).on_mouse_down(MouseButton::Left, move |_, w, cx| { w.start_window_resize(e); cx.stop_propagation(); });
                 let t = px(5.0); let k = px(12.0);
@@ -450,13 +485,15 @@ pub fn run(initial: Initial) {
     std::thread::spawn(|| { let _ = perusal_agents::search_dirs(); }); // warm the login-shell PATH lookup off the UI thread
     gpui_platform::application().run(move |cx: &mut App| {
         let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/MaterialIcons-Regular.ttf").as_slice())]);
-        let fonts = pick_fonts(cx);
+        let st0 = model::load_settings(); kit::REDUCED_MOTION.store(st0.motion_reduced(), std::sync::atomic::Ordering::Relaxed);
+        let fonts = kit::pick_fonts_for(cx, &st0);
         let bounds = Bounds::centered(None, size(px(1480.0), px(900.0)), cx);
         let custom = model::load_settings().custom_titlebar;
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), window_min_size: Some(size(px(900.0), px(560.0))),
             window_decorations: Some(if custom { WindowDecorations::Client } else { WindowDecorations::Server }),
             icon: kit::window_icon(), titlebar: Some(TitlebarOptions { title: Some("Perusal".into()), appears_transparent: true, ..Default::default() }), ..Default::default() }, move |window, cx| {
             let root = cx.new(|cx| Root::new(initial, fonts, cx));
+            { let r = root.clone(); window.on_window_should_close(cx, move |_, cx| r.update(cx, |t, cx| t.should_close(cx))); }
             window.focus(&root.read(cx).focus.clone(), cx);
             root
         }).unwrap();

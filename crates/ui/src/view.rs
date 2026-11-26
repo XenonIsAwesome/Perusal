@@ -1,3 +1,4 @@
+mod extra;
 use crate::icons as ic;
 use crate::kit::{self, badge, ci_badge, diff_squares, field_key, icon, icon_btn, icon_text_btn, input_text, kbd, loading_dots, markdown_view, new_bounds, seg_box, seg_icon, tip, wire_input, Btn, FieldBounds, Fonts, Input, Pal};
 use crate::model::{self, Model};
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename, Gen }
+enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename, Gen, Palette }
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab { Review, Ai }
 #[derive(PartialEq, Clone, Copy)]
@@ -46,6 +47,7 @@ pub enum ViewEvent { Home, OpenSettings, Notice(NKind, String, Option<&'static s
 impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
+    keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_in: Input, pal_idx: usize, help_open: bool,
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds,
@@ -95,14 +97,17 @@ impl View {
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        View { pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        let (keys, key_err) = extra::load_keys(settings.vim_keys);
+        let mut v = View { keys, palette_open: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None,
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true,
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
-            verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
+            verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m };
+        if let Some(e) = key_err { v.note(NKind::Warning, e, None); }
+        v
     }
     pub fn key_id(&self) -> String { self.m.remote.clone().map(|u| format!("remote:{u}")).unwrap_or_else(|| format!("local:{}#{}", self.m.repo.display(), self.m.branch)) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
@@ -112,7 +117,8 @@ impl View {
     fn resync(&mut self) { self.m.vm.sync_review_state(&self.m.store); let _ = self.m.vm.refresh(); self.rebuild_rows(); }
 
     /// Applies new settings from the Settings panel to this review.
-    pub fn apply_settings(&mut self, s: Settings) {
+    pub fn apply_settings(&mut self, s: Settings, fonts: Fonts) {
+        self.fonts = fonts; self.keys = extra::load_keys(s.vim_keys).0;
         let regroup = s.group_related != self.settings.group_related || s.group_rules != self.settings.group_rules || s.files_tree != self.settings.files_tree;
         let diff_changed = s.diff_mode != self.settings.diff_mode;
         self.theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme);
@@ -415,6 +421,7 @@ impl View {
             Some(Fid::Filter) => { let t = self.m.vm.filter.clone(); self.filter.f.set(&t); }
             Some(Fid::Sort) => { let t = self.m.vm.sort.clone(); self.sort.f.set(&t); }
             Some(Fid::Rename) => { self.commit_rename(cx); }
+            Some(Fid::Palette) => { self.palette_open = false; }
             _ => {}
         }
         self.focus = None; self.sug.clear(); self.presets_open = false; self.error = None; self.sort_open = false; if !self.gen_busy { self.gen_for = None; }
@@ -586,6 +593,7 @@ impl View {
     pub fn key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &ev.keystroke; let key = ks.key.as_str();
         let ctrl = ks.modifiers.control || ks.modifiers.platform;
+        if self.help_open { self.help_open = false; cx.notify(); return; }
         if self.finish_open && self.focus != Some(Fid::Summary) { if key == "escape" { self.finish_open = false; cx.notify(); } return; }
         if let Some(f) = self.focus {
             match f {
@@ -606,23 +614,17 @@ impl View {
                 Fid::Preset => { if key == "escape" { self.presets_open = false; self.focus = None; } else if key == "enter" { self.save_preset(true); } else { field_key(&mut self.preset_name.f, ks, cx); } }
                 Fid::Gen => { if key == "escape" { self.gen_for = None; self.focus = None; } else if key == "enter" { self.start_gen(cx); } else { field_key(&mut self.gen.f, ks, cx); } }
                 Fid::Rename => { if key == "escape" { let t = self.m.title.clone(); self.rename.f.set(&t); self.focus = None; } else if key == "enter" { self.commit_rename(cx); self.focus = None; } else { field_key(&mut self.rename.f, ks, cx); } }
+                Fid::Palette => self.palette_key(key, ks, cx),
             }
             self.flush(cx); cx.notify(); return;
         }
-        if ctrl { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), "0" => self.zoom = theme::zoom(self.zoom, 0), _ => {} } cx.notify(); return; }
-        match key {
-            "escape" => { if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; } }
-            "/" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
-            "c" => { self.open_composer(false, None); }
-            "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
-            "s" => { cx.emit(ViewEvent::OpenSettings); }
-            "f" => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
-            "m" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
-            "u" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
-            "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
-            "t" => self.toggle_tree(), "n" => self.step(1), "p" => self.step(-1), "x" => self.clear_scope(),
-            "g" => { self.settings.group_related = !self.settings.group_related; self.save_settings(); self.m.vm.grouping = self.settings.group_related; let _ = self.m.vm.refresh(); self.reload(); }
-            _ => {}
+        if ctrl && matches!(key, "=" | "+" | "-" | "0") { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), _ => self.zoom = theme::zoom(self.zoom, 0) } cx.notify(); return; }
+        if key == "escape" {
+            if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; }
+        } else {
+            let name = perusal_app::keymap::press_name(ctrl, ks.modifiers.alt, key, ks.key_char.as_deref());
+            if let Some(a) = perusal_app::keymap::action_for(&self.keys, &name).map(str::to_string) { self.run_action(&a, cx); }
+            else if ctrl { return; }
         }
         self.flush(cx); cx.notify();
     }
@@ -661,7 +663,7 @@ impl Render for View {
         let footer = div().flex().items_center().gap_4().px_4().py(px(5.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
             .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("s", "settings"), ("Esc", "home")]
                 .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l)));
-        let overlay = self.finish_open.then(|| self.finish_overlay(cx));
+        let overlay = if self.help_open { Some(self.help_overlay(cx)) } else if self.palette_open { Some(self.palette_overlay(cx)) } else { self.finish_open.then(|| self.finish_overlay(cx).into_any_element()) };
 
         let side = |w: f32, open: bool, s: Side, cx: &mut Context<Self>, el: AnyElement| {
             let col = div().h_full().flex().flex_col().flex_none().bg(p.surface).overflow_hidden().child(el);
@@ -676,7 +678,7 @@ impl Render for View {
         div().relative().size_full().flex().flex_col().bg(p.bg).text_color(p.fg).text_size(px(14.0 * z))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.blur(cx); cx.notify(); }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen] { i.dragging = false; }
+                this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen, &mut this.pal_in] { i.dragging = false; }
                 if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
                 cx.notify();
@@ -710,9 +712,10 @@ impl View {
             Fid::Preset => wire_input(el, cx, |t| &mut t.preset_name, |t, _| { t.focus = Some(Fid::Preset); }, ui, false),
             Fid::Gen => wire_input(el, cx, |t| &mut t.gen, |t, _| { t.focus = Some(Fid::Gen); }, ui, false),
             Fid::Rename => wire_input(el, cx, |t| &mut t.rename, |t, _| { t.focus = Some(Fid::Rename); }, ui, false),
+            Fid::Palette => wire_input(el, cx, |t| &mut t.pal_in, |t, _| { t.focus = Some(Fid::Palette); }, ui, false),
         }
     }
-    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename, Fid::Gen => &self.gen } }
+    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename, Fid::Gen => &self.gen, Fid::Palette => &self.pal_in } }
     fn rail(&mut self, s: Side, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
         let (i, t) = if s == Side::Left { (ic::CHEVRON_RIGHT, "Show the files panel") } else { (ic::CHEVRON_LEFT, "Show the review panel") };
@@ -926,10 +929,10 @@ impl View {
     /// One row of the diff list (a code line, a hunk marker, a note or a comment card).
     fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(r) = self.rows.get(ix).cloned() else { return div().into_any_element() };
-        let p = self.pal; let h = px(20.0 * self.zoom); let fsz = px(13.0 * self.zoom); let mono = self.fonts.mono.clone();
+        let p = self.pal; let h = px(20.0 * self.zoom * self.settings.line_height); let fsz = px(13.0 * self.zoom); let mono = self.fonts.mono.clone();
         let fi = r.fi; let st = self.m.vm.files[fi].status;
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
-        let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).text_size(fsz).text_color(p.fg);
+        let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).when(!self.settings.ligatures, |d| d.font_features(gpui::FontFeatures::disable_ligatures())).text_size(fsz).text_color(p.fg);
         let cell = |side: Option<&RLine>, left: bool| -> gpui::Div {
             let Some(rl) = side else { return div().flex_1().h_full().bg(if selected { p.accent.opacity(0.22) } else { p.hover.opacity(0.4) }) };
             let l = &rl.line;
