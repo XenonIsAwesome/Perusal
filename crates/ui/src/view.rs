@@ -413,11 +413,13 @@ impl View {
         self.comment.f.set(&text); self.comment.f.multiline = true;
         self.composer = Some(Comp { editing, global, preview: false }); self.focus = Some(Fid::Comment);
     }
-    fn save_composer(&mut self, cx: &mut Context<Self>) {
+    fn save_composer(&mut self, cx: &mut Context<Self>) { self.save_composer_with(false, cx); }
+    /// Saves the comment as a draft; with `publish` it is also posted to the host right away (remote reviews).
+    fn save_composer_with(&mut self, publish: bool, cx: &mut Context<Self>) {
         let text = self.comment.f.text.trim().to_string(); if text.is_empty() { return; }
         let Some(c) = self.composer.take() else { return };
         let mut added: Option<i64> = None;
-        if let Some(id) = c.editing { let _ = self.m.store.edit_draft(id, &text); self.note(NKind::Success, "Comment updated.", None); }
+        if let Some(id) = c.editing { let _ = self.m.store.edit_draft(id, &text); self.note(NKind::Success, "Comment updated.", None); if publish { added = Some(id); } }
         else {
             let sel = if c.global { None } else { self.selection() };
             match (sel, self.current_file(), c.global) {
@@ -428,7 +430,7 @@ impl View {
         }
         self.comment.f.clear(); self.focus = None; self.clear_selection(); self.resync();
         // Saved locally first so nothing is lost if the host is unreachable; then posted right away.
-        if let (Some(id), true) = (added, self.instant()) { self.publish_draft(id, cx); }
+        if let (Some(id), true) = (added, self.instant() || (publish && self.m.mr.is_some())) { self.publish_draft(id, cx); }
     }
     fn toggle_viewed(&mut self) { if let Some(fi) = self.current_file() { let v = !self.m.vm.files[fi].viewed; for i in self.m.vm.current_batch().to_vec() { self.m.vm.set_viewed(&self.m.store, i, v); } } }
     fn next(&mut self) { self.m.vm.next(&self.m.store); self.reload(); }
@@ -1447,8 +1449,9 @@ impl View {
                     .when(has_new, |d| d.child(icon_btn("tb-s", ic::LIGHTBULB, "Insert a suggested change with the selected lines", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
                         if let Some(t) = this.selection_new_text() { this.comment.f.insert_block(&format!("```suggestion\n{t}\n```")); } this.focus = Some(Fid::Comment); cx.stop_propagation(); cx.notify(); }))))))
             .child(div().mx_3().rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).child(editor))
-            .child(div().flex().items_center().gap_2().px_3().py_2().child(div().flex_1().text_xs().text_color(p.muted).child("Ctrl+Enter saves. Markdown and ```suggestion blocks are supported."))
+            .child(div().flex().items_center().gap_2().px_3().py_2().child(div().flex_1().min_w_0().truncate().text_xs().text_color(p.muted).child("Ctrl+Enter saves a draft. Markdown and ```suggestion blocks are supported."))
                 .child(icon_text_btn("cmp-cancel", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.composer = None; this.focus = None; cx.stop_propagation(); cx.notify(); })))
+                .children((self.m.mr.is_some() && !self.instant()).then(|| icon_text_btn("cmp-publish", ic::SEND, "Publish now", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer_with(true, cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
                 .child(icon_text_btn("cmp-save", ic::CHECK, if editing.is_some() { "Save changes" } else { "Add draft" }, Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer(cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
     }
 
