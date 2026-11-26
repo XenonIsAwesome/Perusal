@@ -37,7 +37,7 @@ impl Provider for GitLab {
             if notes.is_empty() { return None; }
             let first = notes.first().cloned().unwrap_or(Value::Null);
             Some(Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
-                line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: notes.iter().any(|n| n["resolved"].as_bool() == Some(true)),
+                line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: thread_resolved(&notes),
                 comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect() })
         }).collect())
     }
@@ -126,4 +126,10 @@ impl Provider for GitLab {
                 state: state.into(), updated: m["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitLab }
         }).collect())
     }
+}
+
+/// A discussion is resolved when it has resolvable notes and all of them are resolved; a note without a `resolvable` field counts as resolvable.
+fn thread_resolved(notes: &[Value]) -> bool {
+    let mut resolvable = notes.iter().filter(|n| n["resolvable"].as_bool() != Some(false)).peekable();
+    resolvable.peek().is_some() && resolvable.all(|n| n["resolved"].as_bool() == Some(true))
 }

@@ -92,6 +92,14 @@ pub fn resolve_link(link_path: &str, target: &str) -> String {
     parts.join("/")
 }
 
+/// Pins a collapsed comment's icon on `out[anchor]`; false when that row kind draws no icons (the comment then stays a full card so it is never unreachable).
+fn add_mark(out: &mut [Row], anchor: usize, c: &CItem) -> bool {
+    match out.get_mut(anchor) {
+        Some(row) if matches!(row.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::FileHeader) => { row.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); true }
+        _ => false,
+    }
+}
+
 impl View {
     pub fn new(mut m: Model, settings: Settings, fonts: Fonts) -> Self {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
@@ -237,26 +245,34 @@ impl View {
             for (_, c) in &pending { if c.resolved && self.auto_c.insert(c.key.clone()) { self.collapsed_c.insert(c.key.clone()); } }
             let group: Vec<&Row> = self.base.iter().filter(|r| r.fi == fi).collect();
             if self.collapsed_files.contains(&fi) { out.extend(group.into_iter().cloned()); continue; }
-            let mut placed_top = false;
+            let mut placed_top = false; let mut anchor = out.len();
             let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None, marks: vec![] };
             for r in group {
                 out.push(r.clone());
+                if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::FileHeader) { anchor = out.len() - 1; }
                 let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_) | RowKind::Collapsed(..) | RowKind::Rendered(_));
                 if !placed_top && !header_like { placed_top = true; }
                 if header_like && !placed_top {
                     // file-level comments (no line) sit right under the file header
                     let (file_level, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| l.is_none()); pending = rest;
-                    for (_, c) in file_level { out.push(card(c)); }
+                    for (_, c) in file_level {
+                        if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
+                        out.push(card(c));
+                    }
                 }
                 if let (Some(n), true) = (r.new_line, matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))) {
                     let (here, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| *l == Some(n)); pending = rest;
                     for (_, c) in here {
-                        if self.collapsed_c.contains(&c.key) { if let Some(last) = out.last_mut() { last.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); continue; } }
+                        if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
                         out.push(card(c));
                     }
                 }
             }
-            for (l, mut c) in pending { c.outdated = l.is_some(); out.push(card(c)); }
+            for (l, mut c) in pending {
+                c.outdated = l.is_some();
+                if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
+                out.push(card(c));
+            }
         }
         self.rows = out;
         // measure every row up front so the scroll range is exact (otherwise it keeps growing as unseen rows are measured); huge diffs stay lazy
@@ -575,7 +591,14 @@ impl View {
                 (Some(f), Some(a), Some(b)) => {
                     let (old, new) = (perusal_gitops::show(&self.m.repo, &self.m.base_sha, f).unwrap_or_default(), perusal_gitops::show(&self.m.repo, &self.m.branch, f).unwrap_or_default());
                     let (start_old, end_old) = (perusal_diff::text::old_line_for_new(&old, &new, a), perusal_diff::text::old_line_for_new(&old, &new, b));
-                    comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old })
+                    // hosts reject inline comments on lines outside the diff ("Line could not be resolved"), so those go into the summary instead
+                    let shown: HashSet<u32> = diff_lines(&old, &new, 3).iter().filter_map(|l| l.new_no).collect();
+                    if self.m.mr.is_some() && !(shown.contains(&a) && shown.contains(&b)) {
+                        let at = if a == b { format!("{f}:{a}") } else { format!("{f}:{a}-{b}") };
+                        summary.push_str(&format!("\n\n**{at}**: {}", d.body));
+                    } else {
+                        comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old })
+                    }
                 }
                 (Some(f), _, _) => { summary.push_str(&format!("\n\n**{f}**: {}", d.body)); }
                 _ => { summary.push_str(&format!("\n\n{}", d.body)); }
@@ -1003,11 +1026,22 @@ impl View {
                 .child(div().w(px(20.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
                 .child(code(rl))
         };
+        let marks: Vec<AnyElement> = r.marks.iter().enumerate().map(|(i, m)| {
+            let k = m.key.clone(); let range = m.range;
+            let color = if m.draft { p.warn } else if m.resolved { p.success } else { p.accent };
+            let el = div().id(("mk", ix * 8 + i)).flex_none().size(px(22.0)).flex().items_center().justify_center().rounded_sm().cursor_pointer().bg(p.surface).border_1().border_color(color.opacity(0.6)).hover(move |x| x.bg(p.hover))
+                .child(icon(ic::COMMENT, 15.0, color))
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = range.map(|(a, b)| (fi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == range).unwrap_or(false) { this.hover_c = None; } cx.notify(); }))
+                .on_click(cx.listener(move |this, _, _, cx| { this.hover_c = None; this.toggle_comment(&k); cx.stop_propagation(); cx.notify(); }));
+            tip(el, "Show this comment", &p).into_any_element()
+        }).collect();
         let inner = match &r.kind {
             RowKind::FileHeader => {
                 let closed = self.collapsed_files.contains(&fi); let f = &self.m.vm.files[fi];
                 return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).cursor_pointer().hover(move |x| x.bg(p.hover))
                     .child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted)).child(div().flex_1().min_w_0().truncate().child(f.path.clone()))
+                    .children(marks)
                     .child(div().flex().gap_2().text_xs().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
                     .on_click(cx.listener(move |this, _, _, cx| { if !this.collapsed_files.remove(&fi) { this.collapsed_files.insert(fi); } this.shown = None; this.load_diff(); cx.notify(); })).into_any_element();
             }
@@ -1034,18 +1068,8 @@ impl View {
         };
         let ord = r.ord.unwrap_or(0);
         let hl = self.hover_c.map(|(hf, a, b)| hf == fi && r.new_line.map(|n| n >= a && n <= b).unwrap_or(false)).unwrap_or(false);
-        let marks: Vec<AnyElement> = r.marks.iter().enumerate().map(|(i, m)| {
-            let k = m.key.clone(); let range = m.range;
-            let color = if m.draft { p.warn } else if m.resolved { p.success } else { p.accent };
-            let el = div().id(("mk", ix * 8 + i)).flex_none().size(px(16.0)).flex().items_center().justify_center().rounded_sm().cursor_pointer().bg(p.surface).border_1().border_color(color.opacity(0.6)).hover(move |x| x.bg(p.hover))
-                .child(icon(ic::COMMENT, 12.0, color))
-                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = range.map(|(a, b)| (fi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == range).unwrap_or(false) { this.hover_c = None; } cx.notify(); }))
-                .on_click(cx.listener(move |this, _, _, cx| { this.hover_c = None; this.toggle_comment(&k); cx.stop_propagation(); cx.notify(); }));
-            tip(el, "Show this comment", &p).into_any_element()
-        }).collect();
         let inner = inner.when(hl, |d| d.relative().child(div().absolute().inset_0().bg(p.warn.opacity(0.20)).border_l_2().border_color(p.warn)))
-            .when(!marks.is_empty(), |d| d.relative().child(div().absolute().top(px(2.0)).left(if matches!(r.kind, RowKind::Split(..)) { relative(0.5) } else { px(2.0).into() }).ml(px(2.0)).flex().gap(px(2.0)).children(marks)));
+            .when(!marks.is_empty(), |d| d.relative().child(div().absolute().top(px(-1.0)).left(px(2.0)).flex().gap(px(2.0)).children(marks)));
         inner.when(selected, |d| d.border_l_2().border_color(p.accent)).cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| { this.row_hit(ord, ev.modifiers.shift); let y: f32 = ev.position.y.into(); this.row_y.insert(ord, y); this.sel_x = ev.position.x.into(); cx.stop_propagation(); cx.notify(); }))
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
@@ -1064,7 +1088,7 @@ impl View {
         let draft = c.draft; let orig = c.orig.clone();
         let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(text), &p, &mono, orig.as_deref()).text_sm().into_any_element() } };
         let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
-        div().flex().w_full().pl(px(110.0)).pr_3().py(px(4.0)).child(
+        div().flex().w_full().px_2().py(px(4.0)).child(
             div().id(SharedString::from(format!("card-{}", c.key))).flex().flex_col().flex_1().min_w_0().rounded_md()
                 .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = hv.map(|(a, b)| (cfi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == hv).unwrap_or(false) { this.hover_c = None; } cx.notify(); })).border_1().border_color(p.border).border_l_4().border_color(accent).bg(p.surface).overflow_hidden()
                 .child(div().flex().items_center().gap_2().px_3().py(px(5.0)).bg(p.hover.opacity(0.5))
