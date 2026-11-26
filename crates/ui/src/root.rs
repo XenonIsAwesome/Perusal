@@ -385,7 +385,7 @@ impl Root {
         let any_sel = !self.mine_sel.is_empty();
         let chips = |this: &Self| div().flex().flex_col().gap_2().px_4().py_2().border_b_1().border_color(p.border)
             .child(div().flex().flex_wrap().items_center().gap_2().child(dd_author).child(dd_assignee).child(dd_label)
-                .child(this.chip_with("m-rev", Some(icon(if reviewer_on { ic::CHECK_BOX } else { ic::CHECK_BOX_OUTLINE_BLANK }, 16.0, if reviewer_on { p.accent } else { p.muted }).into_any_element()), "Only MRs I'm a reviewer on".into(), reviewer_on)
+                .child(this.chip_with("m-rev", Some(icon(if reviewer_on { ic::CHECK_BOX } else { ic::CHECK_BOX_OUTLINE_BLANK }, 16.0, if reviewer_on { p.accent } else { p.muted }).into_any_element()), "Assigned to me as reviewer".into(), reviewer_on)
                     .on_click(cx.listener(|t, _, _, cx| { t.mine_role = if t.mine_role == Role::ReviewRequested { Role::Reviewable } else { Role::ReviewRequested }; t.load_mine(cx); })))
                 .children(any_sel.then(|| this.chip("m-clear", "Clear filters".into(), false).on_click(cx.listener(|t, _, _, cx| { t.mine_sel = Sel::default(); cx.notify(); }))))
                 .child(div().flex_1()).child(icon_btn("mine-refresh", ic::REFRESH, "Refresh", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.mine_loading = false; this.load_mine(cx); }))))
