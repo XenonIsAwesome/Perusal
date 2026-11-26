@@ -53,7 +53,30 @@ impl Root {
             Initial::Url(u) => { r.url.f.set(&u); r.open_url(u, cx) }
         }
         if !r.settings.onboarded { r.open_settings(true, cx); }
+        r.listen_for_links(cx);
         r
+    }
+    /// Single instance: a second `perusal <link>` launch hands its link to this window over a Unix socket and exits.
+    fn listen_for_links(&mut self, cx: &mut Context<Self>) {
+        let sock = perusal_app::deeplink::socket_path(&model::data_dir());
+        let Ok(l) = perusal_app::deeplink::listen(&sock) else { return };
+        { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)); }
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || { while let Ok(m) = perusal_app::deeplink::accept_one(&l) { if tx.send(m).is_err() { break; } } });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                while let Ok(m) = rx.try_recv() {
+                    let alive = this.update(cx, |t, cx| {
+                        match perusal_app::deeplink::url_from_arg(m.trim()) {
+                            Ok(u) => { cx.activate(true); t.active = None; t.url.f.set(&u); t.open_url(u, cx); }
+                            Err(e) => t.toast(NKind::Error, format!("Ignored a link: {e}"), cx),
+                        }
+                    });
+                    if alive.is_err() { return; }
+                }
+            }
+        }).detach();
     }
     fn refresh_recent(&mut self) { if let Ok(s) = Store::open(&model::db_path()) { self.recent = s.recent_rows().unwrap_or_default(); } }
     fn toast(&mut self, kind: NKind, text: impl Into<String>, cx: &mut Context<Self>) {

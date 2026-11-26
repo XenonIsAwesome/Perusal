@@ -17,11 +17,14 @@ fn main() {
             if errs.is_empty() { println!("{file}: ok"); } else { for e in &errs { eprintln!("{file}: {e}"); } std::process::exit(1); }
         }
         [] => root::run(root::Initial::Home),
-        [link] if link.starts_with("perusal://") => match deeplink::parse(link) {
-            Ok(url) => root::run(root::Initial::Url(url)),
-            Err(e) => { eprintln!("rejected deep link: {e}"); std::process::exit(1) }
+        [arg] if arg.starts_with("perusal://") || arg.starts_with("https://") => match deeplink::url_from_arg(arg) {
+            Ok(url) => {
+                // A window is already running: hand the link over and exit instead of opening a second one.
+                if let Ok(true) = deeplink::send_to_running(&deeplink::socket_path(&model::data_dir()), &url) { return; }
+                root::run(root::Initial::Url(url))
+            }
+            Err(e) => { eprintln!("rejected link: {e}"); std::process::exit(1) }
         },
-        [url] if url.starts_with("https://") => root::run(root::Initial::Url(url.to_string())),
         ["--help" | "-h"] => usage(),
         [repo, branch, rest @ ..] => {
             let base = rest.iter().position(|a| *a == "--base").and_then(|i| rest.get(i + 1)).map(|s| s.to_string());

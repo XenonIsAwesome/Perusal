@@ -31,7 +31,17 @@ pub fn send_to_running(sock: &Path, link: &str) -> std::io::Result<bool> {
 /// Becomes the running instance: returns a listener (stale socket files are replaced).
 pub fn listen(sock: &Path) -> std::io::Result<UnixListener> { let _ = std::fs::remove_file(sock); UnixListener::bind(sock) }
 
-pub fn accept_one(l: &UnixListener) -> std::io::Result<String> { let (mut s, _) = l.accept()?; let mut b = String::new(); s.read_to_string(&mut b)?; Ok(b) }
+pub fn accept_one(l: &UnixListener) -> std::io::Result<String> { let (s, _) = l.accept()?; let mut b = String::new(); s.take(8192).read_to_string(&mut b)?; Ok(b) }
+
+/// What a second launch hands over: a `perusal://` link or a plain https MR URL. Returns the https URL to open.
+pub fn url_from_arg(arg: &str) -> Result<String, String> {
+    if arg.starts_with(&format!("{DEEP_LINK_SCHEME}://")) { parse(arg) }
+    else if arg.starts_with("https://") && !arg.contains(char::is_whitespace) { perusal_providers_check(arg).map(|_| arg.to_string()) }
+    else { Err("not a link Perusal opens".into()) }
+}
+
+/// Where the running instance listens (mode 0600 inside the user's data dir).
+pub fn socket_path(data_dir: &Path) -> std::path::PathBuf { data_dir.join("perusal.sock") }
 
 #[cfg(test)]
 mod tests { use super::*;
@@ -40,6 +50,11 @@ mod tests { use super::*;
         assert!(parse("perusal://open?url=http%3A%2F%2Fgithub.com%2Fo%2Fr%2Fpull%2F3").is_err());
         assert!(parse("perusal://open?url=javascript%3Aalert(1)").is_err()); assert!(parse("perusal://submit?url=x").is_err());
         assert!(parse("perusal://open?url=https%3A%2F%2Fgithub.com%2Fo%2Fr").is_err());
+    }
+    #[test] fn args_are_validated() {
+        assert_eq!(url_from_arg("https://gitlab.com/g/p/-/merge_requests/9").unwrap(), "https://gitlab.com/g/p/-/merge_requests/9");
+        assert!(url_from_arg("https://example.com/x").is_err()); assert!(url_from_arg("file:///etc/passwd").is_err());
+        assert!(url_from_arg("perusal://open?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fpull%2F1").is_ok());
     }
     #[test] fn second_launch_hands_over() {
         let sock = std::env::temp_dir().join(format!("perusal-{}.sock", std::process::id()));
