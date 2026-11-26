@@ -94,13 +94,13 @@ impl SettingsView {
         let cid = self.settings.oauth_client_ids.get(&host).cloned().unwrap_or_default();
         if cid.is_empty() { self.client_host = Some(host); self.say(false, "Enter an OAuth app client ID for this host first."); return; }
         self.busy = true; self.say(true, "Requesting a sign-in code...");
-        let (h1, c1) = (host.clone(), cid.clone());
-        let start = cx.background_executor().spawn(async move { model::device_start(&h1, &c1) });
+        let (h1, c1) = (host.clone(), cid.clone()); let gitlab = perusal_app::hosts::kind_of(&self.settings.hosts, &host) == "gitlab";
+        let start = cx.background_executor().spawn(async move { model::device_start(&h1, &c1, gitlab) });
         cx.spawn(async move |this, cx| {
             let code = start.await;
             let Ok(Some(code)) = this.update(cx, |t, cx| { match code { Ok(c) => { t.device = Some((host.clone(), c.clone())); t.say(true, format!("Enter the code {} at {}", c.user_code, c.verification_uri)); let _ = model::open_url(&c.verification_uri); cx.notify(); Some(c) } Err(e) => { t.busy = false; t.say(false, format!("Sign-in failed: {e}")); cx.notify(); None } } }) else { return };
             let (h2, c2, cc) = (host.clone(), cid.clone(), code.clone());
-            let wait = cx.background_executor().spawn(async move { model::device_wait(&h2, &c2, &cc) });
+            let wait = cx.background_executor().spawn(async move { model::device_wait(&h2, &c2, &cc, gitlab) });
             let tok = wait.await;
             let _ = this.update(cx, |t, cx| {
                 t.busy = false; t.device = None;

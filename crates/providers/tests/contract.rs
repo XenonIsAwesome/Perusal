@@ -154,3 +154,15 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
     let t = gh(&s).threads(&ghref()).await.unwrap(); assert_eq!(t.len(), 1); assert!(!t[0].resolved); assert_eq!(t[0].resolve_id(Kind::GitHub), None);
 }
+
+#[tokio::test] async fn gitlab_device_flow() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/oauth/authorize_device")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"device_code":"DC","user_code":"UC","verification_uri":"https://gl/oauth/device","verification_uri_complete":"https://gl/oauth/device?user_code=UC","interval":1}))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/oauth/token")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"gltok"}))).mount(&s).await;
+    let c = reqwest::Client::new();
+    let d = auth::device_start_for(&c, &s.uri(), "cid", true).await.unwrap(); assert_eq!(d.user_code, "UC"); assert!(d.verification_uri.contains("user_code=UC"));
+    assert_eq!(auth::device_poll_for(&c, &s.uri(), "cid", &d, 3, true).await.unwrap(), "gltok");
+    let bad = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_client","error_description":"unknown client"}))).mount(&bad).await;
+    assert!(auth::device_start_for(&c, &bad.uri(), "x", true).await.unwrap_err().contains("invalid_client"));
+}

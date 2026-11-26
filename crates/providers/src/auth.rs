@@ -78,16 +78,25 @@ pub fn redact(s: &str, token: &str) -> String { if token.is_empty() { s.into() }
 pub struct DeviceCode { pub device_code: String, pub user_code: String, pub verification_uri: String, pub interval: u64 }
 
 /// GitHub-style device flow. `base` is e.g. https://github.com.
-pub async fn device_start(c: &reqwest::Client, base: &str, client_id: &str) -> Result<DeviceCode, String> {
-    let v: serde_json::Value = c.post(format!("{base}/login/device/code")).header("accept", "application/json")
-        .form(&[("client_id", client_id), ("scope", "repo")]).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+pub async fn device_start(c: &reqwest::Client, base: &str, client_id: &str) -> Result<DeviceCode, String> { device_start_for(c, base, client_id, false).await }
+pub async fn device_poll(c: &reqwest::Client, base: &str, client_id: &str, d: &DeviceCode, max_tries: u32) -> Result<String, String> { device_poll_for(c, base, client_id, d, max_tries, false).await }
+
+/// Device flow for either host. GitLab (17.2+, OAuth application with device flow enabled): `/oauth/authorize_device` and `/oauth/token`.
+pub async fn device_start_for(c: &reqwest::Client, base: &str, client_id: &str, gitlab: bool) -> Result<DeviceCode, String> {
+    let (path, scope) = if gitlab { ("oauth/authorize_device", "api") } else { ("login/device/code", "repo") };
+    let v: serde_json::Value = c.post(format!("{base}/{path}")).header("accept", "application/json")
+        .form(&[("client_id", client_id), ("scope", scope)]).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+    if let Some(e) = v["error"].as_str() { return Err(v["error_description"].as_str().map(|d| format!("{e}: {d}")).unwrap_or_else(|| e.to_string())); }
     let s = |k: &str| v[k].as_str().map(String::from).ok_or(format!("missing {k}"));
-    Ok(DeviceCode { device_code: s("device_code")?, user_code: s("user_code")?, verification_uri: s("verification_uri")?, interval: v["interval"].as_u64().unwrap_or(5) })
+    // GitLab also offers a link that already carries the code
+    let uri = v["verification_uri_complete"].as_str().map(String::from).filter(|_| gitlab).map(Ok).unwrap_or_else(|| s("verification_uri"))?;
+    Ok(DeviceCode { device_code: s("device_code")?, user_code: s("user_code")?, verification_uri: uri, interval: v["interval"].as_u64().unwrap_or(5) })
 }
 
-pub async fn device_poll(c: &reqwest::Client, base: &str, client_id: &str, d: &DeviceCode, max_tries: u32) -> Result<String, String> {
+pub async fn device_poll_for(c: &reqwest::Client, base: &str, client_id: &str, d: &DeviceCode, max_tries: u32, gitlab: bool) -> Result<String, String> {
+    let path = if gitlab { "oauth/token" } else { "login/oauth/access_token" };
     for _ in 0..max_tries {
-        let v: serde_json::Value = c.post(format!("{base}/login/oauth/access_token")).header("accept", "application/json")
+        let v: serde_json::Value = c.post(format!("{base}/{path}")).header("accept", "application/json")
             .form(&[("client_id", client_id), ("device_code", &d.device_code), ("grant_type", "urn:ietf:params:oauth:grant-type:device_code")])
             .send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
         if let Some(t) = v["access_token"].as_str() { return Ok(t.into()); }

@@ -285,15 +285,15 @@ pub fn import_cli_token(host: &str, kind: &str) -> Result<String, String> {
     tok.ok_or_else(|| format!("`{prog}` has no login for {host}. Run `{prog} auth login` first."))
 }
 
-pub fn device_start(host: &str, client_id: &str) -> Result<perusal_providers::auth::DeviceCode, String> {
+pub fn device_start(host: &str, client_id: &str, gitlab: bool) -> Result<perusal_providers::auth::DeviceCode, String> {
     let base = format!("https://{host}"); let c = perusal_providers::auth::client(None)?;
-    rt()?.block_on(perusal_providers::auth::device_start(&c, &base, client_id))
+    rt()?.block_on(perusal_providers::auth::device_start_for(&c, &base, client_id, gitlab))
 }
 /// Waits for the user to approve the device code (up to ~10 minutes) and returns the token.
-pub fn device_wait(host: &str, client_id: &str, d: &perusal_providers::auth::DeviceCode) -> Result<String, String> {
+pub fn device_wait(host: &str, client_id: &str, d: &perusal_providers::auth::DeviceCode, gitlab: bool) -> Result<String, String> {
     let base = format!("https://{host}"); let c = perusal_providers::auth::client(None)?;
     let mut dd = d.clone(); dd.interval = d.interval.max(5) * 1000;
-    rt()?.block_on(perusal_providers::auth::device_poll(&c, &base, client_id, &dd, 120))
+    rt()?.block_on(perusal_providers::auth::device_poll_for(&c, &base, client_id, &dd, 120, gitlab))
 }
 
 /// Finds the open MR/PR for a local branch on its origin host, if the user is signed in there (or the repo is public).
