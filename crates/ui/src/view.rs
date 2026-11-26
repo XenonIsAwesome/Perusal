@@ -1014,8 +1014,8 @@ impl View {
         let marks: Vec<AnyElement> = r.marks.iter().enumerate().map(|(i, m)| {
             let k = m.key.clone(); let range = m.range;
             let color = if m.draft { p.warn } else if m.resolved { p.success } else { p.accent };
-            let el = div().id(("mk", ix * 8 + i)).flex_none().size(px(20.0)).flex().items_center().justify_center().rounded_full().cursor_pointer().bg(p.surface).border_1().border_color(color.opacity(0.6)).hover(move |x| x.bg(p.hover))
-                .child(icon(ic::COMMENT, 13.0, color))
+            let el = div().id(("mk", ix * 8 + i)).flex_none().size(px(22.0)).flex().items_center().justify_center().rounded_sm().cursor_pointer().bg(p.surface).border_1().border_color(color.opacity(0.6)).hover(move |x| x.bg(p.hover))
+                .child(icon(ic::COMMENT, 15.0, color))
                 .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
                 .on_hover(cx.listener(move |this, h: &bool, _, cx| { if *h { this.hover_c = range.map(|(a, b)| (fi, a, b)); } else if this.hover_c.map(|x| Some((x.1, x.2)) == range).unwrap_or(false) { this.hover_c = None; } cx.notify(); }))
                 .on_click(cx.listener(move |this, _, _, cx| { this.hover_c = None; this.toggle_comment(&k); cx.stop_propagation(); cx.notify(); }));
@@ -1054,7 +1054,7 @@ impl View {
         let ord = r.ord.unwrap_or(0);
         let hl = self.hover_c.map(|(hf, a, b)| hf == fi && r.new_line.map(|n| n >= a && n <= b).unwrap_or(false)).unwrap_or(false);
         let inner = inner.when(hl, |d| d.relative().child(div().absolute().inset_0().bg(p.warn.opacity(0.20)).border_l_2().border_color(p.warn)))
-            .when(!marks.is_empty(), |d| d.relative().child(div().absolute().top(px(0.0)).left(px(2.0)).flex().gap(px(2.0)).children(marks)));
+            .when(!marks.is_empty(), |d| d.relative().child(div().absolute().top(px(-1.0)).left(px(2.0)).flex().gap(px(2.0)).children(marks)));
         inner.when(selected, |d| d.border_l_2().border_color(p.accent)).cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| { this.row_hit(ord, ev.modifiers.shift); let y: f32 = ev.position.y.into(); this.row_y.insert(ord, y); this.sel_x = ev.position.x.into(); cx.stop_propagation(); cx.notify(); }))
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
