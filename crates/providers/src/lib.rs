@@ -55,7 +55,15 @@ pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: 
 pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: Verdict, pub comments: Vec<InlineComment> }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Thread { pub id: String, pub path: Option<String>, pub line: Option<u32>, pub resolved: bool, pub comments: Vec<(String, String)> }
+pub struct Thread { pub id: String, pub path: Option<String>, pub line: Option<u32>, pub resolved: bool, pub comments: Vec<(String, String)>,
+    /// Host ids of `comments`, same order (used to react to, edit or delete a single comment).
+    pub comment_ids: Vec<String>,
+    /// GitHub only: the GraphQL id needed to resolve/unresolve the thread (`None` when it could not be fetched).
+    pub node_id: Option<String> }
+impl Thread {
+    /// The id to pass to `resolve` for this host, if resolving is possible.
+    pub fn resolve_id(&self, kind: Kind) -> Option<&str> { match kind { Kind::GitLab => Some(self.id.as_str()), Kind::GitHub => self.node_id.as_deref() } }
+}
 
 #[derive(Debug)]
 pub enum Error { Unauthorized, RateLimited(Option<u64>), Offline(String), Unsupported(&'static str), Http(u16, String) }

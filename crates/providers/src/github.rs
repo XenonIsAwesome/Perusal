@@ -13,6 +13,22 @@ impl GitHub {
     }
 }
 
+impl GitHub {
+    fn graphql_url(&self) -> String { if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) } }
+    /// root comment id -> (review thread node id, is resolved)
+    async fn graphql_threads(&self, r: &MrRef) -> Result<std::collections::HashMap<String, (String, bool)>> {
+        let (owner, name) = r.project.split_once('/').unwrap_or((r.project.as_str(), ""));
+        let q = json!({"query": "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}",
+            "variables": {"o": owner, "n": name, "p": r.number}});
+        let v: Value = check(self.http.post(self.graphql_url()).bearer_auth(&self.token).json(&q).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let mut m = std::collections::HashMap::new();
+        for n in v.pointer("/data/repository/pullRequest/reviewThreads/nodes").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            if let (Some(id), Some(db)) = (n["id"].as_str(), n.pointer("/comments/nodes/0/databaseId").and_then(|x| x.as_u64())) { m.insert(db.to_string(), (id.to_string(), n["isResolved"].as_bool() == Some(true))); }
+        }
+        Ok(m)
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for GitHub {
     async fn mr_info(&self, r: &MrRef) -> Result<MrInfo> {
@@ -27,9 +43,12 @@ impl Provider for GitHub {
         for c in v {
             let root = c["in_reply_to_id"].as_u64().map(|x| x.to_string()).unwrap_or(c["id"].to_string());
             let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string();
-            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); }
-            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)] }); }
+            let cid = c["id"].to_string();
+            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); t.comment_ids.push(cid); }
+            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)], comment_ids: vec![cid], node_id: None }); }
         }
+        // Resolved state and the ids needed to resolve live only in GraphQL; failing here keeps the plain threads.
+        if let Ok(map) = self.graphql_threads(r).await { for t in out.iter_mut() { if let Some((node, done)) = map.get(&t.id) { t.node_id = Some(node.clone()); t.resolved = *done; } } }
         Ok(out)
     }
     /// One review call carrying all comments, so a failure leaves nothing posted.
@@ -58,7 +77,7 @@ impl Provider for GitHub {
     }
     async fn set_viewed(&self, r: &MrRef, path: &str, viewed: bool) -> Result<()> {
         // GraphQL: needs the PR node id first.
-        let gql = if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) };
+        let gql = self.graphql_url();
         let q = json!({"query": "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}",
             "variables": {"o": r.project.split('/').next(), "r": r.project.split('/').nth(1), "n": r.number}});
         let v: Value = check(self.http.post(&gql).bearer_auth(&self.token).json(&q).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;

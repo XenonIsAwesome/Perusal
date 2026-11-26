@@ -138,3 +138,19 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     assert_eq!((l[0].project.as_str(), l[0].state.as_str(), l[0].number), ("grp/sub/proj", "open", 3));
     assert_eq!(ci_page(&Kind::GitHub, "https://github.com/o/r/pull/7"), "https://github.com/o/r/pull/7/checks");
 }
+
+#[tokio::test] async fn github_threads_carry_ids_and_resolved_state() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5},{"id":2,"in_reply_to_id":1,"user":{"login":"b"},"body":"a","path":"x.rs","line":5}]))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+        {"id":"PRRT_1","isResolved":true,"comments":{"nodes":[{"databaseId":1}]}}]}}}}}))).mount(&s).await;
+    let t = gh(&s).threads(&ghref()).await.unwrap();
+    assert_eq!(t[0].comment_ids, vec!["1", "2"]); assert!(t[0].resolved); assert_eq!(t[0].resolve_id(Kind::GitHub), Some("PRRT_1"));
+}
+#[tokio::test] async fn github_threads_survive_graphql_failure() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5}]))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
+    let t = gh(&s).threads(&ghref()).await.unwrap(); assert_eq!(t.len(), 1); assert!(!t[0].resolved); assert_eq!(t[0].resolve_id(Kind::GitHub), None);
+}

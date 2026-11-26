@@ -24,7 +24,8 @@ impl Provider for GitLab {
             let first = notes.first().cloned().unwrap_or(Value::Null);
             Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
                 line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: notes.iter().any(|n| n["resolved"].as_bool() == Some(true)),
-                comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect() }
+                comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect(),
+                comment_ids: notes.iter().map(|n| n["id"].to_string()).collect(), node_id: None }
         }).collect())
     }
     /// Draft notes then bulk publish. If any step fails, drafts already created are deleted: nothing half-posted.
