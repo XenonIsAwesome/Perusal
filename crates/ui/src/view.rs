@@ -726,7 +726,7 @@ impl View {
         let Some(mr) = self.m.mr.clone() else { return };
         if self.submit_busy { return; }
         let sub = self.build_submission();
-        if sub.comments.is_empty() && sub.summary.is_empty() && sub.verdict == Verdict::Comment { self.submit_msg = Some((false, "Add a summary or at least one comment, or choose Approve or Request changes.".into())); return; }
+        if sub.comments.is_empty() && sub.general.is_empty() && sub.summary.is_empty() && sub.verdict == Verdict::Comment { self.submit_msg = Some((false, "Add a summary or at least one comment, or choose Approve or Request changes.".into())); return; }
         self.submit_busy = true; self.submit_msg = None;
         let task = cx.background_executor().spawn(async move { model::submit_review(&mr, &sub) });
         cx.spawn(async move |this, cx| { let r = task.await; let _ = this.update(cx, |t, cx| t.finish_submit(r, cx)); }).detach();
