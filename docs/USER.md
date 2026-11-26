@@ -100,3 +100,22 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 
 ## Releases
 Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak bundle, a tarball, both browser extensions and `SHA256SUMS`. The package version is the tag without the `v`. Pull requests run the test suite and clippy.
+
+## v5 additions
+- **Keys:** `?` lists every shortcut and `Ctrl+P` opens a command palette (type to filter, Enter runs). Rebind keys in `~/.config/perusal/keymap.toml`:
+  ```toml
+  [keys]
+  comment = "z"
+  next_file = "j"
+  ```
+  A key bound twice or an unknown action name makes the whole file ignored, with a warning. Settings > Appearance > Keyboard has a vim preset (j/k) and opens the config folder.
+- **Quitting:** closing the window (or Ctrl+Q) with unsent drafts asks: Submit (remote reviews), Keep for later (drafts are saved either way), Discard.
+- **Existing threads:** each thread card has Reply, Resolve/Unresolve and a thumbs-up; your own comments and replies also have Edit and Delete. These go to the host at once and are not part of the pending review. The person icon in the header requests a review from the usernames you type.
+- **New commits:** when the host head changes a banner offers Move to latest. Drafts follow their lines where those survive (the toast says how many need a new place), and files that changed are marked unviewed again. A force-push is reported as such.
+- **Commits:** Shift+click a second commit in the graph to scope the review to the range.
+- **Comments on removed lines** are posted on the old side of the diff.
+- **Manual file groups** are saved with the review.
+- **Fonts and motion:** Settings > Appearance has UI font, code font, code line height, ligatures and Reduce motion.
+- **Tokens** go to the OS keychain when `secret-tool` is available (GNOME Keyring, KWallet); existing token files are moved there on first use.
+- **Links:** `perusal <link>` opens in the running window. For an AppImage, Settings > Appearance > Links registers it as the `perusal://` handler.
+- **GitLab sign-in** also works through the browser (OAuth device flow) once you enter the client ID of an OAuth application with device flow enabled.

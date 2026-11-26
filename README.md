@@ -11,7 +11,7 @@ commit graph instead of one long scrolling page. Licensed MIT OR Apache-2.0. No 
 
 The review engine is implemented and tested headless (git indexing, filter/sort language, presets, SQLite-backed
 reviews, GitHub/GitLab providers against mocks, ACP agent integration, themes, keymap, deep links, extension,
-packaging scripts). A first GPUI window reviews a local branch. It is early: see `DECISIONS.md` for what it lacks.
+packaging scripts). The GPUI app reviews local branches and GitHub/GitLab merge requests end to end: filtering and sorting, batches, commit graph, inline threads (reply, resolve, react, edit), drafts with a quit prompt, AI assistance through your own agent CLIs, a keymap with a command palette, and moving a review to a new head. It has been exercised against mock hosts only, never a real one: `DECISIONS.md` lists what is untested or missing.
 
 ```bash
 target/release/perusal                              # Home: recent reviews, open local, open from URL, browse remote MRs
@@ -19,9 +19,9 @@ target/release/perusal /path/to/repo my-branch      # straight into a local revi
 target/release/perusal https://github.com/o/r/pull/1  # straight into a remote review
 ```
 Home: click the tabs (pull request URL, local branch, browse remote), paste with Ctrl+V, Enter opens. Tab / Shift+Tab move between fields. Esc in a review returns Home.
-Remote reviews need a token for private repos (the app asks and stores it under `~/.config/perusal/tokens`, mode 0600).
+Remote reviews need a token for private repos (the app asks and stores it in the OS keychain when `secret-tool` is installed, otherwise under `~/.config/perusal/tokens`, mode 0600).
 Data lives in `~/.local/share/perusal` (override with `PERUSAL_HOME`; `PERUSAL_CA_FILE` adds a CA certificate).
-Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl +/-/0` zoom.
+Keys: `n`/`p` file, `v` viewed, `Enter` next batch, `Backspace` back, `/` filter, `c` comment, `g` group, `x` clear commit, `Ctrl+P` command palette, `?` all shortcuts, `Ctrl +/-/0` zoom. Rebind them in `~/.config/perusal/keymap.toml` (`[keys]`, e.g. `comment = "z"`).
 Click a file to open it or a commit to scope the review to it. On Linux you need `libxkbcommon-dev`, `libxkbcommon-x11-dev`
 and `libwayland-dev` to build. `perusal-cli` is the headless harness.
 
