@@ -47,7 +47,8 @@ struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai
 #[derive(Clone)]
 struct Mark { key: String, draft: bool, resolved: bool, range: Option<(u32, u32)> }
 #[derive(Clone)]
-enum RowKind { FileHeader, Rendered(Vec<markdown::Block>), Collapsed(String, bool), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
+enum RowKind { FileHeader, /// one block of a rendered Markdown file shown inside a group; selectable and commentable like code lines
+    MdBlock(Located), Collapsed(String, bool), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
 #[derive(Clone)]
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32>, marks: Vec<Mark> }
@@ -57,7 +58,7 @@ impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
-    find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
+    md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
@@ -99,7 +100,7 @@ pub fn resolve_link(link_path: &str, target: &str) -> String {
 /// Pins a collapsed comment's icon on `out[anchor]`; false when that row kind draws no icons (the comment then stays a full card so it is never unreachable).
 fn add_mark(out: &mut [Row], anchor: usize, c: &CItem) -> bool {
     match out.get_mut(anchor) {
-        Some(row) if matches!(row.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::FileHeader) => { row.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); true }
+        Some(row) if matches!(row.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_) | RowKind::FileHeader) => { row.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); true }
         _ => false,
     }
 }
@@ -116,7 +117,7 @@ impl View {
         m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        View { find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        View { md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
@@ -180,6 +181,7 @@ impl View {
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink); self.nav_changed = false; }
         self.shown = Some(batch.clone()); self.md = None; self.sym_target = None; self.sym_path = None;
         let p = self.pal;
+        self.md_srcs.clear();
         let mut rows: Vec<Row> = Vec::new();
         let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None, marks: vec![] };
         for &fi in &batch {
@@ -197,7 +199,9 @@ impl View {
             }
             if batch.len() > 1 && self.md_rendered && !f.symlink && markdown::is_markdown(&f.path) && !f.noisy() {
                 let src = if new.is_empty() { old.clone() } else { new.clone() };
-                rows.push(mk(fi, RowKind::Rendered(markdown::parse(&src)))); continue;
+                // each block is its own selectable row, so lines can be commented on while the group is shown rendered
+                for lb in markdown::parse_located(&src) { let last = lb.last_line; rows.push(Row { fi, kind: RowKind::MdBlock(lb), ord: None, new_line: Some(last), marks: vec![] }); }
+                self.md_srcs.insert(fi, src); continue;
             }
             if f.noisy() && !f.symlink && !self.forced.contains(&fi) {
                 let why = if f.binary { "is a binary file, so there is no text to show" } else if f.generated { "is collapsed because it looks generated or vendored" } else { "is collapsed because it is very large" };
@@ -229,7 +233,7 @@ impl View {
                 }
             }
         }
-        let mut ord = 0; for r in &mut rows { if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..)) { r.ord = Some(ord); ord += 1; } }
+        let mut ord = 0; for r in &mut rows { if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_)) { r.ord = Some(ord); ord += 1; } }
         self.base = rows; self.rebuild_rows();
     }
 
@@ -264,8 +268,8 @@ impl View {
             let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None, marks: vec![] };
             for r in group {
                 out.push(r.clone());
-                if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::FileHeader) { anchor = out.len() - 1; }
-                let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_) | RowKind::Collapsed(..) | RowKind::Rendered(_));
+                if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_) | RowKind::FileHeader) { anchor = out.len() - 1; }
+                let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_) | RowKind::Collapsed(..));
                 if !placed_top && !header_like { placed_top = true; }
                 if header_like && !placed_top {
                     // file-level comments (no line) sit right under the file header
@@ -275,8 +279,10 @@ impl View {
                         out.push(card(c));
                     }
                 }
-                if let (Some(n), true) = (r.new_line, matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))) {
-                    let (here, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| *l == Some(n)); pending = rest;
+                if let (Some(n), true) = (r.new_line, matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_))) {
+                    // a comment on any line of a rendered block shows under that block
+                    let span = if let RowKind::MdBlock(lb) = &r.kind { (lb.first_line, lb.last_line) } else { (n, n) };
+                    let (here, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| l.map(|x| x >= span.0 && x <= span.1).unwrap_or(false)); pending = rest;
                     for (_, c) in here {
                         if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
                         out.push(card(c));
@@ -319,6 +325,11 @@ impl View {
         let (a, b) = self.sel?; let fi = self.rows.iter().find(|r| r.ord == Some(a))?.fi;
         let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
         for r in self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)) {
+            if let RowKind::MdBlock(lb) = &r.kind {
+                lo = lo.min(lb.first_line); hi = hi.max(lb.last_line);
+                if let Some(src) = self.md_srcs.get(&fi) { for l in src.lines().skip(lb.first_line.saturating_sub(1) as usize).take((lb.last_line + 1 - lb.first_line) as usize) { snippet.push(' '); snippet.push_str(l); snippet.push('\n'); } }
+                continue;
+            }
             let lines: Vec<&Line> = match &r.kind { RowKind::Uni(l) => vec![&l.line], RowKind::Split(l, rr) => l.iter().chain(rr.iter()).map(|x| &x.line).collect(), _ => vec![] };
             for l in lines {
                 if let Some(n) = l.new_no.or(l.old_no) { lo = lo.min(n); hi = hi.max(n); }
@@ -602,7 +613,7 @@ impl View {
             RowKind::FileHeader => vec![self.m.vm.files[r.fi].path.clone()],
             RowKind::Hunk(t) | RowKind::Note(t) | RowKind::Collapsed(t, _) => vec![t.clone()],
             RowKind::Comment(c) => { let mut v = vec![format!("{} {}", c.author, c.body)]; v.extend(c.replies.iter().map(|(a, t)| format!("{a} {t}"))); v }
-            RowKind::Rendered(_) => vec![],
+            RowKind::MdBlock(lb) => markdown::block_texts(std::slice::from_ref(&lb.block)),
         }
     }
     /// Finds every occurrence on the current page (diff rows; the overview recomputes itself while drawing).
@@ -623,6 +634,10 @@ impl View {
         let Some(h) = self.find_hits.get(self.find_cur) else { return };
         if self.page == Page::Code { self.list.scroll_to(gpui::ListOffset { item_ix: h.row.saturating_sub(3), offset_in_item: px(0.0) }); } else { self.ov_scroll.scroll_to_item(h.row); }
     }
+    /// The active search text while looking at the diff (empty otherwise); rendered Markdown blocks highlight with it.
+    fn find_query(&self) -> String { if self.find_open && self.page == Page::Code { self.find_in.f.text.clone() } else { String::new() } }
+    /// Ordinal of the current hit among the hits of one rendered Markdown block row.
+    fn md_block_current(&self, row: usize) -> Option<usize> { self.hits_in_row(row).iter().position(|h| h.2) }
     /// Hits inside one row as (part, range, is the current hit).
     fn hits_in_row(&self, row: usize) -> Vec<(usize, Range<usize>, bool)> {
         if !self.find_open || self.find_hits.is_empty() || self.page != Page::Code { return vec![]; }
@@ -631,7 +646,7 @@ impl View {
     }
     /// Background for rows whose text is not drawn as a plain code line (headers, comments, hunks), so hits there are still visible.
     fn row_tint(&self, ix: usize) -> Option<gpui::Hsla> {
-        let kind_plain = self.rows.get(ix).map(|r| matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))).unwrap_or(true);
+        let kind_plain = self.rows.get(ix).map(|r| matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_))).unwrap_or(true);
         if kind_plain { return None; }
         let hits = self.hits_in_row(ix); if hits.is_empty() { None } else { Some(self.pal.warn.opacity(if hits.iter().any(|h| h.2) { 0.35 } else { 0.16 })) }
     }
@@ -1145,8 +1160,8 @@ impl View {
             RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
             RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()).into_any_element(),
             RowKind::Comment(c) => return self.comment_card(fi, &c.clone(), cx).into_any_element(),
-            RowKind::Rendered(blocks) => return div().id(ix).w_full().px_6().py_3().font_family(self.fonts.ui.clone()).text_size(px(14.0)).child(markdown_view(blocks, &p, &mono))
-                .child(div().pt_2().text_xs().text_color(p.muted).child("Rendered preview. Switch to the source diff (m) to comment on lines, or open this file on its own to comment on blocks.")).into_any_element(),
+            RowKind::MdBlock(lb) => div().id(ix).w_full().px_6().py(px(3.0)).font_family(self.fonts.ui.clone()).text_size(px(14.0)).bg(if selected { p.accent.opacity(0.14) } else { gpui::transparent_black() })
+                .child(kit::markdown_view_find(std::slice::from_ref(&lb.block), &p, &mono, &self.find_query(), self.md_block_current(ix))),
             RowKind::Uni(rl) => {
                 let l = &rl.line;
                 let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
