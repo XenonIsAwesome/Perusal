@@ -1373,7 +1373,7 @@ impl View {
                     .child(div().size(px(10.0)).rounded_full().when(r.in_mr, |d| d.bg(p.accent)).when(!r.in_mr, |d| d.border_2().border_color(p.muted)))
                     .child(div().flex_1().w(px(2.0)).bg(if last { gpui::transparent_black() } else { p.border })))
                 .child(div().flex().flex_col().min_w_0().flex_1().py_1().child(div().truncate().text_sm().text_color(if r.in_mr { p.fg } else { p.muted }).child(r.subject.clone()))
-                    .child(div().flex().items_center().gap_1().child(kit::avatar(&crate::avatars::commit_identity(&r.author, &r.email), 14.0)).child(div().text_xs().text_color(p.muted).truncate().child(r.author.clone())).child(div().font_family(mono.clone()).text_xs().text_color(p.muted).child(r.sha[..7.min(r.sha.len())].to_string()))))
+                    .child(div().flex().items_center().gap_1().child(kit::avatar(&crate::avatars::commit_identity(&r.author, &r.email), 18.0)).child(div().text_xs().text_color(p.muted).truncate().child(r.author.clone())).child(div().font_family(mono.clone()).text_xs().text_color(p.muted).child(r.sha[..7.min(r.sha.len())].to_string()))))
                 .when(sel, |d| d.child(div().flex().items_center().child(icon(ic::CHECK, 15.0, p.accent))))
         }).collect();
         let draft_rows: Vec<_> = drafts.iter().enumerate().map(|(i, d)| {
