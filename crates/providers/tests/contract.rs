@@ -152,3 +152,32 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     assert_eq!(l[0].url, "https://gl.corp/grp/sub/proj/-/merge_requests/3", "http web_url from the instance is rewritten to https");
     assert_eq!(ci_page(&Kind::GitHub, "https://github.com/o/r/pull/7"), "https://github.com/o/r/pull/7/checks");
 }
+
+#[tokio::test] async fn github_resolved_threads_paged_and_failure_tolerant() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5},{"id":2,"user":{"login":"a"},"body":"r","path":"x.rs","line":6},{"id":3,"user":{"login":"a"},"body":"s","path":"x.rs","line":7}]))).mount(&s).await;
+    // page 2 is only served when the cursor from page 1 is sent back
+    Mock::given(method("POST")).and(path("/graphql")).and(wiremock::matchers::body_string_contains("\"c\":\"cur1\"")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
+        "pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"isResolved":true,"comments":{"nodes":[{"databaseId":3}]}}]}}}}}))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
+        "pageInfo":{"hasNextPage":true,"endCursor":"cur1"},"nodes":[{"isResolved":true,"comments":{"nodes":[{"databaseId":1}]}},{"isResolved":false,"comments":{"nodes":[{"databaseId":2}]}}]}}}}}))).mount(&s).await;
+    let t = gh(&s).threads(&ghref()).await.unwrap();
+    assert_eq!(t.iter().map(|x| x.resolved).collect::<Vec<_>>(), vec![true, false, true]);
+    // a failing GraphQL endpoint keeps the threads, just unresolved
+    let s2 = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5}]))).mount(&s2).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(500)).mount(&s2).await;
+    let t = gh(&s2).threads(&ghref()).await.unwrap(); assert_eq!(t.len(), 1); assert!(!t[0].resolved);
+}
+#[tokio::test] async fn gitlab_thread_resolution_rules() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/projects/g%2Fp/merge_requests/4/discussions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"id":"all","notes":[{"author":{"username":"a"},"body":"x","resolvable":true,"resolved":true},{"author":{"username":"b"},"body":"y","resolvable":true,"resolved":true}]},
+        {"id":"mixed","notes":[{"author":{"username":"a"},"body":"x","resolvable":true,"resolved":true},{"author":{"username":"b"},"body":"y","resolvable":true,"resolved":false}]},
+        {"id":"plain","notes":[{"author":{"username":"a"},"body":"x","resolvable":false,"resolved":false}]},
+        {"id":"sys","notes":[{"author":{"username":"gitlab"},"body":"merged","system":true,"resolvable":true,"resolved":true}]}]))).mount(&s).await;
+    let t = gl(&s).threads(&glref()).await.unwrap();
+    assert_eq!(t.len(), 3, "the system-note-only discussion is dropped");
+    assert_eq!(t.iter().map(|x| (x.id.as_str(), x.resolved)).collect::<Vec<_>>(), vec![("all", true), ("mixed", false), ("plain", false)]);
+}

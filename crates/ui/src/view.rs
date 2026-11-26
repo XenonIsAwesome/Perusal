@@ -92,6 +92,14 @@ pub fn resolve_link(link_path: &str, target: &str) -> String {
     parts.join("/")
 }
 
+/// Pins a collapsed comment's icon on `out[anchor]`; false when that row kind draws no icons (the comment then stays a full card so it is never unreachable).
+fn add_mark(out: &mut [Row], anchor: usize, c: &CItem) -> bool {
+    match out.get_mut(anchor) {
+        Some(row) if matches!(row.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::FileHeader) => { row.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); true }
+        _ => false,
+    }
+}
+
 impl View {
     pub fn new(mut m: Model, settings: Settings, fonts: Fonts) -> Self {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
@@ -241,28 +249,28 @@ impl View {
             let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None, marks: vec![] };
             for r in group {
                 out.push(r.clone());
-                if !matches!(r.kind, RowKind::Comment(_)) { anchor = out.len() - 1; }
+                if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::FileHeader) { anchor = out.len() - 1; }
                 let header_like = matches!(r.kind, RowKind::FileHeader | RowKind::Note(_) | RowKind::Collapsed(..) | RowKind::Rendered(_));
                 if !placed_top && !header_like { placed_top = true; }
                 if header_like && !placed_top {
                     // file-level comments (no line) sit right under the file header
                     let (file_level, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| l.is_none()); pending = rest;
                     for (_, c) in file_level {
-                        if self.collapsed_c.contains(&c.key) { if let Some(row) = out.get_mut(anchor) { row.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); continue; } }
+                        if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
                         out.push(card(c));
                     }
                 }
                 if let (Some(n), true) = (r.new_line, matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..))) {
                     let (here, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(l, _)| *l == Some(n)); pending = rest;
                     for (_, c) in here {
-                        if self.collapsed_c.contains(&c.key) { if let Some(last) = out.get_mut(anchor) { last.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); continue; } }
+                        if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
                         out.push(card(c));
                     }
                 }
             }
             for (l, mut c) in pending {
                 c.outdated = l.is_some();
-                if self.collapsed_c.contains(&c.key) { if let Some(row) = out.get_mut(anchor) { row.marks.push(Mark { key: c.key.clone(), draft: c.draft.is_some(), resolved: c.resolved, range: c.range }); continue; } }
+                if self.collapsed_c.contains(&c.key) && add_mark(&mut out, anchor, &c) { continue; }
                 out.push(card(c));
             }
         }

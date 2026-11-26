@@ -72,3 +72,4 @@
 - Collapsed file-level and outdated comments now show as gutter icons (anchored to file header / last row) like line comments, instead of full-width cards.
 - GitHub threads: resolved state now read via GraphQL reviewThreads (REST lacks it), so resolved threads start collapsed; failures are ignored.
 - Submit: remote review comments on lines outside the diff are folded into the review summary (file:line prefix) instead of failing the whole review with GitHub 422 'Line could not be resolved'.
+- GitHub resolved-thread lookup pages through GraphQL (cap 50 pages); collapsed-comment icons only anchor on rows that draw them, else the comment stays a card.
