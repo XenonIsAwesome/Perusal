@@ -60,8 +60,8 @@ pub fn reduced_motion() -> bool { REDUCED_MOTION.load(std::sync::atomic::Orderin
 /// Fonts with the user's chosen families (when installed) taking precedence over the built-in pick.
 pub fn pick_fonts_for(cx: &App, s: &perusal_app::settings::Settings) -> Fonts {
     let mut f = pick_fonts(cx); let names = cx.text_system().all_font_names();
-    if !s.ui_font.is_empty() && names.iter().any(|n| *n == s.ui_font) { f.ui = s.ui_font.clone().into(); }
-    if !s.code_font.is_empty() && names.iter().any(|n| *n == s.code_font) { f.mono = s.code_font.clone().into(); }
+    if !s.ui_font.is_empty() && names.contains(&s.ui_font) { f.ui = s.ui_font.clone().into(); }
+    if !s.code_font.is_empty() && names.contains(&s.code_font) { f.mono = s.code_font.clone().into(); }
     f
 }
 

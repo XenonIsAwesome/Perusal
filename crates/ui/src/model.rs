@@ -301,7 +301,7 @@ pub fn find_mr_for_branch(repo: &Path, branch: &str, hosts: &[HostCfg]) -> Optio
     let url = perusal_gitops::git(repo, &["remote", "get-url", "origin"]).ok()?;
     let (host, project) = perusal_app::hosts::parse_remote(&url)?;
     let kind = if perusal_app::hosts::kind_of(hosts, &host) == "gitlab" { Kind::GitLab } else { Kind::GitHub };
-    let r = MrRef { kind: kind.clone(), host: host.clone(), project: project.clone(), number: 0 };
+    let r = MrRef { kind, host: host.clone(), project: project.clone(), number: 0 };
     let p = provider(&r, token_for(&host).unwrap_or_default()).ok()?;
     let n = rt().ok()?.block_on(p.find_for_branch(&project, branch)).ok()??;
     let web = match kind { Kind::GitHub => format!("https://{host}/{project}/pull/{n}"), Kind::GitLab => format!("https://{host}/{project}/-/merge_requests/{n}") };
