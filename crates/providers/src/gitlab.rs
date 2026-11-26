@@ -28,7 +28,7 @@ impl Provider for GitLab {
         let v: Value = check(self.req(reqwest::Method::GET, &Self::mr(r)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
         Ok(MrInfo { title: s("/title"), state: s("/state"), author: s("/author/username"), head_sha: s("/sha"), base_ref: s("/target_branch"), web_url: s("/web_url"), description: s("/description"), source_ref: s("/source_branch"),
-            people: { let mut out = vec![Person { login: s("/author/username"), avatar: s("/author/avatar_url") }]; out.extend(people(&v["assignees"], "username")); out.extend(people(&v["reviewers"], "username")); out } })
+            author_avatar: s("/author/avatar_url"), assignees: people(&v["assignees"], "username"), reviewers: people(&v["reviewers"], "username") })
     }
     async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("{}/discussions", Self::mr(r))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;

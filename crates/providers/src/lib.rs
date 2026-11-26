@@ -56,8 +56,9 @@ pub async fn fetch_avatar(url: &str, token: Option<(&str, &str)>) -> Result<Vec<
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MrInfo { pub title: String, pub state: String, pub author: String, pub head_sha: String, pub base_ref: String, pub web_url: String, pub description: String, pub source_ref: String,
-    /// Author, assignees and requested reviewers with their avatars.
-    #[serde(default)] pub people: Vec<Person> }
+    #[serde(default)] pub author_avatar: String,
+    #[serde(default)] pub assignees: Vec<Person>,
+    #[serde(default)] pub reviewers: Vec<Person> }
 
 /// Why a merge request is in your list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

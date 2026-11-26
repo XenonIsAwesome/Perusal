@@ -106,6 +106,7 @@ impl Model {
         let base_sha = perusal_gitops::merge_base(&dir, "refs/perusal/base", &head)?;
         let canon = canonical(&r);
         let mut m = Self::finish(dir, base_sha, head, &format!("remote:{canon}"), info.title.clone(), Some(canon))?;
+        crate::avatars::learn_info(&r.kind, &r.host, &info);
         m.info = Some(info.clone()); m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); Ok(m)
     }
 
@@ -209,6 +210,8 @@ pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
     let info = rt.block_on(p.mr_info(mr)).map_err(|e| e.to_string())?;
     let ci = rt.block_on(p.ci(mr, &info.head_sha)).unwrap_or(Ci::None);
     let threads = rt.block_on(p.threads(mr)).unwrap_or_default();
+    crate::avatars::learn_info(&mr.kind, &mr.host, &info); crate::avatars::learn_threads(&mr.kind, &mr.host, &threads);
+    if crate::avatars::me(&mr.host).is_none() { if let Ok(u) = rt.block_on(p.current_user()) { crate::avatars::set_me(&mr.host, &u); } }
     Ok(RemoteState { info, ci, threads })
 }
 pub fn ci_label(c: &Ci) -> &'static str { match c { Ci::None => "none", Ci::Pending => "pending", Ci::Running => "running", Ci::Passed => "passed", Ci::Failed => "failed", Ci::Canceled => "canceled" } }
@@ -225,6 +228,7 @@ pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> (V
         match rt.block_on(p.my_reviews(&h.host, role, state)) { Ok(mut l) => all.append(&mut l), Err(e) => errs.push((h.host.clone(), e.to_string())) }
     }
     all.sort_by(|a, b| b.updated.cmp(&a.updated));
+    crate::avatars::learn_mrs(&all);
     (all, errs)
 }
 

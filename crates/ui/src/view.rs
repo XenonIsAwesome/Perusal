@@ -607,6 +607,8 @@ impl View {
         Submission { head_sha: self.m.branch.clone(), summary: summary.trim().to_string(), verdict, comments, general }
     }
     /// True when comments go straight to the host and Finish review is not shown (remote reviews only).
+    /// Name to draw an avatar under: the signed-in user's login for "You", the name itself otherwise.
+    fn who(&self, name: &str) -> String { if name == "You" { self.m.mr.as_ref().and_then(|r| crate::avatars::me(&r.host)).unwrap_or_else(|| name.to_string()) } else { name.to_string() } }
     fn instant(&self) -> bool { self.settings.publish_instantly && self.m.mr.is_some() }
     /// Posts one local draft to the host now. The draft is only deleted once the host accepted it.
     fn publish_draft(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -1085,7 +1087,7 @@ impl View {
         let collapsed = self.collapsed_c.contains(&c.key); let raw = self.raw_c.contains(&c.key);
         let (k1, k2) = (c.key.clone(), c.key.clone()); let id = SharedString::from(c.key.clone());
         let first_line: String = c.body.lines().next().unwrap_or("").chars().take(120).collect();
-        let draft = c.draft; let orig = c.orig.clone();
+        let draft = c.draft; let orig = c.orig.clone(); let who_c = self.who(&c.author);
         let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(text), &p, &mono, orig.as_deref()).text_sm().into_any_element() } };
         let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
         div().flex().w_full().px_2().py(px(4.0)).child(
@@ -1094,7 +1096,7 @@ impl View {
                 .child(div().flex().items_center().gap_2().px_3().py(px(5.0)).bg(p.hover.opacity(0.5))
                     .child(div().id(SharedString::from(format!("cc-{}", c.key))).flex().items_center().gap_1().cursor_pointer().on_click(cx.listener(move |this, _, _, cx| { this.toggle_comment(&k1); cx.notify(); }))
                         .child(icon(if collapsed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted)).child(icon(ic::COMMENT, 15.0, accent)))
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(c.author.clone()))
+                    .child(kit::avatar(&who_c, 20.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(c.author.clone()))
                     .when(c.draft.is_some(), |d| d.child(badge("Draft", p.warn, p.warn.opacity(0.15)))).when(c.ai, |d| d.child(badge("AI", p.ai, p.ai.opacity(0.15))))
                     .when(c.resolved, |d| d.child(badge("Resolved", p.success, p.success.opacity(0.15)))).when(c.outdated, |d| d.child(badge("Outdated", p.muted, p.hover)))
                     .when(!c.replies.is_empty(), |d| d.child(div().text_xs().text_color(p.muted).child(format!("{} repl{}", c.replies.len(), if c.replies.len() == 1 { "y" } else { "ies" }))))
@@ -1104,7 +1106,7 @@ impl View {
                     .children(draft.filter(|_| instant).map(|d| icon_btn(SharedString::from(format!("pub-{d}")), ic::SEND, "Publish this draft now", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.publish_draft(d, cx); cx.stop_propagation(); cx.notify(); }))))
                     .children(draft.map(|d| icon_btn(SharedString::from(format!("rm-{d}")), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(d); this.resync(); cx.stop_propagation(); cx.notify(); })))))
                 .when(!collapsed, |d| d.child(div().flex().flex_col().gap_2().px_3().py_2().child(body(&c.body))
-                    .children(c.replies.iter().map(|(a, t)| div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(p.border).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(a.clone())).child(body(t))).collect::<Vec<_>>())))
+                    .children(c.replies.iter().map(|(a, t)| div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(p.border).child(div().flex().items_center().gap_2().child(kit::avatar(a, 20.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(a.clone()))).child(body(t))).collect::<Vec<_>>())))
         ).id(id)
     }
 
@@ -1170,8 +1172,9 @@ impl View {
         let Some(info) = self.info.clone() else { return div().into_any_element() };
         let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
         let global_drafts: Vec<&perusal_core::store::Draft> = drafts.iter().filter(|d| d.file.is_none()).collect();
+        let me = self.who("You");
         let card = |who: String, body: &str, tag: Option<AnyElement>| div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
-            .child(div().flex().items_center().gap_2().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
+            .child(div().flex().items_center().gap_2().child(kit::avatar(if who == "You" { &me } else { &who }, 24.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
         let mut list: Vec<AnyElement> = vec![];
         for t in &global_threads {
             for (i, (a, b)) in t.comments.iter().enumerate() { list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
@@ -1187,7 +1190,9 @@ impl View {
         let page = div().id("overview").flex_1().min_h_0().overflow_y_scroll().child(div().flex().flex_col().gap_4().max_w(px(900.0)).mx_auto().px_6().pt_6().pb(px(100.0))
             .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(info.title.clone()))
             .child(div().flex().flex_wrap().items_center().gap_3().text_sm().text_color(p.muted)
-                .child(badge(match state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15))).child(div().child(format!("by {}", info.author)))
+                .child(badge(match state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15))).child(div().flex().items_center().gap_2().child(kit::avatar(&info.author, 22.0)).child(format!("by {}", info.author)))
+                .children((!info.assignees.is_empty()).then(|| div().flex().items_center().gap_1().child(div().text_xs().child("Assigned")).children(info.assignees.iter().map(|a| div().flex().items_center().gap_1().child(kit::avatar(&a.login, 20.0)).child(a.login.clone())))))
+                .children((!info.reviewers.is_empty()).then(|| div().flex().items_center().gap_1().child(div().text_xs().child("Reviewers")).children(info.reviewers.iter().map(|a| div().flex().items_center().gap_1().child(kit::avatar(&a.login, 20.0)).child(a.login.clone())))))
                 .when(!info.source_ref.is_empty(), |d| d.child(div().flex().items_center().gap_1().font_family(mono.clone()).child(info.source_ref.clone()).child(icon(ic::ARROW_FORWARD, 14.0, p.muted)).child(info.base_ref.clone()))))
             .child(div().flex().flex_col().gap_2().p_4().rounded_md().border_1().border_color(p.border).bg(p.surface)
                 .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("Description"))
@@ -1368,7 +1373,7 @@ impl View {
                     .child(div().size(px(10.0)).rounded_full().when(r.in_mr, |d| d.bg(p.accent)).when(!r.in_mr, |d| d.border_2().border_color(p.muted)))
                     .child(div().flex_1().w(px(2.0)).bg(if last { gpui::transparent_black() } else { p.border })))
                 .child(div().flex().flex_col().min_w_0().flex_1().py_1().child(div().truncate().text_sm().text_color(if r.in_mr { p.fg } else { p.muted }).child(r.subject.clone()))
-                    .child(div().font_family(mono.clone()).text_xs().text_color(p.muted).child(r.sha[..7.min(r.sha.len())].to_string())))
+                    .child(div().flex().items_center().gap_1().child(kit::avatar(&crate::avatars::commit_identity(&r.author, &r.email), 14.0)).child(div().text_xs().text_color(p.muted).truncate().child(r.author.clone())).child(div().font_family(mono.clone()).text_xs().text_color(p.muted).child(r.sha[..7.min(r.sha.len())].to_string()))))
                 .when(sel, |d| d.child(div().flex().items_center().child(icon(ic::CHECK, 15.0, p.accent))))
         }).collect();
         let draft_rows: Vec<_> = drafts.iter().enumerate().map(|(i, d)| {

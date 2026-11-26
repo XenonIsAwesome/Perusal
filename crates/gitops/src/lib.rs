@@ -84,18 +84,21 @@ pub fn commits(dir: &Path, base: &str, head: &str) -> Result<Vec<(String, Vec<St
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GraphRow { pub sha: String, pub parents: Vec<String>, pub subject: String, pub in_mr: bool, pub lane: usize }
+pub struct GraphRow { pub sha: String, pub parents: Vec<String>, pub subject: String, pub in_mr: bool, pub lane: usize, pub author: String, pub email: String }
+
+fn graph_rows(out: &str, in_mr: bool, lane: usize) -> Vec<GraphRow> {
+    out.lines().filter_map(|l| {
+        let p: Vec<&str> = l.splitn(5, '\t').collect();
+        (p.len() == 5).then(|| GraphRow { sha: p[0].into(), parents: p[1].split_whitespace().map(String::from).collect(), author: p[2].into(), email: p[3].into(), subject: p[4].into(), in_mr, lane })
+    }).collect()
+}
 
 /// Commit graph rows newest first: the MR's commits (`base..head`) plus `context` commits of target-branch history.
 /// Lanes: the MR line is lane 0, target-branch context lane 1.
 pub fn graph(dir: &Path, base: &str, head: &str, context: usize) -> Result<Vec<GraphRow>> {
-    let mr: Vec<_> = commits(dir, base, head)?;
-    let mut rows: Vec<GraphRow> = mr.iter().rev().map(|(s, p, t)| GraphRow { sha: s.clone(), parents: p.clone(), subject: t.clone(), in_mr: true, lane: 0 }).collect();
-    let out = git(dir, &["log", &format!("-{context}"), "--format=%H%x09%P%x09%s", base])?;
-    for l in out.lines() {
-        let p: Vec<&str> = l.splitn(3, '\t').collect();
-        if p.len() == 3 { rows.push(GraphRow { sha: p[0].into(), parents: p[1].split_whitespace().map(String::from).collect(), subject: p[2].into(), in_mr: false, lane: 1 }); }
-    }
+    const FMT: &str = "--format=%H%x09%P%x09%an%x09%ae%x09%s";
+    let mut rows = graph_rows(&git(dir, &["log", FMT, &format!("{base}..{head}")])?, true, 0);
+    rows.extend(graph_rows(&git(dir, &["log", &format!("-{context}"), FMT, base])?, false, 1));
     Ok(rows)
 }
 

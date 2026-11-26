@@ -43,7 +43,7 @@ impl Provider for GitHub {
         let s = |p: &str| v.pointer(p).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let state = if v["merged"].as_bool() == Some(true) { "merged".into() } else { s("/state") };
         Ok(MrInfo { title: s("/title"), state, author: s("/user/login"), head_sha: s("/head/sha"), base_ref: s("/base/ref"), web_url: s("/html_url"), description: s("/body"), source_ref: s("/head/ref"),
-            people: { let mut out = vec![Person { login: s("/user/login"), avatar: s("/user/avatar_url") }]; out.extend(people(&v["assignees"], "login")); out.extend(people(&v["requested_reviewers"], "login")); out } })
+            author_avatar: s("/user/avatar_url"), assignees: people(&v["assignees"], "login"), reviewers: people(&v["requested_reviewers"], "login") })
     }
     async fn threads(&self, r: &MrRef) -> Result<Vec<Thread>> {
         let v: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/{}/comments", r.project, r.number)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;

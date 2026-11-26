@@ -130,6 +130,26 @@ pub fn icon(i: Icon, size: f32, color: Hsla) -> Div {
     div().font_family("Material Icons").text_size(px(size)).line_height(px(size)).size(px(size)).flex().items_center().justify_center().flex_none().text_color(color).child(i.0.to_string())
 }
 
+/// Round user picture. Draws the downloaded image when the host gave one and it is on disk; otherwise (or if it fails to decode) the
+/// placeholder: two letters of the name on a colour hashed from it. `name` is the login (or git author name for local committers).
+pub fn avatar(name: &str, size: f32) -> gpui::AnyElement {
+    let url = crate::avatars::url_for(name);
+    avatar_with(name, url.as_deref(), size)
+}
+pub fn avatar_with(name: &str, url: Option<&str>, size: f32) -> gpui::AnyElement {
+    let sw = perusal_app::avatar::swatch(name); let letters = perusal_app::avatar::initials(name);
+    let c = |v: [u8; 3]| -> Hsla { rgb(((v[0] as u32) << 16) | ((v[1] as u32) << 8) | v[2] as u32).into() };
+    let (bg, fg) = (c(sw.bg), c(sw.fg));
+    let place = move || div().size(px(size)).flex_none().rounded_full().bg(bg).text_color(fg).flex().items_center().justify_center().font_weight(FontWeight::SEMIBOLD).text_size(px(size * 0.42)).line_height(px(size)).child(letters.clone());
+    if let Some(u) = url {
+        if let Some(path) = crate::avatars::cached(u) {
+            return div().size(px(size)).flex_none().rounded_full().overflow_hidden().child(gpui::img(path).size(px(size)).object_fit(gpui::ObjectFit::Cover).with_fallback(move || place().into_any_element())).into_any_element();
+        }
+        crate::avatars::request(u);
+    }
+    place().into_any_element()
+}
+
 pub struct TipView { text: SharedString, p: Pal }
 impl Render for TipView {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {

@@ -32,7 +32,7 @@ pub struct Root {
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>, r_search: Input, m_search: Input,
     recent: Vec<RecentRow>, r_remote: Remote, r_state: St,
-    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool,
+    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_person: Option<String>, mine_label: Option<String>, mine_hide_drafts: bool,
     mrs: Vec<(u64, String, String)>, busy: bool, token_host: Option<String>, retry_url: Option<String>, msg: Option<(NKind, String)>,
 }
 
@@ -44,9 +44,11 @@ impl Root {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut r = Root { decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None, r_search: Input::new(""), m_search: Input::new(""),
-            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::ReviewRequested, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false,
+            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::ReviewRequested, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_person: None, mine_label: None, mine_hide_drafts: false,
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
         r.refresh_recent();
+        // repaint when a background avatar download finishes
+        cx.spawn(async move |this, cx| { let mut seen = crate::avatars::version(); loop { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; let v = crate::avatars::version(); if v != seen { seen = v; if this.update(cx, |_, cx| cx.notify()).is_err() { break; } } } }).detach();
         match initial {
             Initial::Home => {}
             Initial::Local(repo, branch, base) => { let res = Model::open_local(std::path::Path::new(&repo), &branch, base.as_deref()); r.finish_open(res, cx); }
@@ -226,9 +228,11 @@ impl Root {
         div().flex().items_center().gap_1().px_4().pt_2().child(el)
             .when(has, |d| d.child(icon_btn(SharedString::from(format!("{id}-clear")), ic::CLOSE, "Clear the search", Btn::Ghost, &p).on_click(cx.listener(move |t, _, _, cx| { if f == Hf::RSearch { t.r_search.f.clear(); } else { t.m_search.f.clear(); } cx.notify(); }))))
     }
-    fn chip(&self, id: impl Into<gpui::ElementId>, label: String, on: bool) -> gpui::Stateful<gpui::Div> {
+    fn chip(&self, id: impl Into<gpui::ElementId>, label: String, on: bool) -> gpui::Stateful<gpui::Div> { self.chip_with(id, None, label, on) }
+    /// A filter chip with an optional leading picture (used for people).
+    fn chip_with(&self, id: impl Into<gpui::ElementId>, lead: Option<gpui::AnyElement>, label: String, on: bool) -> gpui::Stateful<gpui::Div> {
         let p = self.pal;
-        div().id(id).px_3().py(px(3.0)).rounded_full().border_1().border_color(if on { p.accent } else { p.border }).bg(if on { p.accent.opacity(0.14) } else { gpui::transparent_black() }).text_color(if on { p.fg } else { p.muted }).text_xs().font_weight(FontWeight::MEDIUM).cursor_pointer().hover(move |s| s.bg(p.hover)).child(label)
+        div().id(id).flex().items_center().gap_1().px_3().when(lead.is_some(), |d| d.pl_1()).py(px(3.0)).rounded_full().border_1().border_color(if on { p.accent } else { p.border }).bg(if on { p.accent.opacity(0.14) } else { gpui::transparent_black() }).text_color(if on { p.fg } else { p.muted }).text_xs().font_weight(FontWeight::MEDIUM).cursor_pointer().hover(move |s| s.bg(p.hover)).children(lead).child(label)
     }
     fn state_dot(&self, s: &str) -> gpui::Hsla { let p = self.pal; match s { "merged" => p.ai, "closed" => p.danger, "open" => p.success, _ => p.accent } }
 
@@ -319,19 +323,30 @@ impl Root {
     fn render_mine(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = self.pal;
         let signed = self.settings.hosts.iter().any(|h| model::token_for(&h.host).is_some());
-        let rows: Vec<_> = self.mine.iter().filter(|m| match self.mine_remote { Remote::All | Remote::Local => true, Remote::GitHub => m.kind == perusal_providers::Kind::GitHub, Remote::GitLab => m.kind == perusal_providers::Kind::GitLab }).filter(|m| perusal_app::search::matches(&self.m_search.f.text, &[&m.title, &m.host, &m.project, &m.number.to_string(), &m.author, &m.state])).cloned().enumerate().map(|(i, m)| {
+        let (person, label_f, hide_drafts) = (self.mine_person.clone(), self.mine_label.clone(), self.mine_hide_drafts);
+        let rows: Vec<_> = self.mine.iter().filter(|m| match self.mine_remote { Remote::All | Remote::Local => true, Remote::GitHub => m.kind == perusal_providers::Kind::GitHub, Remote::GitLab => m.kind == perusal_providers::Kind::GitLab })
+            .filter(|m| !(hide_drafts && m.draft))
+            .filter(|m| person.as_ref().map(|u| mr_people(m).iter().any(|x| x.eq_ignore_ascii_case(u))).unwrap_or(true))
+            .filter(|m| label_f.as_ref().map(|l| m.labels.iter().any(|x| x == l)).unwrap_or(true))
+            .filter(|m| perusal_app::search::matches_item(&self.m_search.f.text, &mr_item(m))).cloned().enumerate().map(|(i, m)| {
             let url = m.url.clone(); let dot = self.state_dot(&m.state);
             let when: String = m.updated.chars().take(10).collect();
+            let assignees: Vec<_> = m.assignees.iter().take(3).map(|a| kit::avatar(&a.login, 20.0)).collect();
             div().id(("mine", i)).flex().items_center().gap_3().px_4().py_3().border_b_1().border_color(p.border).cursor_pointer().hover(move |s| s.bg(p.hover))
                 .on_click(cx.listener(move |this, _, _, cx| { this.open_url(url.clone(), cx); }))
-                .child(icon(if m.kind == perusal_providers::Kind::GitLab { ic::CALL_MERGE } else { ic::PUBLIC }, 18.0, p.muted))
+                .child(kit::avatar(&m.author, 28.0))
                 .child(div().flex().flex_col().flex_1().min_w_0().gap(px(2.0))
-                    .child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(m.title.clone())).child(badge(match m.state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15))))
-                    .child(div().text_xs().text_color(p.muted).truncate().child(format!("{} · {}#{} · by {} · updated {when}", m.host, m.project, m.number, m.author))))
+                    .child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(m.title.clone()))
+                        .when(m.draft, |d| d.child(badge("Draft", p.muted, p.hover)))
+                        .child(badge(match m.state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15)))
+                        .children(m.labels.iter().take(3).map(|l| badge(l.clone(), p.accent, p.accent.opacity(0.12)))))
+                    .child(div().flex().items_center().gap_1().text_xs().text_color(p.muted).child(icon(if m.kind == perusal_providers::Kind::GitLab { ic::CALL_MERGE } else { ic::PUBLIC }, 13.0, p.muted))
+                        .child(div().truncate().child(format!("{} · {}#{} · by {} · updated {when}", m.host, m.project, m.number, m.author)))))
+                .when(!assignees.is_empty(), |d| d.child(div().flex().items_center().gap(px(-4.0)).children(assignees)))
                 .child(icon(ic::CHEVRON_RIGHT, 18.0, p.muted))
         }).collect();
         let n = rows.len();
-        let sbox = self.search_box("mine-search", Hf::MSearch, "Search by title, project, number or author", cx);
+        let sbox = self.search_box("mine-search", Hf::MSearch, "Search title, overview text, project, people… or author:  assignee:  reviewer:  label:  is:draft  host:  kind:github", cx);
         let chips = |this: &Self| div().flex().flex_col().gap_2().px_4().py_2().border_b_1().border_color(p.border)
             .child(div().flex().flex_wrap().items_center().gap_2()
                 .child(div().text_xs().text_color(p.muted).child("Show"))
@@ -342,8 +357,28 @@ impl Root {
                 .children([(Remote::All, "All"), (Remote::GitHub, "GitHub"), (Remote::GitLab, "GitLab")].map(|(r, l)| this.chip(("mrr", r as usize), l.into(), this.mine_remote == r).on_click(cx.listener(move |t, _, _, cx| { t.mine_remote = r; cx.notify(); }))))
                 .child(div().w(px(10.0))).child(div().text_xs().text_color(p.muted).child("State"))
                 .children([(StateFilter::Open, "Open"), (StateFilter::Merged, "Merged"), (StateFilter::Closed, "Closed"), (StateFilter::All, "All")].map(|(s, l)| this.chip(("mrs", s as usize), l.into(), this.mine_state == s).on_click(cx.listener(move |t, _, _, cx| { t.mine_state = s; t.load_mine(cx); })))));
+        let people_chips = |this: &Self| {
+            let mut count: std::collections::BTreeMap<String, usize> = Default::default();
+            for m in &this.mine { for u in mr_people(m) { if !u.is_empty() { *count.entry(u).or_default() += 1; } } }
+            let mut v: Vec<(String, usize)> = count.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0))); v.truncate(8); v
+        };
+        let label_chips = |this: &Self| {
+            let mut count: std::collections::BTreeMap<String, usize> = Default::default();
+            for m in &this.mine { for l in &m.labels { *count.entry(l.clone()).or_default() += 1; } }
+            let mut v: Vec<(String, usize)> = count.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0))); v.truncate(8); v
+        };
+        let (ppl, lbls) = (people_chips(self), label_chips(self));
+        let extra = div().flex().flex_col().gap_2().px_4().pb_2().border_b_1().border_color(p.border)
+            .when(!ppl.is_empty(), |d| d.child(div().flex().flex_wrap().items_center().gap_2().child(div().text_xs().text_color(p.muted).child("Person"))
+                .children(ppl.into_iter().enumerate().map(|(i, (u, _))| { let on = self.mine_person.as_deref() == Some(u.as_str()); let u2 = u.clone();
+                    self.chip_with(("mp", i), Some(kit::avatar(&u, 18.0)), u, on).on_click(cx.listener(move |t, _, _, cx| { t.mine_person = if on { None } else { Some(u2.clone()) }; cx.notify(); })) }))))
+            .child(div().flex().flex_wrap().items_center().gap_2()
+                .children((!lbls.is_empty()).then(|| div().text_xs().text_color(p.muted).child("Label")))
+                .children(lbls.into_iter().enumerate().map(|(i, (l, _))| { let on = self.mine_label.as_deref() == Some(l.as_str()); let l2 = l.clone();
+                    self.chip(("ml", i), l, on).on_click(cx.listener(move |t, _, _, cx| { t.mine_label = if on { None } else { Some(l2.clone()) }; cx.notify(); })) }))
+                .child(self.chip("mhd", "Hide drafts".into(), self.mine_hide_drafts).on_click(cx.listener(|t, _, _, cx| { t.mine_hide_drafts = !t.mine_hide_drafts; cx.notify(); }))));
         let errs: Vec<_> = self.mine_errs.iter().map(|(h, e)| div().flex().items_start().gap_2().px_4().py_2().text_sm().text_color(p.danger).child(icon(ic::ERROR_OUTLINE, 16.0, p.danger)).child(div().flex_1().min_w_0().child(format!("{h}: {e}")))).collect();
-        div().flex().flex_col().flex_1().min_h_0().child(sbox).child(chips(self)).children(errs)
+        div().flex().flex_col().flex_1().min_h_0().child(sbox).child(chips(self)).child(extra).children(errs)
             .child(div().id("mine-list").flex_1().min_h_0().overflow_y_scroll().bg(p.bg)
                 .when(!signed, |d| d.child(div().flex().flex_col().items_center().justify_center().gap_3().py(px(60.0)).px_6().text_color(p.muted)
                     .child(icon(ic::LOGIN, 36.0, p.muted)).child(div().text_lg().text_color(p.fg).child("Sign in to see your reviews")).child(div().text_sm().child("Connect GitHub or GitLab and your pull and merge requests appear here, with the same filters those sites have."))
@@ -477,4 +512,11 @@ pub fn run(initial: Initial) {
         }).unwrap();
         cx.activate(true);
     });
+}
+
+/// Everyone attached to a request: author, assignees and reviewers.
+fn mr_people(m: &RemoteMr) -> Vec<String> { std::iter::once(m.author.clone()).chain(m.assignees.iter().chain(&m.reviewers).map(|p| p.login.clone())).collect() }
+fn mr_item(m: &RemoteMr) -> perusal_app::search::Item<'_> {
+    perusal_app::search::Item { title: &m.title, host: &m.host, project: &m.project, number: m.number, author: &m.author, state: &m.state, kind: if m.kind == perusal_providers::Kind::GitLab { "gitlab" } else { "github" },
+        assignees: m.assignees.iter().map(|p| p.login.as_str()).collect(), reviewers: m.reviewers.iter().map(|p| p.login.as_str()).collect(), labels: m.labels.iter().map(String::as_str).collect(), description: &m.description, draft: m.draft }
 }
