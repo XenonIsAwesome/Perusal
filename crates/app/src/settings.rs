@@ -82,6 +82,8 @@ pub struct Settings {
     /// Draw our own title bar and window buttons instead of the system's (restart-free where the platform allows).
     pub custom_titlebar: bool,
     /// Panel layout, remembered between sessions.
+    /// Height the Commits section may take in the review panel (drag the divider below it).
+    pub commits_height: Option<f32>,
     pub left_width: f32,
     pub right_width: f32,
     pub left_open: bool,
@@ -97,7 +99,7 @@ pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> 
 
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
+            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
 }
 
 impl Settings {
@@ -105,7 +107,7 @@ impl Settings {
         let mut st: Settings = toml::from_str(s).unwrap_or_default();
         st.group_rules = perusal_diff::rules::merge_with_builtins(std::mem::take(&mut st.group_rules));
         for d in default_hosts() { if !st.hosts.iter().any(|h| h.host == d.host) { st.hosts.insert(0, d); } }
-        st.left_width = st.left_width.clamp(200.0, 700.0); st.right_width = st.right_width.clamp(220.0, 700.0);
+        st.commits_height = st.commits_height.map(|h| h.clamp(60.0, 700.0)); st.left_width = st.left_width.clamp(200.0, 700.0); st.right_width = st.right_width.clamp(220.0, 700.0);
         st
     }
     pub fn to_toml(&self) -> String { toml::to_string_pretty(self).unwrap_or_default() }
@@ -128,7 +130,7 @@ mod tests { use super::*;
     }
     #[test] fn rules_merge_and_layout_clamp() {
         let t = Settings::from_toml("left_width = 5000.0\nright_width = 1.0\n[[group_rules]]\nid = \"mine\"\nlabel = \"m\"\npattern = \"(?P<stem>x)\"\nenabled = true\n");
-        assert_eq!((t.left_width, t.right_width), (700.0, 220.0)); assert_eq!(t.group_rules.len(), 6); assert!(t.group_rules.iter().any(|r| r.id == "mine" && !r.builtin));
+        assert_eq!((t.left_width, t.right_width), (700.0, 220.0)); assert_eq!(Settings::from_toml("commits_height = 5.0\n").commits_height, Some(60.0)); assert_eq!(Settings::default().commits_height, None); assert_eq!(t.group_rules.len(), 6); assert!(t.group_rules.iter().any(|r| r.id == "mine" && !r.builtin));
         assert!(Settings::from_toml("").group_rules.iter().all(|r| r.builtin));
     }
     #[test] fn hosts_always_include_the_cloud_hosts() {

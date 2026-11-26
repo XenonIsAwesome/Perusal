@@ -67,7 +67,7 @@ pub struct View {
     sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>, hx: f32, hb_drag: Option<f32>, hx_text: std::rc::Rc<std::cell::Cell<f32>>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
-    left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
+    left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_h: Option<f32>, resizing_cd: Option<(f32, f32)>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
     tab: RightTab, chat: Vec<(String, String)>, ai_ctx: Option<Selection>, ai_notice: Option<String>,
     ai_job: Option<Job>, ai_events: Arc<Mutex<Vec<AgentEvent>>>, ai_cancel: Arc<AtomicBool>, ai_started: Option<Instant>, ai_activity: Vec<String>, ai_partial: String,
     verdict: Verdict, submit_busy: bool, submit_msg: Option<(bool, String)>,
@@ -122,7 +122,7 @@ impl View {
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
-            left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
+            left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
             verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m }
     }
@@ -387,7 +387,7 @@ impl View {
         div().flex().flex_col().gap_2().p_3().border_t_1().border_color(p.border)
             .child(div().flex().items_center().gap_2().text_sm().font_weight(FontWeight::SEMIBOLD).child(icon(ic::AUTO_AWESOME, 16.0, p.ai)).child("Generate with AI"))
             .child(self.winp(Fid::Gen, div().id("gen-box").flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).child(input_text(&self.gen, focused, hint, &p, false, 1)), cx))
-            .children(self.gen_msg.clone().map(|m| div().text_xs().text_color(p.danger).child(m)))
+            .children(self.gen_msg.clone().map(|m| div().flex().items_start().gap_1().text_xs().text_color(p.danger).child(div().flex_1().min_w_0().child(m.clone())).child(kit::copy_btn("gen-err-copy", m, &p))))
             .child(div().flex().items_center().gap_2().when(self.gen_busy, |d| d.child(loading_dots(&p)).child(div().text_xs().text_color(p.muted).child(format!("{} is writing it…", self.settings.agent_label()))))
                 .child(div().flex_1())
                 .child(if self.gen_busy { icon_text_btn("gen-stop", ic::STOP, "Stop", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.gen_cancel.store(true, Ordering::Relaxed); cx.notify(); })).into_any_element() }
@@ -858,11 +858,13 @@ impl Render for View {
                 if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
                 this.hb_drag = None;
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
+                if this.resizing_cd.take().is_some() { this.settings.commits_height = this.commits_h; this.save_settings(); }
                 cx.notify();
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, w, cx| {
                 if ev.pressed_button != Some(MouseButton::Left) { return; }
                 let zoom = this.zoom; let vw: f32 = w.viewport_size().width.into(); let x: f32 = ev.position.x.into(); let y: f32 = ev.position.y.into();
+                if let Some((y0, h0)) = this.resizing_cd { this.commits_h = Some((h0 + (y - y0)).clamp(60.0, 700.0)); cx.notify(); }
                 match this.resizing { Some(Side::Left) => { this.left_w = (x / zoom).clamp(200.0, 700.0); cx.notify(); } Some(Side::Right) => { this.right_w = ((vw - x) / zoom).clamp(220.0, 700.0); cx.notify(); } None => {} }
                 if let (Some(grab), Some((ox, tw, max))) = (this.hb_drag, this.hbar_geom()) {
                     let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0);
@@ -1043,7 +1045,7 @@ impl View {
                 .child(icon_btn("presets", ic::BOOKMARK, "Filter and sort presets", if self.presets_open { Btn::Secondary } else { Btn::Ghost }, &p).on_click(cx.listener(|this, _, _, cx| { this.presets_open = !this.presets_open; this.sug.clear(); cx.stop_propagation(); cx.notify(); })))
                 .children(dropdown).children(presets_menu).children(sort_pop).children(filter_pop))
             .children((self.tree && !self.m.vm.sort.is_empty()).then(|| div().flex().items_center().gap_2().text_xs().text_color(p.warn).child(icon(ic::WARNING, 14.0, p.warn)).child("Sorting does not apply while files are shown as a directory tree. Switch to the flat list to use it.")))
-            .children(err.map(|e| div().text_xs().text_color(p.danger).truncate().child(e)))
+            .children(err.map(|e| div().flex().items_center().gap_1().text_xs().text_color(p.danger).child(div().min_w_0().truncate().child(e.clone())).child(kit::copy_btn("filter-err-copy", e, &p))))
     }
 
     fn files_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1516,7 +1518,11 @@ impl View {
         let (co, dro) = (self.commits_open, self.drafts_open);
         div().flex().flex_col().flex_1().min_h_0()
             .child(self.section_header("sec-commits", "Commits", Some(self.m.graph.rows.len()), co, cx, |v| v.commits_open = !v.commits_open))
-            .when(co, |d| d.child(div().id("commits").max_h(px(260.0)).overflow_y_scroll().children(commit_rows)))
+            .when(co, |d| d.child(div().id("commits").when_some(self.commits_h, |d, h| d.h(px(h))).when(self.commits_h.is_none(), |d| d.max_h(px(260.0))).overflow_y_scroll().children(commit_rows)))
+            // drag this bar to give Commits more or less room (Drafts takes the rest)
+            .child(div().id("cd-split").h(px(6.0)).w_full().flex_none().cursor(gpui::CursorStyle::ResizeUpDown).bg(if self.resizing_cd.is_some() { p.accent.opacity(0.5) } else { p.border.opacity(0.6) }).hover(move |s| s.bg(p.accent.opacity(0.5)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| { let y: f32 = ev.position.y.into(); let auto = (this.m.graph.rows.len() as f32 * 50.0).clamp(60.0, 260.0); // about what the list shows until first resized
+                    this.resizing_cd = Some((y, this.commits_h.unwrap_or(auto))); cx.stop_propagation(); cx.notify(); })))
             .child(self.section_header("sec-drafts", "Drafts", Some(n), dro, cx, |v| v.drafts_open = !v.drafts_open))
             .when(dro, |d| d.child(div().id("drafts").flex_1().min_h_0().overflow_y_scroll()
                 .when(n == 0, |d| d.child(div().p_4().text_sm().text_color(p.muted).child("No drafts yet. Select lines (click, drag, or Shift+click) and use the Comment button.")))
@@ -1557,7 +1563,7 @@ impl View {
                 .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("Ask {agent}"))).child(div().text_xs().text_color(p.muted).truncate().child(cfg.join(" · "))))
                 .child(icon_btn("new-chat", ic::ADD, "Start a new chat", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let _ = this.m.store.new_chat(this.m.vm.review); this.chat.clear(); this.ai_ctx = None; this.ai_notice = None; cx.notify(); })))
                 .child(icon_btn("ai-settings", ic::TUNE, "Agent, model and effort settings", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings)))))
-            .children(self.ai_notice.clone().map(|n| div().flex().items_start().gap_2().px_3().py_2().text_sm().text_color(p.danger).bg(p.danger.opacity(0.1)).border_b_1().border_color(p.danger).child(icon(ic::ERROR_OUTLINE, 17.0, p.danger)).child(div().flex_1().min_w_0().child(n))
+            .children(self.ai_notice.clone().map(|n| div().flex().items_start().gap_2().px_3().py_2().text_sm().text_color(p.danger).bg(p.danger.opacity(0.1)).border_b_1().border_color(p.danger).child(icon(ic::ERROR_OUTLINE, 17.0, p.danger)).child(div().flex_1().min_w_0().child(n.clone())).child(kit::copy_btn("ai-err-copy", n, &p))
                 .child(icon_btn("ai-notice-x", ic::CLOSE, "Dismiss", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_notice = None; cx.notify(); })))))
             .children(working)
             .child(div().id("chat").flex_1().min_h_0().overflow_y_scroll().py_2()
@@ -1584,7 +1590,7 @@ impl View {
         let vchip = |id: &'static str, label: &'static str, on: bool, color: gpui::Hsla| div().id(id).flex().items_center().gap_2().px_3().h(px(32.0)).rounded_md().border_1().border_color(if on { color } else { p.border }).bg(if on { color.opacity(0.14) } else { gpui::transparent_black() }).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).hover(move |x| x.bg(p.hover)).child(label);
         let summary_box = self.winp(Fid::Summary, div().id("sum-box").flex().px_3().py(px(8.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).min_h(px(90.0)).child(input_text(&self.summary, focused, "Summary (optional): what should the author know?", &p, false, 4)), cx);
         let msg = self.submit_msg.clone().map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })
-            .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m)));
+            .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("submit-err-copy", m, &p))));
         let body = div().flex().flex_col().gap_4().px_5().py_4()
             .child(div().flex().flex_col().gap_1()
                 .child(div().text_sm().child(format!("{nd} draft{} will be posted{}.", if nd == 1 { "" } else { "s" }, if nai > 0 { format!(" ({nai} written by AI)") } else { String::new() })))

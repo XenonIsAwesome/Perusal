@@ -277,7 +277,7 @@ impl SettingsView {
             let cli = if kind == "gitlab" { "glab" } else { "gh" };
             div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.bg)
                 .child(div().flex().items_center().gap_3().child(icon(if kind == "gitlab" { ic::CALL_MERGE } else { ic::PUBLIC }, 20.0, p.accent))
-                    .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("{host}  ·  {}", if kind == "gitlab" { "GitLab" } else { "GitHub" }))).child(div().text_xs().text_color(color).child(status)))
+                    .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(format!("{host}  ·  {}", if kind == "gitlab" { "GitLab" } else { "GitHub" }))).child(div().flex().items_center().gap_1().text_xs().text_color(color).child(div().flex_1().min_w_0().child(status.clone())).children(matches!(acc, Acc::Bad(_)).then(|| kit::copy_btn(("acc-err-copy", host.len()), status.clone(), &p)))))
                     .when(signed, |d| d.child(icon_text_btn(("signout", i), ic::LOGOUT, "Sign out", Btn::Secondary, &p).on_click(cx.listener(move |this, _, _, cx| { model::token_store().delete(&h1); this.refresh_accounts(cx); cx.emit(SettingsEvent::Changed); cx.notify(); })))))
                 .when(!signed || editing, |d| d.child(div().flex().flex_wrap().gap_2()
                     .child(icon_text_btn(("tok", i), ic::KEY, "Paste a token", Btn::Secondary, &p).on_click(cx.listener(move |this, _, _, cx| { this.token_host = Some(h2.clone()); this.focus = Some(F::Token); cx.notify(); })))
@@ -361,7 +361,7 @@ impl gpui::Render for SettingsView {
         let section = move |t: &'static str| div().pt_4().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).border_b_1().border_color(p.border).child(t.to_uppercase());
         let s = self.settings.clone();
         let msg = self.msg.clone().map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().mt_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })
-            .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m)));
+            .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("set-err-copy", m, &p))));
 
         let (title, body, footer): (&str, gpui::AnyElement, gpui::AnyElement) = if let Some(step) = self.onboarding {
             let last = step >= 3;
@@ -459,7 +459,7 @@ impl gpui::Render for SettingsView {
                                     else { icon_text_btn("rgen-go", ic::AUTO_AWESOME, "Generate", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.gen_rule(cx); })).into_any_element() })))
                         .child(self.field_box("f-label", F::Label, "Name, for example Docs with images", cx, false))
                         .child(self.field_box("f-pat", F::Pat, r"Pattern with a stem group, e.g. ^docs/(?P<stem>[^/.]+)\.(?:md|png)$", cx, false))
-                        .children(self.rule_err.clone().map(|e| div().text_xs().text_color(p.danger).child(e)))
+                        .children(self.rule_err.clone().map(|e| div().flex().items_start().gap_1().text_xs().text_color(p.danger).child(div().flex_1().min_w_0().child(e.clone())).child(kit::copy_btn("rule-err-copy", e, &p))))
                         .child(div().flex().gap_2().child(icon_text_btn("add-rule", if editing { ic::SAVE } else { ic::ADD }, if editing { "Save rule" } else { "Add rule" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.add_rule(cx); cx.notify(); })))
                             .when(editing, |d| d.child(icon_text_btn("cancel-rule", ic::CLOSE, "Cancel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.editing_rule = None; this.label.f.clear(); this.pat.f.clear(); cx.notify(); }))))))));
             let theme_dd = self.dropdown(0, &s.theme, themes.clone(), cx, |st, v| st.theme = v);
@@ -468,7 +468,7 @@ impl gpui::Render for SettingsView {
             let accounts = self.accounts_section(cx);
             let ai = self.ai_section(cx, &row);
             let msgbox = self.msg.clone().filter(|_| self.onboarding.is_none()).map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().mt_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })
-                .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m)));
+                .child(icon(if ok { ic::CHECK_CIRCLE } else { ic::ERROR_OUTLINE }, 17.0, if ok { p.success } else { p.danger })).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("set-err-copy", m, &p))));
             // ---- notifications
             let master = s.desktop_notifications;
             let events: Vec<_> = perusal_app::events::DESKTOP_EVENTS.iter().enumerate().map(|(i, (key, label, hint))| {
@@ -565,7 +565,7 @@ impl gpui::Render for SettingsView {
                         .child(seg_icon("md-rnd", ic::VISIBILITY, "Rendered", s.markdown == MdMode::Rendered, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.markdown = MdMode::Rendered; this.changed(cx); }))).into_any_element())),
                 4 => div().flex().flex_col().gap_3().child(section("Filter and sort presets"))
                     .child(div().text_xs().text_color(p.muted).child("Presets set a filter and a sort in one click. A project's default wins over the global default when a review opens. Save new ones from the bookmark button in a review, or add them here."))
-                    .children(preset_groups).child(preset_form).children(self.msg.clone().map(|(ok, m)| div().text_sm().text_color(if ok { p.success } else { p.danger }).child(m))),
+                    .children(preset_groups).child(preset_form).children(self.msg.clone().map(|(ok, m)| div().flex().items_start().gap_1().text_sm().text_color(if ok { p.success } else { p.danger }).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("preset-err-copy", m, &p))))),
                 _ => div().flex().flex_col().child(section("AI agent")).child(ai),
             };
             let scroll = div().flex().flex_col().flex_1().min_h_0().child(tab_bar)

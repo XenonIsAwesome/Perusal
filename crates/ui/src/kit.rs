@@ -130,6 +130,11 @@ pub fn icon(i: Icon, size: f32, color: Hsla) -> Div {
     div().font_family("Material Icons").text_size(px(size)).line_height(px(size)).size(px(size)).flex().items_center().justify_center().flex_none().text_color(color).child(i.0.to_string())
 }
 
+/// Small copy button for error messages: puts the whole message on the clipboard.
+pub fn copy_btn(id: impl Into<gpui::ElementId>, text: String, p: &Pal) -> Stateful<Div> {
+    icon_btn(id, crate::icons::CONTENT_COPY, "Copy this message", Btn::Ghost, p).on_click(move |_, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); cx.stop_propagation(); })
+}
+
 /// Round user picture. Draws the downloaded image when the host gave one and it is on disk; otherwise (or if it fails to decode) the
 /// placeholder: two letters of the name on a colour hashed from it. `name` is the login (or git author name for local committers).
 pub fn avatar(name: &str, size: f32) -> gpui::AnyElement {

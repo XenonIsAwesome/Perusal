@@ -498,7 +498,7 @@ impl Root {
                 .child(div().w(px(10.0))).child(div().text_xs().text_color(p.muted).child("State"))
                 .children([(StateFilter::Open, "Open"), (StateFilter::Merged, "Merged"), (StateFilter::Closed, "Closed"), (StateFilter::All, "All")].map(|(s, l)| this.chip(("mrs", s as usize), l.into(), this.mine_state == s).on_click(cx.listener(move |t, _, _, cx| { t.mine_state = s; t.load_mine(cx); })))))
             .children(reviewer_on.then(|| div().text_xs().text_color(p.muted).child("GitHub has no dependable reviewer list, so GitHub still lists every pull request you can review.")));
-        let errs: Vec<_> = self.mine_errs.iter().map(|(h, e)| div().flex().items_start().gap_2().px_4().py_2().text_sm().text_color(p.danger).child(icon(ic::ERROR_OUTLINE, 16.0, p.danger)).child(div().flex_1().min_w_0().child(format!("{h}: {e}")))).collect();
+        let errs: Vec<_> = self.mine_errs.iter().map(|(h, e)| div().flex().items_start().gap_2().px_4().py_2().text_sm().text_color(p.danger).child(icon(ic::ERROR_OUTLINE, 16.0, p.danger)).child(div().flex_1().min_w_0().child(format!("{h}: {e}"))).child(kit::copy_btn("mine-err-copy", format!("{h}: {e}"), &p))).collect();
         div().flex().flex_col().flex_1().min_h_0().child(sbox).child(chips(self)).children(errs)
             .child(div().id("mine-list").flex_1().min_h_0().overflow_y_scroll().bg(p.bg)
                 .when(!signed, |d| d.child(div().flex().flex_col().items_center().justify_center().gap_3().py(px(60.0)).px_6().text_color(p.muted)
@@ -542,8 +542,8 @@ impl Root {
             .child(self.finput("f-token", Hf::Token, "Personal access token", "paste token, stored locally with 0600 permissions", cx))
             .child(div().flex().gap_2().child(icon_text_btn("go-token", ic::CHECK, "Save and retry", Btn::Primary, &p).on_click(cx.listener(|t, _, _, cx| t.save_token(cx))))
                 .child(icon_text_btn("go-signin", ic::KEY, "More sign-in options", Btn::Secondary, &p).on_click(cx.listener(|t, _, _, cx| t.open_settings(false, cx))))));
-        let msg = self.msg.clone().map(|(k, m)| { let (c, i) = match k { NKind::Error => (p.danger, ic::ERROR_OUTLINE), NKind::Success => (p.success, ic::CHECK_CIRCLE), _ => (p.accent, ic::INFO) }; (c, i, m) });
-        let msg_el = msg.map(|(c, i, m)| div().flex().items_start().gap_2().px_3().py_2().rounded_md().border_1().border_color(c).bg(c.opacity(0.1)).text_sm().text_color(c).child(icon(i, 17.0, c)).child(div().flex_1().min_w_0().child(m)));
+        let msg = self.msg.clone().map(|(k, m)| { let (c, i) = match k { NKind::Error => (p.danger, ic::ERROR_OUTLINE), NKind::Success => (p.success, ic::CHECK_CIRCLE), _ => (p.accent, ic::INFO) }; (c, i, m, k == NKind::Error) });
+        let msg_el = msg.map(|(c, i, m, is_err)| div().flex().items_start().gap_2().px_3().py_2().rounded_md().border_1().border_color(c).bg(c.opacity(0.1)).text_sm().text_color(c).child(icon(i, 17.0, c)).child(div().flex_1().min_w_0().child(m.clone())).children(is_err.then(|| kit::copy_btn("home-msg-copy", m, &p))));
         div().flex().flex_col().w(px(480.0)).flex_none().rounded_lg().border_1().border_color(p.border).bg(p.surface).overflow_hidden()
             .child(div().px_4().py_3().border_b_1().border_color(p.border).font_weight(FontWeight::SEMIBOLD).child("Open a review")).child(div().px_2().child(tabs))
             .child(div().flex().flex_col().gap_4().p_4().child(form).children(token).children(msg_el))
@@ -576,6 +576,7 @@ impl Root {
             let id = t.id;
             div().id(("toast", id as usize)).text_color(p.fg).flex().items_start().gap_3().w(px(380.0)).px_4().py_3().rounded_lg().bg(p.surface).border_1().border_color(p.border).border_l_4().border_color(c).shadow_lg()
                 .child(icon(i, 19.0, c)).child(div().flex_1().min_w_0().text_sm().child(t.text.clone()))
+                .children((t.kind == NKind::Error).then(|| kit::copy_btn(("toast-copy", id as usize), t.text.clone(), &p)))
                 .child(icon_btn(("toast-x", id as usize), ic::CLOSE, "Dismiss", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.toasts.dismiss(id); cx.notify(); })))
         }).collect();
         Some(deferred(div().absolute().bottom(px(44.0)).right(px(16.0)).flex().flex_col().gap_2().occlude().children(items)).with_priority(50))
