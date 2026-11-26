@@ -37,7 +37,7 @@ impl Provider for GitLab {
             if notes.is_empty() { return None; }
             let first = notes.first().cloned().unwrap_or(Value::Null);
             Some(Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
-                line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: notes.iter().any(|n| n["resolved"].as_bool() == Some(true)),
+                line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: { let rs: Vec<&Value> = notes.iter().filter(|n| n["resolvable"].as_bool() != Some(false)).collect(); !rs.is_empty() && rs.iter().all(|n| n["resolved"].as_bool() == Some(true)) },
                 comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect() })
         }).collect())
     }
