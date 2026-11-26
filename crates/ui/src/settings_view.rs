@@ -520,6 +520,10 @@ impl gpui::Render for SettingsView {
                     .child(row("Keymap file", "Edit [keys] overrides, for example comment = \"m\"", icon_text_btn("open-keymap", ic::KEYBOARD, "Open folder", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let d = model::config_dir(); let _ = std::fs::create_dir_all(&d); if let Err(e) = model::open_dir(&d) { this.say(false, e); } cx.notify(); })).into_any_element()))
                     .child(section("Window"))
                     .child(row("Built-in title bar", "Draw the minimize, maximize and close buttons inside the app. Turn off to use the system title bar and borders", sw("sw-tb", s.custom_titlebar, cx, |st| st.custom_titlebar = !st.custom_titlebar)))
+                    .child(section("Links"))
+                    .child(row("Open perusal:// links", "Register this program as the handler for perusal:// links (used by the browser extension). Needed for AppImages", icon_text_btn("reg-link", ic::LINK, "Register", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
+                        match model::register_link_handler() { Ok(p) => this.say(true, format!("Registered. Wrote {}", p.display())), Err(e) => this.say(false, e) } cx.notify(); })).into_any_element()))
+                    .children(self.msg.clone().filter(|_| self.stab == 0 && self.onboarding.is_none()).map(|(ok, m)| div().text_sm().text_color(if ok { p.success } else { p.danger }).child(m)))
                     .child(section("Setup")).child(row("Run the first-time setup again", "Walks through accounts and the AI agent", icon_text_btn("rerun-ob", ic::ROCKET_LAUNCH, "Start setup", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.onboarding = Some(0); cx.notify(); })).into_any_element())),
                 1 => div().flex().flex_col().child(section("Accounts")).child(div().pt_2().flex().flex_col().gap_2()
                         .child(div().flex().items_center().gap_3().p_3().rounded_md().border_1().border_color(p.border).bg(p.bg).child(icon(ic::TERMINAL, 20.0, p.accent))

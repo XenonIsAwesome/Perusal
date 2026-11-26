@@ -2,6 +2,7 @@
 pub mod banner;
 pub mod ci;
 pub mod deeplink;
+pub mod desktop;
 pub mod filterbar;
 pub mod graph;
 pub mod hosts;

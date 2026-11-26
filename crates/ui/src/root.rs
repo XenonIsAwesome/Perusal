@@ -54,6 +54,9 @@ impl Root {
         }
         if !r.settings.onboarded { r.open_settings(true, cx); }
         r.listen_for_links(cx);
+        if perusal_app::desktop::appimage().is_some() && !perusal_app::desktop::entry_path(&std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default(), std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).as_deref()).exists() {
+            r.toast(NKind::Info, "Perusal is running from an AppImage. Register it for perusal:// links in Settings > Appearance > Links.", cx);
+        }
         r
     }
     /// Single instance: a second `perusal <link>` launch hands its link to this window over a Unix socket and exits.

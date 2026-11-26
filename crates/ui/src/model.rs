@@ -184,6 +184,18 @@ pub fn project_of(m: &Model) -> String {
 }
 
 // ---- system integration
+/// Registers this binary (the AppImage when running from one) as the `perusal://` handler for the current user.
+pub fn register_link_handler() -> Result<PathBuf, String> {
+    let exe = perusal_app::desktop::appimage().or_else(|| std::env::current_exe().ok()).ok_or("cannot tell which program is running")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
+    let path = perusal_app::desktop::entry_path(&home, std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).as_deref());
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, perusal_app::desktop::entry(&exe, None)).map_err(|e| e.to_string())?;
+    // best effort: refresh the desktop database and make it the default scheme handler
+    let _ = std::process::Command::new("update-desktop-database").arg(path.parent().unwrap()).output();
+    let _ = std::process::Command::new("xdg-mime").args(["default", "perusal.desktop", "x-scheme-handler/perusal"]).output();
+    Ok(path)
+}
 pub fn open_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") { return Err("only web links can be opened".into()); }
     let prog = if cfg!(target_os = "macos") { "open" } else if cfg!(target_os = "windows") { "explorer" } else { "xdg-open" };
