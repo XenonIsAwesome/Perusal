@@ -100,7 +100,7 @@ impl View {
         let presets = model::load_presets(); let project = model::project_of(&m);
         let (mut f0, mut s0) = (String::new(), String::new());
         if let Some(d) = presets.effective_default(&project) { f0 = d.filter.clone(); s0 = d.sort.clone(); let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
-        m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
+        m.vm.sync_review_state(&m.store); if let Ok(g) = m.store.load_groups(m.vm.review) { m.vm.set_manual_paths(g); } let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
@@ -117,6 +117,7 @@ impl View {
     }
     pub fn key_id(&self) -> String { self.m.remote.clone().map(|u| format!("remote:{u}")).unwrap_or_else(|| format!("local:{}#{}", self.m.repo.display(), self.m.branch)) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
+    fn save_groups(&self) { let _ = self.m.store.save_groups(self.m.vm.review, &self.m.vm.manual_paths()); }
     fn save_settings(&self) { model::save_settings(&self.settings); }
     fn note(&mut self, kind: NKind, t: impl Into<String>, key: Option<&'static str>) { self.notices.push((kind, t.into(), key)); }
     fn flush(&mut self, cx: &mut Context<Self>) { for (k, t, d) in std::mem::take(&mut self.notices) { cx.emit(ViewEvent::Notice(k, t, d)); } }
@@ -401,9 +402,9 @@ impl View {
     fn back(&mut self) { self.m.vm.back(); self.reload(); }
     fn step(&mut self, d: i32) { let n = self.m.vm.batch_count() as i32; if n > 0 { self.m.vm.cursor = (self.m.vm.cursor as i32 + d).rem_euclid(n) as usize; self.reload(); } }
     fn clear_scope(&mut self) { self.m.graph.clear(); self.m.vm.commit_scope = None; let _ = self.m.vm.refresh(); self.reload(); }
-    fn pick_commit(&mut self, i: usize) {
-        if self.m.graph.selection == Some((i, i)) { self.clear_scope(); return; }
-        self.m.graph.click(i); self.m.vm.commit_scope = self.m.graph.scope(&self.m.repo).ok().flatten(); let _ = self.m.vm.refresh(); self.reload();
+    fn pick_commit(&mut self, i: usize, shift: bool) {
+        if self.m.graph.selection == Some((i, i)) && !shift { self.clear_scope(); return; }
+        match (shift, self.m.graph.selection) { (true, Some((a, _))) => self.m.graph.select_range(a, i), _ => self.m.graph.click(i) } self.m.vm.commit_scope = self.m.graph.scope(&self.m.repo).ok().flatten(); let _ = self.m.vm.refresh(); self.reload();
     }
     fn set_diff_mode(&mut self, m: DiffMode) { if self.diff_mode != m { self.diff_mode = m; self.shown = None; self.clear_selection(); } }
     fn click_file(&mut self, fi: usize, mods: gpui::Modifiers) {
@@ -418,7 +419,7 @@ impl View {
     fn group_multi(&mut self) {
         let order = self.display_order(); let mut members: Vec<usize> = order.into_iter().filter(|i| self.multi.contains(i)).collect();
         if members.len() < 2 { return; }
-        members.dedup(); self.m.vm.group_files_manually(members); self.multi.clear(); self.reload();
+        members.dedup(); self.m.vm.group_files_manually(members); self.save_groups(); self.multi.clear(); self.reload();
         self.note(NKind::Info, "Grouped into one batch. Viewing it shows every file together.", None);
     }
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
@@ -937,8 +938,8 @@ impl View {
                 else { tip(icon_text_btn("grp-multi", ic::LINK, "Review together", Btn::Primary, &p).opacity(0.4).cursor_default(), "Select at least two files to review them together", &p) })
             .child(icon_btn("clr-multi", ic::CLOSE, "Clear selection", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.multi.clear(); cx.notify(); }))));
         let hint = (n == 0 && n_files > 1 && self.m.vm.commit_scope.is_none()).then(|| div().px_3().py(px(4.0)).text_xs().text_color(p.muted).border_b_1().border_color(p.border).child("Ctrl+click or Shift+click files to review them together"));
-        let scope = self.m.graph.selection.filter(|_| self.m.vm.commit_scope.is_some()).and_then(|(a, _)| self.m.graph.rows.get(a).cloned()).map(|r| div().flex().items_center().gap_2().px_3().py(px(6.0)).bg(p.accent.opacity(0.12)).border_b_1().border_color(p.border)
-            .child(icon(ic::COMMIT, 17.0, p.accent)).child(div().flex_1().min_w_0().truncate().text_sm().child(format!("Only commit {} · {} file{}", &r.sha[..7.min(r.sha.len())], n_files, if n_files == 1 { "" } else { "s" })))
+        let scope = self.m.graph.selection.filter(|_| self.m.vm.commit_scope.is_some()).and_then(|(a, b)| self.m.graph.rows.get(a).cloned().map(|r| (r, b - a + 1))).map(|(r, span)| div().flex().items_center().gap_2().px_3().py(px(6.0)).bg(p.accent.opacity(0.12)).border_b_1().border_color(p.border)
+            .child(icon(ic::COMMIT, 17.0, p.accent)).child(div().flex_1().min_w_0().truncate().text_sm().child(format!("{} {} · {} file{}", if span > 1 { format!("Only {span} commits up to") } else { "Only commit".to_string() }, &r.sha[..7.min(r.sha.len())], n_files, if n_files == 1 { "" } else { "s" })))
             .child(icon_btn("scope-x", ic::CLOSE, "Show all commits (x)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.clear_scope(); cx.notify(); }))));
         div().flex().flex_col().size_full().child(header).children(scope).children(bar).children(hint).child(list)
     }
@@ -1072,7 +1073,7 @@ impl View {
                 .child(div().flex().items_center().gap_2().text_xs().font_family(mono.clone()).child(div().text_color(p.success).child(format!("+{adds}"))).child(div().text_color(p.danger).child(format!("−{dels}"))).child(diff_squares(adds, dels, &p, 10.0)));
             if let Some(s) = sym { h = h.child(s); }
             if ncomments > 0 { h = h.child(icon_btn("collapse-c", ic::UNFOLD_LESS, "Collapse or expand all comments in this file", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.collapse_all_comments(); cx.notify(); }))); }
-            if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.reload(); } cx.notify(); }))); }
+            if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.save_groups(); this.reload(); } cx.notify(); }))); }
             h
         });
 
@@ -1197,7 +1198,7 @@ impl View {
         let commit_rows: Vec<_> = self.m.graph.rows.iter().enumerate().map(|(i, r)| {
             let sel = self.m.graph.selection.map(|(a, b)| i >= a && i <= b).unwrap_or(false) && self.m.vm.commit_scope.is_some(); let last = i + 1 == self.m.graph.rows.len();
             div().id(("c", i)).flex().gap_2().px_3().cursor_pointer().when(sel, |d| d.bg(p.accent.opacity(0.14))).hover(move |s| s.bg(p.hover))
-                .on_click(cx.listener(move |this, _, _, cx| { if this.m.graph.rows.get(i).map(|r| r.in_mr).unwrap_or(false) { this.pick_commit(i); } cx.notify(); }))
+                .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { if this.m.graph.rows.get(i).map(|r| r.in_mr).unwrap_or(false) { this.pick_commit(i, ev.modifiers().shift); } cx.notify(); }))
                 .child(div().flex().flex_col().items_center().w(px(12.0)).flex_none()
                     .child(div().h(px(8.0)).w(px(2.0)).bg(if i == 0 { gpui::transparent_black() } else { p.border }))
                     .child(div().size(px(10.0)).rounded_full().when(r.in_mr, |d| d.bg(p.accent)).when(!r.in_mr, |d| d.border_2().border_color(p.muted)))

@@ -21,7 +21,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS viewed(review INTEGER, path TEXT, PRIMARY KEY(review, path));
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, review INTEGER, file TEXT, start_line INTEGER, end_line INTEGER, body TEXT, ai INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, review INTEGER, role TEXT, text TEXT);
-            CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);")?;
+            CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);
+            CREATE TABLE IF NOT EXISTS groups(review INTEGER, gid INTEGER, path TEXT, PRIMARY KEY(review, path));")?;
         // additive migrations for databases created by earlier versions
         for alter in ["ALTER TABLE reviews ADD COLUMN mr_state TEXT DEFAULT ''", "ALTER TABLE reviews ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE chat ADD COLUMN conv INTEGER DEFAULT 0"] { let _ = conn.execute(alter, []); }
         Ok(Store { conn })
@@ -42,6 +43,19 @@ impl Store {
         if viewed { self.conn.execute("INSERT OR IGNORE INTO viewed VALUES(?1,?2)", params![review, path])?; }
         else { self.conn.execute("DELETE FROM viewed WHERE review=?1 AND path=?2", params![review, path])?; }
         self.log(review, &format!("viewed {path} {viewed}"))
+    }
+    /// Manual file groups (made with Ctrl/Shift+click), by path, so they survive closing the review.
+    pub fn save_groups(&self, review: i64, groups: &[Vec<String>]) -> Result<()> {
+        self.conn.execute("DELETE FROM groups WHERE review=?1", params![review])?;
+        for (i, g) in groups.iter().enumerate() { for p in g { self.conn.execute("INSERT OR REPLACE INTO groups VALUES(?1,?2,?3)", params![review, i as i64, p])?; } }
+        Ok(())
+    }
+    pub fn load_groups(&self, review: i64) -> Result<Vec<Vec<String>>> {
+        let mut s = self.conn.prepare("SELECT gid,path FROM groups WHERE review=?1 ORDER BY gid, rowid")?;
+        let rows: Vec<(i64, String)> = s.query_map(params![review], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        let mut out: Vec<Vec<String>> = vec![]; let mut last = None;
+        for (g, p) in rows { if last != Some(g) { out.push(vec![]); last = Some(g); } out.last_mut().unwrap().push(p); }
+        Ok(out)
     }
     pub fn viewed(&self, review: i64) -> Result<Vec<String>> {
         let mut s = self.conn.prepare("SELECT path FROM viewed WHERE review=?1 ORDER BY path")?;
@@ -116,7 +130,7 @@ impl Store {
         Ok(ids.len())
     }
     pub fn discard(&self, review: i64) -> Result<()> {
-        for t in ["viewed", "drafts", "journal", "chat"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
+        for t in ["viewed", "drafts", "journal", "chat", "groups"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
     }
     /// Rows for the recent-reviews page, pinned first then most recently opened.
@@ -151,6 +165,12 @@ mod tests {
         assert_eq!(s.recent().unwrap()[0].4, 2);
         let row = &s.recent_rows().unwrap()[0]; assert_eq!((row.key.as_str(), row.viewed, row.total, row.drafts), ("gh/o/r#1", 1, 4, 2));
         s.discard(r).unwrap(); assert!(s.recent().unwrap().is_empty());
+    }
+    #[test] fn manual_groups_roundtrip() {
+        let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h", 3).unwrap();
+        s.save_groups(r, &[vec!["a.h".into(), "a.c".into()], vec!["x".into(), "y".into()]]).unwrap();
+        assert_eq!(s.load_groups(r).unwrap(), vec![vec!["a.h".to_string(), "a.c".to_string()], vec!["x".to_string(), "y".to_string()]]);
+        s.save_groups(r, &[]).unwrap(); assert!(s.load_groups(r).unwrap().is_empty());
     }
     #[test] fn move_head_reanchors() {
         let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h1", 1).unwrap();
