@@ -286,7 +286,8 @@ pub fn fence_language(label: &str) -> &'static str {
 fn code_lines(text: &str, lang: &str, p: &Pal) -> Vec<Div> {
     let spans = line_spans(lang, text, p);
     text.split('\n').enumerate().map(|(i, l)| {
-        let runs = spans.get(i).cloned().unwrap_or_default();
+        let mut runs = spans.get(i).cloned().unwrap_or_default();
+        if find_active() { let extra = find_runs(l); if !extra.is_empty() { runs = gpui::combine_highlights(runs, extra).collect(); } }
         div().whitespace_nowrap().child(gpui::StyledText::new(if l.is_empty() { " ".to_string() } else { l.to_string() }).with_highlights(runs))
     }).collect()
 }
@@ -337,23 +338,57 @@ pub fn markdown_view_ctx(blocks: &[perusal_app::markdown::Block], p: &Pal, mono:
 }
 pub fn markdown_view(blocks: &[perusal_app::markdown::Block], p: &Pal, mono: &SharedString) -> Div { markdown_view_ctx(blocks, p, mono, None) }
 
+// ---- Ctrl+F highlighting inside rendered Markdown
+struct FindCtx { query: String, current: Option<usize>, seen: usize, hit: Hsla, cur: Hsla, fg: Hsla }
+thread_local! { static FIND: std::cell::RefCell<Option<FindCtx>> = const { std::cell::RefCell::new(None) }; }
+
+/// Like `markdown_view` but highlights every occurrence of `query` in the drawn text (`current` is the ordinal of the strongly highlighted one).
+/// Occurrences are counted per text run in drawing order, matching `perusal_app::markdown::block_texts`.
+pub fn markdown_view_find(blocks: &[perusal_app::markdown::Block], p: &Pal, mono: &SharedString, query: &str, current: Option<usize>) -> Div {
+    if query.is_empty() { return markdown_view(blocks, p, mono); }
+    FIND.with(|f| *f.borrow_mut() = Some(FindCtx { query: query.to_string(), current, seen: 0, hit: p.warn.opacity(0.5), cur: p.accent.opacity(0.8), fg: p.fg }));
+    let el = markdown_view(blocks, p, mono);
+    FIND.with(|f| *f.borrow_mut() = None);
+    el
+}
+/// Highlight ranges for one text run (counts its occurrences toward the ordinal); empty when no search is active.
+fn find_runs(text: &str) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    FIND.with(|f| {
+        let mut f = f.borrow_mut(); let Some(c) = f.as_mut() else { return vec![] };
+        let hits = perusal_app::find::find_all(text, &c.query);
+        let out = hits.iter().enumerate().map(|(k, r)| (r.clone(), gpui::HighlightStyle { background_color: Some(if c.current == Some(c.seen + k) { c.cur } else { c.hit }), color: Some(c.fg), ..Default::default() })).collect();
+        c.seen += hits.len(); out
+    })
+}
+fn find_active() -> bool { FIND.with(|f| f.borrow().is_some()) }
+/// Clips run-level highlights to the piece `[start, start+len)` of the run and shifts them to piece coordinates.
+fn clip_runs(runs: &[(std::ops::Range<usize>, gpui::HighlightStyle)], start: usize, len: usize) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    runs.iter().filter_map(|(r, s)| { let (a, b) = (r.start.max(start), r.end.min(start + len)); (a < b).then(|| (a - start..b - start, *s)) }).collect()
+}
+
 /// Inline Markdown as a wrapping row of words, so each span can have its own weight, style, font and click action
 /// (bold, italic, monospace code, clickable links).
 fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -> Div {
     let mut row = div().flex().flex_wrap().items_baseline();
     let mut n = 0usize;
+    let hl = if find_active() { find_runs(&spans.iter().map(|s| s.text.as_str()).collect::<String>()) } else { vec![] };
+    let mut pos = 0usize; // byte offset of the current span in the joined text
     for s in spans {
+        let span_start = pos; pos += s.text.len();
         if s.code {
             n += 1;
             let url = s.link.clone();
-            let el = div().id(("md-code", n)).px(px(5.0)).mx(px(1.0)).rounded(px(4.0)).bg(p.hover).font_family(mono.clone()).text_size(px(13.0)).text_color(if url.is_some() { p.accent } else { p.fg }).whitespace_nowrap().child(s.text.clone());
+            let el = div().id(("md-code", n)).px(px(5.0)).mx(px(1.0)).rounded(px(4.0)).bg(p.hover).font_family(mono.clone()).text_size(px(13.0)).text_color(if url.is_some() { p.accent } else { p.fg }).whitespace_nowrap().child(match clip_runs(&hl, span_start, s.text.len()) { r if r.is_empty() => div().child(s.text.clone()), r => div().child(gpui::StyledText::new(s.text.clone()).with_highlights(r)) });
             row = row.child(match url { Some(u) => el.cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)).into_any_element(), None => el.into_any_element() });
             continue;
         }
+        let mut tok_pos = span_start;
         for tok in s.text.split_inclusive([' ', '\n']) {
+            let tok_start = tok_pos; tok_pos += tok.len();
             if tok == "\n" { row = row.child(div().w_full().h(px(0.0))); continue; }
             n += 1;
             let t = tok.trim_end_matches('\n').to_string();
+            let t_runs = clip_runs(&hl, tok_start, t.len());
             let mut el = div().id(("md-t", n)).whitespace_nowrap();
             let (bold_alt, italic_alt) = VARIANTS.get().cloned().unwrap_or((None, None));
             if s.bold { el = el.font_weight(FontWeight::BOLD); }
@@ -366,7 +401,7 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -
                 Some(u) => { let u = u.clone(); el.text_color(p.accent).underline().cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)) }
                 None => el,
             };
-            row = row.child(el.child(t));
+            row = row.child(if t_runs.is_empty() { el.child(t) } else { el.child(gpui::StyledText::new(t).with_highlights(t_runs)) });
             if tok.ends_with('\n') { row = row.child(div().w_full().h(px(0.0))); }
         }
     }

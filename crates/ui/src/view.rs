@@ -1264,48 +1264,48 @@ impl View {
         let Some(info) = self.info.clone() else { return div().into_any_element() };
         let global_threads: Vec<Thread> = self.threads.iter().filter(|t| t.path.is_none()).cloned().collect();
         let global_drafts: Vec<&perusal_core::store::Draft> = drafts.iter().filter(|d| d.file.is_none()).collect();
+        // Ctrl+F on this page: hits are counted per drawn text run, per section (0 title, 2 description, then each comment), like the highlighting does
+        let bodies: Vec<String> = global_threads.iter().flat_map(|t| t.comments.iter().map(|c| c.1.clone())).chain(global_drafts.iter().map(|d| d.body.clone())).collect();
+        let first_list = 4 + usize::from(bodies.is_empty());
+        let fq = if self.find_open { self.find_in.f.text.clone() } else { String::new() };
+        if self.find_open {
+            let mut hits = vec![];
+            if !fq.is_empty() {
+                let mut sections: Vec<(usize, Vec<String>)> = vec![(0, vec![info.title.clone()]), (2, markdown::block_texts(&markdown::parse(&info.description)))];
+                for (i, b) in bodies.iter().enumerate() { sections.push((first_list + i, markdown::block_texts(&markdown::parse(b)))); }
+                for (ix, texts) in sections { for (part, t) in texts.iter().enumerate() { for range in perusal_app::find::find_all(t, &fq) { hits.push(Hit { row: ix, part, range }); } } }
+            }
+            self.find_page = Page::Overview; self.find_hits = hits; if self.find_cur >= self.find_hits.len() { self.find_cur = 0; }
+        }
+        let cur_ord = |sec: usize| -> Option<usize> { let h = self.find_hits.get(self.find_cur)?; (h.row == sec).then(|| self.find_hits[..self.find_cur].iter().filter(|x| x.row == sec).count()) };
+        let title_runs: Vec<(Range<usize>, HighlightStyle)> = perusal_app::find::find_all(&info.title, &fq).into_iter().enumerate()
+            .map(|(k, r)| (r, HighlightStyle { background_color: Some(if cur_ord(0) == Some(k) { p.accent.opacity(0.8) } else { p.warn.opacity(0.5) }), color: Some(p.fg), ..Default::default() })).collect();
         let me = self.who("You");
-        let card = |who: String, body: &str, tag: Option<AnyElement>| div().w_full().max_w(px(900.0)).flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
-            .child(div().flex().items_center().gap_2().child(kit::avatar(if who == "You" { &me } else { &who }, 24.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(markdown_view(&markdown::parse(body), &p, &mono).text_sm());
-        let mut list: Vec<AnyElement> = vec![]; let mut list_texts: Vec<String> = vec![];
+        let card = |who: String, body: &str, sec_ix: usize, tag: Option<AnyElement>| div().w_full().max_w(px(900.0)).flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
+            .child(div().flex().items_center().gap_2().child(kit::avatar(if who == "You" { &me } else { &who }, 24.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(who)).children(tag)).child(kit::markdown_view_find(&markdown::parse(body), &p, &mono, &fq, cur_ord(sec_ix)).text_sm());
+        let mut list: Vec<AnyElement> = vec![];
         for t in &global_threads {
-            for (i, (a, b)) in t.comments.iter().enumerate() { list_texts.push(format!("{a} {b}")); list.push(card(a.clone(), b, (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
+            for (i, (a, b)) in t.comments.iter().enumerate() { list.push(card(a.clone(), b, first_list + list.len(), (i == 0 && t.resolved).then(|| badge("Resolved", p.success, p.success.opacity(0.15)).into_any_element())).into_any_element()); }
         }
         for d in &global_drafts {
-            let id = d.id; list_texts.push(d.body.clone());
-            list.push(card("You".into(), &d.body, Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
+            let id = d.id;
+            list.push(card("You".into(), &d.body, first_list + list.len(), Some(badge("Draft", p.warn, p.warn.opacity(0.15)).into_any_element()))
                 .child(div().flex().justify_end().child(icon_btn(("ovde", id as usize), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(id)); cx.notify(); })))
                     .children(instant.then(|| icon_btn(("ovdp", id as usize), ic::SEND, "Publish this draft now", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.publish_draft(id, cx); cx.notify(); }))))
                     .child(icon_btn(("ovdd", id as usize), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(id); this.resync(); cx.notify(); })))).into_any_element());
         }
         let state = model::norm_state(&info.state); let dot = match state.as_str() { "merged" => p.ai, "closed" => p.danger, _ => p.success };
-        // Ctrl+F on this page: one search text per section, in drawing order (title, meta, description, header, [empty hint], comments..., footer)
-        let first_list = 4 + usize::from(list.is_empty());
-        if self.find_open {
-            let q = self.find_in.f.text.clone();
-            let mut texts: Vec<String> = vec![info.title.clone(), String::new(), info.description.clone(), String::new()];
-            if list.is_empty() { texts.push(String::new()); } texts.extend(list_texts.iter().cloned());
-            let mut hits = vec![];
-            if !q.is_empty() { for (ix, t) in texts.iter().enumerate() { for range in perusal_app::find::find_all(t, &q) { hits.push(Hit { row: ix, part: 0, range }); } } }
-            self.find_page = Page::Overview; self.find_hits = hits; if self.find_cur >= self.find_hits.len() { self.find_cur = 0; }
-        }
-        let tint = |ix: usize| -> Option<gpui::Hsla> {
-            if !self.find_open || self.page != Page::Overview { return None; }
-            let any = self.find_hits.iter().any(|h| h.row == ix); if !any { return None; }
-            Some(p.warn.opacity(if self.find_hits.get(self.find_cur).map(|h| h.row == ix).unwrap_or(false) { 0.35 } else { 0.16 }))
-        };
-        let list: Vec<AnyElement> = list.into_iter().enumerate().map(|(i, el)| match tint(first_list + i) { Some(c) => div().w_full().max_w(px(900.0)).rounded_md().bg(c).child(el).into_any_element(), None => el }).collect();
         let sec = |el: gpui::Div| el.w_full().max_w(px(900.0));
         let page = div().id("overview").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.ov_scroll).flex().flex_col().items_center().gap_4().px_6().pt_6().pb(px(100.0))
-            .child(sec(div().text_2xl().font_weight(FontWeight::SEMIBOLD).when_some(tint(0), |d, c| d.bg(c)).child(info.title.clone())))
+            .child(sec(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(if title_runs.is_empty() { div().child(info.title.clone()) } else { div().child(StyledText::new(SharedString::from(info.title.clone())).with_highlights(title_runs)) })))
             .child(sec(div().flex().flex_wrap().items_center().gap_3().text_sm().text_color(p.muted)
                 .child(badge(match state.as_str() { "merged" => "Merged", "closed" => "Closed", _ => "Open" }, dot, dot.opacity(0.15))).child(div().flex().items_center().gap_2().child(kit::avatar(&info.author, 22.0)).child(format!("by {}", info.author)))
                 .children((!info.assignees.is_empty()).then(|| div().flex().items_center().gap_1().child(div().text_xs().child("Assigned")).children(info.assignees.iter().map(|a| div().flex().items_center().gap_1().child(kit::avatar(&a.login, 20.0)).child(a.login.clone())))))
                 .children((!info.reviewers.is_empty()).then(|| div().flex().items_center().gap_1().child(div().text_xs().child("Reviewers")).children(info.reviewers.iter().map(|a| div().flex().items_center().gap_1().child(kit::avatar(&a.login, 20.0)).child(a.login.clone())))))
                 .when(!info.source_ref.is_empty(), |d| d.child(div().flex().items_center().gap_1().font_family(mono.clone()).child(info.source_ref.clone()).child(icon(ic::ARROW_FORWARD, 14.0, p.muted)).child(info.base_ref.clone())))))
-            .child(sec(div().flex().flex_col().gap_2().p_4().rounded_md().border_1().border_color(p.border).bg(p.surface).when_some(tint(2), |d, c| d.bg(c))
+            .child(sec(div().flex().flex_col().gap_2().p_4().rounded_md().border_1().border_color(p.border).bg(p.surface)
                 .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child("Description"))
-                .child(if info.description.trim().is_empty() { div().text_color(p.muted).child("No description.").into_any_element() } else { markdown_view(&markdown::parse(&info.description), &p, &mono).into_any_element() })))
+                .child(if info.description.trim().is_empty() { div().text_color(p.muted).child("No description.").into_any_element() } else { kit::markdown_view_find(&markdown::parse(&info.description), &p, &mono, &fq, cur_ord(2)).into_any_element() })))
             .child(sec(div().flex().items_center().justify_between().child(div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child("Conversation")).child(badge(format!("{}", list.len()), p.muted, p.hover)))
                 .child(icon_text_btn("ov-add", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))))
             .when(list.is_empty(), |d| d.child(sec(div().text_sm().text_color(p.muted).child("No general comments yet."))))

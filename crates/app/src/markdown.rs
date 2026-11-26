@@ -11,6 +11,24 @@ pub enum Block {
     Table { head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
 }
 
+/// The text runs of rendered blocks, in the order they are drawn: one per heading/paragraph/table cell (its spans joined) and one per
+/// line of a code block. Suggestion blocks are drawn as a diff and have none. Ctrl+F counts and highlights matches per run.
+pub fn block_texts(blocks: &[Block]) -> Vec<String> {
+    let join = |sp: &[Span]| sp.iter().map(|s| s.text.as_str()).collect::<String>();
+    let mut out = vec![];
+    for b in blocks {
+        match b {
+            Block::Heading(_, sp) | Block::Para(sp) => out.push(join(sp)),
+            Block::Code { lang, text } => if !lang.trim().starts_with("suggestion") { out.extend(text.split('\n').map(String::from)); },
+            Block::List { items, .. } => for it in items { out.extend(block_texts(it)); },
+            Block::Quote(inner) => out.extend(block_texts(inner)),
+            Block::Rule => {}
+            Block::Table { head, rows } => { for c in head { out.push(join(c)); } for r in rows { for c in r { out.push(join(c)); } } }
+        }
+    }
+    out
+}
+
 pub fn parse(src: &str) -> Vec<Block> {
     let mut stack: Vec<Vec<Block>> = vec![vec![]];
     let mut spans: Vec<Span> = vec![];
@@ -108,6 +126,10 @@ pub fn is_markdown(path: &str) -> bool { let l = path.to_lowercase(); l.ends_wit
 
 #[cfg(test)]
 mod tests {
+    #[test] fn block_texts_follow_drawing_order() {
+        let t = block_texts(&parse("# Title\n\nSome **bold** text\n\n- one\n- two\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n\n| h1 | h2 |\n|---|---|\n| c1 | c2 |\n"));
+        assert_eq!(t, vec!["Title", "Some bold text", "one", "two", "let a = 1;", "let b = 2;", "h1", "h2", "c1", "c2"]);
+    }
     use super::*;
     fn plain(s: &[Span]) -> String { s.iter().map(|x| x.text.as_str()).collect() }
     #[test] fn blocks() {
