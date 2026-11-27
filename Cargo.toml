@@ -15,6 +15,5 @@ perusal-diff = { path = "crates/diff" }
 perusal-core = { path = "crates/core" }
 perusal-gitops = { path = "crates/gitops" }
 perusal-filter = { path = "crates/filter" }
-perusal-providers = { path = "crates/providers" }
 perusal-agents = { path = "crates/agents" }
 clap = { version = "4", features = ["derive", "env"] }

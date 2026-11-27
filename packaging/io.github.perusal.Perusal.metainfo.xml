@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.perusal.Perusal</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Perusal</name>
+  <summary>Review merge requests and pull requests quickly</summary>
+  <description>
+    <p>Perusal is a native desktop reviewer for GitHub pull requests and GitLab merge requests, built to stay fast on very large changes with filtering, batching and a commit graph.</p>
+  </description>
+  <launchable type="desktop-id">io.github.perusal.Perusal.desktop</launchable>
+  <url type="homepage">https://github.com/XenonIsAwesome/Perusal</url>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>perusal</binary>
+  </provides>
+</component>

@@ -5,8 +5,9 @@ cd "$(dirname "$0")/.."
 cargo build --release -p perusal-ui
 A=target/Perusal.AppDir; rm -rf $A; mkdir -p $A/usr/bin
 cp target/release/perusal $A/usr/bin/; cp packaging/perusal.desktop $A/
-# icon: appimagetool wants <Icon=name>.svg and .DirIcon at the AppDir root
-cp assets/perusal.svg $A/perusal.svg; cp assets/perusal.svg $A/.DirIcon
+# icon: appimagetool wants <Icon=name>.png at the AppDir root and makes .DirIcon (must be a PNG) from it
+cp crates/ui/assets/perusal-256.png $A/perusal.png
+install -Dm644 packaging/io.github.perusal.Perusal.metainfo.xml $A/usr/share/metainfo/perusal.appdata.xml
 install -Dm644 assets/perusal.svg $A/usr/share/icons/hicolor/scalable/apps/perusal.svg
 cat > $A/AppRun <<'R'
 #!/bin/sh

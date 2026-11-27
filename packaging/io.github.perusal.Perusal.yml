@@ -1,6 +1,6 @@
 app-id: io.github.perusal.Perusal
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: perusal
 finish-args:
@@ -17,6 +17,7 @@ modules:
       - install -Dm644 perusal.svg /app/share/icons/hicolor/scalable/apps/io.github.perusal.Perusal.svg
       - sed -i 's/^Icon=.*/Icon=io.github.perusal.Perusal/' perusal.desktop
       - install -Dm644 perusal.desktop /app/share/applications/io.github.perusal.Perusal.desktop
+      - install -Dm644 io.github.perusal.Perusal.metainfo.xml /app/share/metainfo/io.github.perusal.Perusal.metainfo.xml
     sources:
       - type: file
         path: ../target/release/perusal
@@ -24,3 +25,5 @@ modules:
         path: perusal.desktop
       - type: file
         path: ../assets/perusal.svg
+      - type: file
+        path: io.github.perusal.Perusal.metainfo.xml
