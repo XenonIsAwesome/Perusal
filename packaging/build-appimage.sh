@@ -5,12 +5,13 @@ cd "$(dirname "$0")/.."
 cargo build --release -p perusal-ui
 A=target/Perusal.AppDir; rm -rf $A; mkdir -p $A/usr/bin
 cp target/release/perusal $A/usr/bin/
-# the desktop file id must match the AppStream component id: appimagetool validates the metainfo and warnings fail the build
+# the desktop file id must match the AppStream component id: appimagetool validates the metainfo and warnings fail the build.
+# appimagetool only looks for <desktop id>.appdata.xml (not .metainfo.xml) under usr/share/metainfo
 install -Dm644 packaging/perusal.desktop $A/io.github.perusal.Perusal.desktop
 install -Dm644 packaging/perusal.desktop $A/usr/share/applications/io.github.perusal.Perusal.desktop
 # icon: appimagetool wants <Icon=name>.png at the AppDir root and makes .DirIcon (must be a PNG) from it
 cp crates/ui/assets/perusal-256.png $A/perusal.png
-install -Dm644 packaging/io.github.perusal.Perusal.metainfo.xml $A/usr/share/metainfo/io.github.perusal.Perusal.metainfo.xml
+install -Dm644 packaging/io.github.perusal.Perusal.metainfo.xml $A/usr/share/metainfo/io.github.perusal.Perusal.appdata.xml
 install -Dm644 assets/perusal.svg $A/usr/share/icons/hicolor/scalable/apps/perusal.svg
 cat > $A/AppRun <<'R'
 #!/bin/sh
