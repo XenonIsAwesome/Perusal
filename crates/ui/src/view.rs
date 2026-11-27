@@ -188,7 +188,8 @@ impl View {
         let ws = s.hide_whitespace != self.settings.hide_whitespace;
         self.presets = model::load_presets();
         if panes_changed.0 { self.batch_panes = s.batch_view == BatchView::Panes; }
-        if panes_changed.1 { self.arrangement = s.pane_arrangement; }
+        // a changed preset replaces a hand-made layout, otherwise the setting would seem to do nothing
+        if panes_changed.1 { self.arrangement = s.pane_arrangement; self.layout = Layout::new(self.panes.len(), s.pane_arrangement); }
         self.settings = s; self.shown = None;
         if ws { self.m.vm.hide_whitespace = self.settings.hide_whitespace; let _ = self.m.vm.refresh(); }
         if regroup { let keep = self.current_file(); let _ = self.m.vm.refresh(); if let Some(fi) = keep { self.m.vm.select_file(fi); } }
@@ -372,7 +373,7 @@ impl View {
     fn pane_rect(&self, k: usize) -> Rect { if self.paned() { self.layout.rects().get(k).map(|r| r.1).unwrap_or_default() } else { Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 } } }
     fn set_batch_panes(&mut self, on: bool) { if self.batch_panes != on { self.batch_panes = on; self.clear_selection(); self.shown = None; } }
     fn set_arrangement(&mut self, a: Arrangement) { self.arrangement = a; self.layout = Layout::new(self.panes.len(), a); self.clear_selection(); self.rebuild_rows(); }
-    fn set_fullscreen(&mut self, on: bool, cx: &mut Context<Self>) { if self.fullscreen != on { self.fullscreen = on; cx.emit(ViewEvent::Fullscreen); } }
+    pub fn set_fullscreen(&mut self, on: bool, cx: &mut Context<Self>) { if self.fullscreen != on { self.fullscreen = on; cx.emit(ViewEvent::Fullscreen); } }
     pub fn is_fullscreen(&self) -> bool { self.fullscreen }
     fn toggle_comment(&mut self, key: &str) { if !self.collapsed_c.remove(key) { self.collapsed_c.insert(key.to_string()); } self.rebuild_rows(); }
     /// Collapse (or expand) every comment on the current file(s).
@@ -1466,6 +1467,7 @@ impl View {
     fn drag_panes(&mut self, d: PaneDrag, x: f32, y: f32, zoom: f32) {
         let b = self.b_panes.get(); let (ox, oy): (f32, f32) = (b.origin.x.into(), b.origin.y.into()); let (w, h): (f32, f32) = (b.size.width.into(), b.size.height.into());
         if w < 1.0 || h < 1.0 { return; }
+        // `b_panes` is measured in window pixels, which the zoom does not scale (it only scales fonts and row heights), so a minimum pane size is plain pixels too
         let (tx, ty) = ((x - ox) / w, (y - oy) / h); let min = 140.0 * zoom.min(1.5); let snap = 12.0;
         self.pane_snapped = match d {
             PaneDrag::Divider(id) => {

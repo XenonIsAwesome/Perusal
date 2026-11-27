@@ -228,9 +228,12 @@ impl Layout {
             }
             *fracs = nf; *kids = nk;
         }
-        if from == to || from >= self.n || to >= self.n || !remove(&mut self.root, from) { return false; }
-        let ok = insert(&mut self.root, to, from, edge); flatten(&mut self.root);
-        self.custom = true; ok
+        if from == to || from >= self.n || to >= self.n { return false; }
+        // work on a copy so a failed step can never leave the layout without a pane
+        let mut root = self.root.clone();
+        if !remove(&mut root, from) || !insert(&mut root, to, from, edge) { return false; }
+        flatten(&mut root);
+        self.root = root; self.custom = true; true
     }
     /// Equal sizes again for the split containing `id` (double-click on a divider).
     pub fn reset(&mut self, id: &DividerId) {
@@ -311,6 +314,17 @@ mod tests { use super::*;
         let mut g = Layout::new(4, Arrangement::Grid); g.move_pane(3, 0, Edge::Top);
         let cs = g.corners(); let has = |x: f32, y: f32| cs.iter().any(|c| (c.x - x).abs() < 1e-3 && (c.y - y).abs() < 1e-3);
         assert!(has(0.5, 0.25), "T junction where a divider ends on another: {cs:?}"); assert!(has(0.5, 0.5));
+    }
+    #[test] fn moving_in_a_two_pane_layout_collapses_to_one_split() {
+        // removing a pane from two leaves the root as a single leaf; inserting next to it must still work
+        let mut l = Layout::new(2, Arrangement::Columns); assert!(l.move_pane(1, 0, Edge::Left));
+        let r = l.rects(); assert!(r[1].1.x < r[0].1.x && (r[0].1.w - 0.5).abs() < 1e-4 && (r[1].1.w - 0.5).abs() < 1e-4);
+        assert!(l.move_pane(1, 0, Edge::Bottom)); let r = l.rects(); assert!(r[1].1.y > r[0].1.y && (r[0].1.w - 1.0).abs() < 1e-4);
+    }
+    #[test] fn tiny_areas_clamp_the_minimum_instead_of_trapping_a_divider() {
+        // an area smaller than two minimum panes: the minimum shrinks to half of the pair, so the divider can still move and nothing panics
+        let mut l = Layout::new(2, Arrangement::Columns); let d = l.dividers()[0].id.clone();
+        l.drag(&d, 0.9, 100.0, 140.0, 0.0); let r = l.rects(); assert!(r[0].1.w > 0.0 && r[1].1.w > 0.0 && (r[0].1.w + r[1].1.w - 1.0).abs() < 1e-5);
     }
     #[test] fn drop_zones() {
         assert_eq!(drop_zone(0.1, 0.5), Drop::Split(Edge::Left)); assert_eq!(drop_zone(0.9, 0.5), Drop::Split(Edge::Right));
