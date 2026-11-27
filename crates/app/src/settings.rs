@@ -88,6 +88,15 @@ pub struct Settings {
     pub right_width: f32,
     pub left_open: bool,
     pub right_open: bool,
+    /// UI and code font families (empty = the built-in pick), code line height (multiplier) and ligatures.
+    pub ui_font: String,
+    pub code_font: String,
+    pub line_height: f32,
+    pub ligatures: bool,
+    /// Turn off breathing/pulsing animations (also honoured via `PERUSAL_REDUCED_MOTION=1`).
+    pub reduced_motion: bool,
+    /// Vim-style navigation preset (j/k for files) on top of keymap.toml.
+    pub vim_keys: bool,
 }
 
 /// Agent to preselect at first run: keep `current` if it is installed, otherwise the first installed one in `AGENTS` order
@@ -99,7 +108,7 @@ pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> 
 
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true } }
+            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true, ui_font: String::new(), code_font: String::new(), line_height: 1.0, ligatures: true, reduced_motion: false, vim_keys: false } }
 }
 
 impl Settings {
@@ -107,6 +116,7 @@ impl Settings {
         let mut st: Settings = toml::from_str(s).unwrap_or_default();
         st.group_rules = perusal_diff::rules::merge_with_builtins(std::mem::take(&mut st.group_rules));
         for d in default_hosts() { if !st.hosts.iter().any(|h| h.host == d.host) { st.hosts.insert(0, d); } }
+        st.line_height = st.line_height.clamp(0.8, 2.0);
         st.commits_height = st.commits_height.map(|h| h.clamp(60.0, 700.0)); st.left_width = st.left_width.clamp(200.0, 700.0); st.right_width = st.right_width.clamp(220.0, 700.0);
         st
     }
@@ -118,6 +128,8 @@ impl Settings {
     pub fn effective_theme(&self, os_dark: bool) -> &str { if self.follow_os { if os_dark { &self.theme_dark } else { &self.theme_light } } else { &self.theme } }
     /// Whether a desktop notification should be raised for this event key.
     pub fn desktop_event_on(&self, key: &str) -> bool { self.desktop_notifications && self.desktop_events.get(key).copied().unwrap_or(true) }
+    /// Reduced motion from the setting or the environment.
+    pub fn motion_reduced(&self) -> bool { self.reduced_motion || std::env::var("PERUSAL_REDUCED_MOTION").map(|v| !v.is_empty() && v != "0").unwrap_or(false) }
     pub fn next_agent(&mut self) { let i = AGENTS.iter().position(|(k, _)| *k == self.agent).unwrap_or(0); self.agent = AGENTS[(i + 1) % AGENTS.len()].0.to_string(); }
 }
 

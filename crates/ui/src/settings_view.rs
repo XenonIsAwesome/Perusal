@@ -32,6 +32,8 @@ pub struct SettingsView {
     accounts: Vec<(String, String, Acc)>, token_host: Option<String>, client_host: Option<String>, device: Option<(String, DeviceCode)>, msg: Option<(bool, String)>, busy: bool,
     /// First-run setup: the step shown (0 welcome, 1 accounts, 2 agent, 3 done). `None` is the normal Settings panel.
     pub onboarding: Option<u8>,
+    /// Keyboard tab: the action waiting for its new key, the working keymap and a message.
+    rebind: Option<&'static str>, keys: std::collections::BTreeMap<String, String>, key_msg: Option<String>,
 }
 
 impl SettingsView {
@@ -39,7 +41,7 @@ impl SettingsView {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
             model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), dd_query: String::new(), dd_for: None, stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
-            focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), settings };
+            focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), rebind: None, keys: model::load_keymap(settings.vim_keys).0, key_msg: None, settings };
         if onboarding {
             let a = perusal_app::settings::pick_installed_agent(&v.settings.agent, |k| on_path(agent_program(k)));
             if a != v.settings.agent { v.settings.agent = a; v.changed(cx); }
@@ -100,13 +102,13 @@ impl SettingsView {
         let cid = self.settings.oauth_client_ids.get(&host).cloned().unwrap_or_default();
         if cid.is_empty() { self.client_host = Some(host); self.say(false, "Enter an OAuth app client ID for this host first."); return; }
         self.busy = true; self.say(true, "Requesting a sign-in code...");
-        let (h1, c1) = (host.clone(), cid.clone());
-        let start = cx.background_executor().spawn(async move { model::device_start(&h1, &c1) });
+        let (h1, c1) = (host.clone(), cid.clone()); let gitlab = perusal_app::hosts::kind_of(&self.settings.hosts, &host) == "gitlab";
+        let start = cx.background_executor().spawn(async move { model::device_start(&h1, &c1, gitlab) });
         cx.spawn(async move |this, cx| {
             let code = start.await;
             let Ok(Some(code)) = this.update(cx, |t, cx| { match code { Ok(c) => { t.device = Some((host.clone(), c.clone())); t.say(true, format!("Enter the code {} at {}", c.user_code, c.verification_uri)); let _ = model::open_url(&c.verification_uri); cx.notify(); Some(c) } Err(e) => { t.busy = false; t.say(false, format!("Sign-in failed: {e}")); cx.notify(); None } } }) else { return };
             let (h2, c2, cc) = (host.clone(), cid.clone(), code.clone());
-            let wait = cx.background_executor().spawn(async move { model::device_wait(&h2, &c2, &cc) });
+            let wait = cx.background_executor().spawn(async move { model::device_wait(&h2, &c2, &cc, gitlab) });
             let tok = wait.await;
             let _ = this.update(cx, |t, cx| {
                 t.busy = false; t.device = None;
@@ -154,8 +156,31 @@ impl SettingsView {
         match f { F::AgentPath => &mut self.agent_path, F::Cmd => &mut self.cmd, F::Model => &mut self.model, F::Label => &mut self.label, F::Pat => &mut self.pat, F::Host => &mut self.host_in, F::Token => &mut self.token, F::Client => &mut self.client,
             F::RuleGen => &mut self.rule_gen, F::PName => &mut self.pname, F::PFilter => &mut self.pfilter, F::PSort => &mut self.psort, F::Effort => &mut self.effort_in }
     }
+    /// Keyboard tab: the next key press becomes the binding of `action`.
+    fn capture_key(&mut self, action: &'static str, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke; let k = ks.key.as_str();
+        if k == "escape" { self.rebind = None; self.key_msg = None; cx.notify(); return; }
+        if matches!(k, "shift" | "control" | "alt" | "platform" | "function" | "meta" | "super") { return; } // wait for the real key
+        let name = perusal_app::keymap::press_name(ks.modifiers.control || ks.modifiers.platform, ks.modifiers.alt, ks.modifiers.shift, k, ks.key_char.as_deref());
+        self.rebind = None;
+        if perusal_app::keymap::is_reserved(&name) { self.key_msg = Some(format!("{} is used by the app itself and cannot be bound.", crate::view::show_key_name(&name))); }
+        else if let Some((other, _)) = self.keys.iter().find(|(o, v)| o.as_str() != action && v.eq_ignore_ascii_case(&name)) {
+            self.key_msg = Some(format!("{} is already used by \"{}\".", crate::view::show_key_name(&name), perusal_app::keymap::label(other)));
+        } else {
+            self.keys.insert(action.to_string(), name);
+            match model::save_keymap(&self.keys, self.settings.vim_keys) { Ok(()) => { self.key_msg = None; cx.emit(SettingsEvent::Changed); } Err(e) => self.key_msg = Some(e) }
+        }
+        cx.notify();
+    }
+    fn reset_keys(&mut self, only: Option<&'static str>, cx: &mut Context<Self>) {
+        let base = perusal_app::keymap::load("", self.settings.vim_keys).unwrap_or_else(|_| perusal_app::keymap::default_map());
+        match only { Some(a) => { if let Some(k) = base.get(a) { self.keys.insert(a.to_string(), k.clone()); } } None => self.keys = base }
+        match model::save_keymap(&self.keys, self.settings.vim_keys) { Ok(()) => { self.key_msg = None; cx.emit(SettingsEvent::Changed); } Err(e) => self.key_msg = Some(e) }
+        cx.notify();
+    }
     pub fn key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         let key = ev.keystroke.key.as_str();
+        if let Some(action) = self.rebind { self.capture_key(action, ev, cx); return; }
         if key == "escape" { if self.focus.is_some() || self.dd.is_some() { self.commit_text(cx); self.blur(); } else if self.onboarding.is_none() { cx.emit(SettingsEvent::Close); } cx.notify(); return; }
         if self.focus.is_none() && self.dd.is_some() {
             // typing while a dropdown is open searches its options
@@ -468,6 +493,14 @@ impl gpui::Render for SettingsView {
             let theme_dd = self.dropdown(0, &s.theme, themes.clone(), cx, |st, v| st.theme = v);
             let light_dd = self.dropdown(1, &s.theme_light, themes.clone(), cx, |st, v| st.theme_light = v);
             let dark_dd = self.dropdown(2, &s.theme_dark, themes, cx, |st, v| st.theme_dark = v);
+            let font_opts = |cur: &str, all: &[String]| -> Vec<(String, String)> { let mut v: Vec<(String, String)> = vec![("Default".into(), String::new())]; v.extend(all.iter().map(|n| (n.clone(), n.clone()))); let _ = cur; v };
+            let mut all_fonts: Vec<String> = cx.text_system().all_font_names().into_iter().filter(|n| !n.starts_with('.') && n != "Material Icons").collect(); all_fonts.sort(); all_fonts.dedup();
+            let ui_label = if s.ui_font.is_empty() { "Default".to_string() } else { s.ui_font.clone() };
+            let code_label = if s.code_font.is_empty() { "Default".to_string() } else { s.code_font.clone() };
+            let ui_font_dd = self.pick(6, &ui_label, font_opts(&s.ui_font, &all_fonts), cx, |this, v, cx| { this.settings.ui_font = v; this.changed(cx); });
+            let code_font_dd = self.pick(7, &code_label, font_opts(&s.code_font, &all_fonts), cx, |this, v, cx| { this.settings.code_font = v; this.changed(cx); });
+            let lh_opts: Vec<(String, String)> = ["0.9", "1.0", "1.1", "1.25", "1.5"].iter().map(|x| (x.to_string(), x.to_string())).collect();
+            let line_dd = self.pick(8, &format!("{:?}", s.line_height), lh_opts, cx, |this, v, cx| { this.settings.line_height = v.parse().unwrap_or(1.0); this.changed(cx); });
             let accounts = self.accounts_section(cx);
             let ai = self.ai_section(cx, &row);
             let msgbox = self.msg.clone().filter(|_| self.onboarding.is_none()).map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().mt_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })
@@ -516,11 +549,12 @@ impl gpui::Render for SettingsView {
                     .when(self.pedit, |d| d.child(icon_text_btn("pe-cancel", ic::CLOSE, "Cancel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.pedit = false; this.pname.f.clear(); this.pfilter.f.clear(); this.psort.f.clear(); cx.notify(); }))))
                     .child(icon_text_btn("pe-save", ic::SAVE, "Save preset", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_preset(cx); }))));
             // ---- tabs
-            let tabs = ["Appearance", "Accounts", "Notifications", "Review", "Presets", "AI"];
+            let tabs = ["Appearance", "Accounts", "Notifications", "Review", "Presets", "AI", "Keyboard"];
             let tab_bar = div().flex().items_center().gap_1().px_5().border_b_1().border_color(p.border).children(tabs.iter().enumerate().map(|(i, t)| {
                 let on = self.stab as usize == i;
                 div().id(("stab", i)).px_3().py(px(8.0)).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).hover(move |x| x.text_color(p.fg)).child(*t)
-                    .on_click(cx.listener(move |this, _, _, cx| { this.stab = i as u8; this.dd = None; this.msg = None; if i == 4 { this.presets = model::load_presets(); } cx.notify(); }))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.stab = i as u8; this.dd = None; this.msg = None; if i == 4 { this.presets = model::load_presets(); }
+                        if i == 6 { this.keys = model::load_keymap(this.settings.vim_keys).0; this.rebind = None; this.key_msg = None; } cx.notify(); }))
             }).collect::<Vec<_>>());
             let content: gpui::Div = match self.stab {
                 0 => div().flex().flex_col()
@@ -536,8 +570,22 @@ impl gpui::Render for SettingsView {
                         .child(div().flex().items_center().gap_2().px_3().py_2().rounded_md().border_1().border_color(p.border).bg(p.surface).child(div().flex_1().min_w_0().text_sm().child(format!("\"{example}\"")))
                             .child(icon_btn("copy-prompt", ic::CONTENT_COPY, "Copy this prompt", Btn::Ghost, &p).on_click(cx.listener(move |_, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(example.to_string())); }))))
                         .child(div().text_xs().text_color(p.muted).child("New valid theme files appear in the dropdown the next time you open Settings.")))
+                    .child(section("Fonts"))
+                    .child(row("UI font", "Used for labels, comments and panels. Takes effect immediately", ui_font_dd))
+                    .child(row("Code font", "Used for diffs, filters and code blocks", code_font_dd))
+                    .child(row("Code line height", "Row height in the diff, as a multiple of the default", line_dd))
+                    .child(row("Font ligatures in code", "Draw combinations such as => and != as single glyphs when the font has them", sw("sw-lig", s.ligatures, cx, |st| st.ligatures = !st.ligatures)))
+                    .child(section("Motion"))
+                    .child(row("Reduce motion", "Show CI and agent activity as static icons instead of pulsing ones (also PERUSAL_REDUCED_MOTION=1)", sw("sw-rm", s.reduced_motion, cx, |st| st.reduced_motion = !st.reduced_motion)))
+                    .child(section("Keyboard"))
+                    .child(row("Vim-style keys", "j and k move between files. Individual keys are rebound in keymap.toml; press ? in a review for the list", sw("sw-vim", s.vim_keys, cx, |st| st.vim_keys = !st.vim_keys)))
+                    .child(row("Keymap file", "Edit [keys] overrides, for example comment = \"m\"", icon_text_btn("open-keymap", ic::KEYBOARD, "Open folder", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let d = model::config_dir(); let _ = std::fs::create_dir_all(&d); if let Err(e) = model::open_dir(&d) { this.say(false, e); } cx.notify(); })).into_any_element()))
                     .child(section("Window"))
                     .child(row("Built-in title bar", "Draw the minimize, maximize and close buttons inside the app. Turn off to use the system title bar and borders", sw("sw-tb", s.custom_titlebar, cx, |st| st.custom_titlebar = !st.custom_titlebar)))
+                    .child(section("Links"))
+                    .child(row("Open perusal:// links", "Register this program as the handler for perusal:// links (used by the browser extension). Needed for AppImages", icon_text_btn("reg-link", ic::LINK, "Register", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
+                        match model::register_link_handler() { Ok(p) => this.say(true, format!("Registered. Wrote {}", p.display())), Err(e) => this.say(false, e) } cx.notify(); })).into_any_element()))
+                    .children(self.msg.clone().filter(|_| self.stab == 0 && self.onboarding.is_none()).map(|(ok, m)| div().text_sm().text_color(if ok { p.success } else { p.danger }).child(m)))
                     .child(section("Setup")).child(row("Run the first-time setup again", "Walks through accounts and the AI agent", icon_text_btn("rerun-ob", ic::ROCKET_LAUNCH, "Start setup", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.onboarding = Some(0); cx.notify(); })).into_any_element())),
                 1 => div().flex().flex_col().child(section("Accounts")).child(div().pt_2().flex().flex_col().gap_2()
                         .child(self.import_all_card(cx))
@@ -569,7 +617,24 @@ impl gpui::Render for SettingsView {
                 4 => div().flex().flex_col().gap_3().child(section("Filter and sort presets"))
                     .child(div().text_xs().text_color(p.muted).child("Presets set a filter and a sort in one click. A project's default wins over the global default when a review opens. Save new ones from the bookmark button in a review, or add them here."))
                     .children(preset_groups).child(preset_form).children(self.msg.clone().map(|(ok, m)| div().flex().items_start().gap_1().text_sm().text_color(if ok { p.success } else { p.danger }).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("preset-err-copy", m, &p))))),
-                _ => div().flex().flex_col().child(section("AI agent")).child(ai),
+                5 => div().flex().flex_col().child(section("AI agent")).child(ai),
+                _ => {
+                    let defaults = perusal_app::keymap::load("", s.vim_keys).unwrap_or_else(|_| perusal_app::keymap::default_map());
+                    let rows: Vec<_> = perusal_app::keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "next_tab").enumerate().map(|(i, &(a, _, label))| {
+                        let cur = self.keys.get(a).cloned().unwrap_or_default(); let changed = defaults.get(a) != Some(&cur); let capturing = self.rebind == Some(a);
+                        let btn = div().id(("kb", i)).min_w(px(110.0)).flex().justify_center().px_3().py(px(5.0)).rounded_md().border_1().border_color(if capturing { p.accent } else { p.border }).bg(p.bg).cursor_pointer().text_sm().font_family(self.fonts.mono.clone())
+                            .text_color(if capturing { p.accent } else { p.fg }).child(if capturing { "Press a key…".to_string() } else { crate::view::show_key_name(&cur) })
+                            .on_click(cx.listener(move |this, _, _, cx| { this.rebind = Some(a); this.key_msg = None; cx.notify(); }));
+                        div().flex().items_center().justify_between().gap_3().py(px(4.0)).child(div().flex_1().min_w_0().text_sm().child(label))
+                            .child(div().flex().items_center().gap_1().child(btn)
+                                .child(if changed { icon_btn(("kbr", i), ic::UNDO, "Back to the default", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.reset_keys(Some(a), cx); })).into_any_element() } else { div().w(px(32.0)).into_any_element() }))
+                    }).collect();
+                    div().flex().flex_col().child(section("Shortcuts"))
+                        .child(div().pt_2().text_xs().text_color(p.muted).child("Click a shortcut, then press the new key (Esc cancels). Changes apply at once and are saved in keymap.toml."))
+                        .children(self.key_msg.clone().map(|m| div().pt_2().text_sm().text_color(p.danger).child(m)))
+                        .child(div().flex().flex_col().pt_2().children(rows))
+                        .child(div().flex().justify_end().pt_3().child(icon_text_btn("kb-reset-all", ic::UNDO, "Reset all", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.reset_keys(None, cx); }))))
+                }
             };
             let scroll = div().flex().flex_col().flex_1().min_h_0().child(tab_bar)
                 .child(div().id("settings-scroll").flex_1().min_h_0().overflow_y_scroll().px_5().pb_4().child(content));

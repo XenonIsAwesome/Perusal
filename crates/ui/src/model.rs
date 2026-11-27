@@ -42,6 +42,21 @@ pub fn data_dir() -> PathBuf {
 pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
+pub fn keymap_path() -> PathBuf { config_dir().join("keymap.toml") }
+/// The effective keymap (defaults, vim preset, keymap.toml overrides). A broken file falls back to the defaults and says why.
+pub fn load_keymap(vim: bool) -> (std::collections::BTreeMap<String, String>, Option<String>) {
+    let txt = std::fs::read_to_string(keymap_path()).unwrap_or_default();
+    match perusal_app::keymap::load(&txt, vim) {
+        Ok(m) => (m, None),
+        Err(e) => (perusal_app::keymap::load("", vim).unwrap_or_else(|_| perusal_app::keymap::default_map()), Some(format!("keymap.toml ignored: {e}"))),
+    }
+}
+/// Writes the overrides of `map` (keys differing from the defaults) to keymap.toml; no overrides removes the file.
+pub fn save_keymap(map: &std::collections::BTreeMap<String, String>, vim: bool) -> Result<(), String> {
+    let text = perusal_app::keymap::overrides_toml(map, vim);
+    if text.is_empty() { let _ = std::fs::remove_file(keymap_path()); return Ok(()); }
+    std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?; std::fs::write(keymap_path(), text).map_err(|e| e.to_string())
+}
 pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
 /// Editable prompt templates (`~/.config/perusal/prompts`); the defaults and an AGENTS.md are written there on first use.
 pub fn prompts_dir() -> PathBuf { config_dir().join("prompts") }
@@ -59,7 +74,7 @@ pub fn save_settings(s: &perusal_app::settings::Settings) { let _ = std::fs::cre
 /// Where the read-only code snapshot for agents lives, per review and head.
 pub fn snapshot_dir(review: i64, rev: &str) -> PathBuf { data_dir().join("snapshots").join(format!("{review}-{}", rev[..rev.len().min(12)].replace('/', "_"))) }
 pub fn db_path() -> String { std::env::var("PERUSAL_DB").unwrap_or_else(|_| data_dir().join("perusal.sqlite").display().to_string()) }
-pub fn token_store() -> FileStore { FileStore { dir: config_dir().join("tokens") } }
+pub fn token_store() -> perusal_providers::auth::KeyringStore { perusal_providers::auth::KeyringStore::detect(FileStore { dir: config_dir().join("tokens") }) }
 pub fn token_for(host: &str) -> Option<String> { token_store().get(host).or_else(|| std::env::var("PERUSAL_TOKEN").ok().filter(|t| !t.is_empty())) }
 
 fn provider(r: &MrRef, token: String) -> Result<Box<dyn Provider>, String> {
@@ -140,6 +155,17 @@ impl Model {
         m.info = Some(info.clone()); m.web_url = Some(info.web_url.clone()); m.mr_state = norm_state(&info.state); let _ = m.store.set_mr_state(m.vm.review, &m.mr_state); m.mr = Some(r); m.follow_head(); Ok(m)
     }
 
+    /// Moves a remote review from `old_head` to the MR's current head: fetches it, re-anchors drafts, drops viewed marks of
+    /// changed files, then reopens the model so the view model reflects the stored state. The string says what happened.
+    pub fn move_to_latest(url: &str, old_head: &str) -> Result<(Self, String), OpenErr> {
+        let m = Self::open_remote(url)?;
+        if m.branch == old_head { return Ok((m, "Already on the latest commit.".into())); }
+        let rep = perusal_app::movehead::move_review(&m.store, m.vm.review, &m.repo, old_head, &m.branch).map_err(OpenErr::Msg)?;
+        let msg = perusal_app::movehead::summary(&rep);
+        drop(m);
+        Ok((Self::open_remote(url)?, msg))
+    }
+
     /// Reopens a review from the recent list using its stored key.
     pub fn reopen(key: &str) -> Result<Self, OpenErr> {
         if let Some(u) = key.strip_prefix("remote:") { return Self::open_remote(u); }
@@ -214,6 +240,18 @@ pub fn project_of(m: &Model) -> String {
 }
 
 // ---- system integration
+/// Registers this binary (the AppImage when running from one) as the `perusal://` handler for the current user.
+pub fn register_link_handler() -> Result<PathBuf, String> {
+    let exe = perusal_app::desktop::appimage().or_else(|| std::env::current_exe().ok()).ok_or("cannot tell which program is running")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
+    let path = perusal_app::desktop::entry_path(&home, std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).as_deref());
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, perusal_app::desktop::entry(&exe, None)).map_err(|e| e.to_string())?;
+    // best effort: refresh the desktop database and make it the default scheme handler
+    let _ = std::process::Command::new("update-desktop-database").arg(path.parent().unwrap()).output();
+    let _ = std::process::Command::new("xdg-mime").args(["default", "perusal.desktop", "x-scheme-handler/perusal"]).output();
+    Ok(path)
+}
 pub fn open_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") { return Err("only web links can be opened".into()); }
     let prog = if cfg!(target_os = "macos") { "open" } else if cfg!(target_os = "windows") { "explorer" } else { "xdg-open" };
@@ -232,7 +270,42 @@ pub fn desktop_notify(title: &str, body: &str) {
 }
 
 // ---- remote state, listing, accounts
-pub struct RemoteState { pub info: perusal_providers::MrInfo, pub ci: Ci, pub threads: Vec<Thread> }
+pub struct RemoteState { pub info: perusal_providers::MrInfo, pub ci: Ci, pub threads: Vec<Thread>, /// login of the signed-in user (to know which comments are editable)
+    pub me: Option<String> }
+
+/// A change to an existing thread or to the reviewer list; these go to the host immediately, outside the pending review.
+#[derive(Clone, Debug)]
+pub enum HostAct {
+    Reply { thread: String, body: String }, Resolve { thread: String, resolved: bool }, React { thread: String, comment: String, emoji: String }, Unreact { thread: String, comment: String, emoji: String },
+    Edit { thread: String, comment: String, body: String }, Delete { thread: String, comment: String }, RequestReview(Vec<String>),
+}
+/// The reaction used by the quick 👍 button on each host.
+pub fn thumbs_up(kind: perusal_providers::Kind) -> &'static str { match kind { perusal_providers::Kind::GitHub => "+1", perusal_providers::Kind::GitLab => "thumbsup" } }
+
+/// Which of `ids` you have 👍-ed on the host.
+pub fn fetch_likes(mr: &MrRef, ids: &[String]) -> Result<std::collections::HashSet<String>, String> {
+    let token = token_for(&mr.host).ok_or("no token")?;
+    let p = provider(mr, token)?;
+    rt()?.block_on(p.my_reactions(mr, ids, thumbs_up(mr.kind))).map(|v| v.into_iter().collect()).map_err(|e| e.to_string())
+}
+
+pub fn host_action(mr: &MrRef, a: HostAct) -> Result<(), String> {
+    let token = token_for(&mr.host).ok_or_else(|| format!("No access token for {}. Open the review from Home to enter one.", mr.host))?;
+    let p = provider(mr, token)?; let rt = rt()?;
+    let r = match a {
+        HostAct::Reply { thread, body } => rt.block_on(p.reply(mr, &thread, &body)),
+        HostAct::Resolve { thread, resolved } => rt.block_on(p.resolve(mr, &thread, resolved)),
+        HostAct::React { thread, comment, emoji } => rt.block_on(p.react(mr, &thread, &comment, &emoji)),
+        HostAct::Unreact { thread, comment, emoji } => rt.block_on(p.unreact(mr, &thread, &comment, &emoji)),
+        HostAct::Edit { thread, comment, body } => rt.block_on(p.edit_comment(mr, &thread, &comment, &body)),
+        HostAct::Delete { thread, comment } => rt.block_on(p.delete_comment(mr, &thread, &comment)),
+        HostAct::RequestReview(users) => rt.block_on(p.request_review(mr, &users)),
+    };
+    r.map_err(|e| match e {
+        perusal_providers::Error::Unauthorized => format!("{} rejected the token. Enter a new one from Home.", mr.host),
+        other => other.to_string(),
+    })
+}
 
 pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
     let token = token_for(&mr.host).unwrap_or_default();
@@ -241,8 +314,9 @@ pub fn fetch_remote_state(mr: &MrRef) -> Result<RemoteState, String> {
     let ci = rt.block_on(p.ci(mr, &info.head_sha)).unwrap_or(Ci::None);
     let threads = rt.block_on(p.threads(mr)).unwrap_or_default();
     crate::avatars::learn_info(&mr.kind, &mr.host, &info); crate::avatars::learn_threads(&mr.kind, &mr.host, &threads);
-    if crate::avatars::me(&mr.host).is_none() { if let Ok(u) = rt.block_on(p.current_user()) { crate::avatars::set_me(&mr.host, &u); } }
-    Ok(RemoteState { info, ci, threads })
+    let me = if mr.host.is_empty() { None } else { rt.block_on(p.current_user()).ok().filter(|u| !u.is_empty()) };
+    if let Some(u) = &me { crate::avatars::set_me(&mr.host, u); }
+    Ok(RemoteState { info, ci, threads, me })
 }
 pub fn ci_label(c: &Ci) -> &'static str { match c { Ci::None => "none", Ci::Pending => "pending", Ci::Running => "running", Ci::Passed => "passed", Ci::Failed => "failed", Ci::Canceled => "canceled" } }
 
@@ -285,15 +359,15 @@ pub fn import_cli_token(host: &str, kind: &str) -> Result<String, String> {
     tok.ok_or_else(|| format!("`{prog}` has no login for {host}. Run `{prog} auth login` first."))
 }
 
-pub fn device_start(host: &str, client_id: &str) -> Result<perusal_providers::auth::DeviceCode, String> {
+pub fn device_start(host: &str, client_id: &str, gitlab: bool) -> Result<perusal_providers::auth::DeviceCode, String> {
     let base = format!("https://{host}"); let c = perusal_providers::auth::client(None)?;
-    rt()?.block_on(perusal_providers::auth::device_start(&c, &base, client_id))
+    rt()?.block_on(perusal_providers::auth::device_start_for(&c, &base, client_id, gitlab))
 }
 /// Waits for the user to approve the device code (up to ~10 minutes) and returns the token.
-pub fn device_wait(host: &str, client_id: &str, d: &perusal_providers::auth::DeviceCode) -> Result<String, String> {
+pub fn device_wait(host: &str, client_id: &str, d: &perusal_providers::auth::DeviceCode, gitlab: bool) -> Result<String, String> {
     let base = format!("https://{host}"); let c = perusal_providers::auth::client(None)?;
     let mut dd = d.clone(); dd.interval = d.interval.max(5) * 1000;
-    rt()?.block_on(perusal_providers::auth::device_poll(&c, &base, client_id, &dd, 120))
+    rt()?.block_on(perusal_providers::auth::device_poll_for(&c, &base, client_id, &dd, 120, gitlab))
 }
 
 /// Finds the open MR/PR for a local branch on its origin host, if the user is signed in there (or the repo is public).
@@ -301,7 +375,7 @@ pub fn find_mr_for_branch(repo: &Path, branch: &str, hosts: &[HostCfg]) -> Optio
     let url = perusal_gitops::git(repo, &["remote", "get-url", "origin"]).ok()?;
     let (host, project) = perusal_app::hosts::parse_remote(&url)?;
     let kind = if perusal_app::hosts::kind_of(hosts, &host) == "gitlab" { Kind::GitLab } else { Kind::GitHub };
-    let r = MrRef { kind: kind.clone(), host: host.clone(), project: project.clone(), number: 0 };
+    let r = MrRef { kind, host: host.clone(), project: project.clone(), number: 0 };
     let p = provider(&r, token_for(&host).unwrap_or_default()).ok()?;
     let n = rt().ok()?.block_on(p.find_for_branch(&project, branch)).ok()??;
     let web = match kind { Kind::GitHub => format!("https://{host}/{project}/pull/{n}"), Kind::GitLab => format!("https://{host}/{project}/-/merge_requests/{n}") };

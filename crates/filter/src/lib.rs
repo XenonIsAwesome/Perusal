@@ -416,6 +416,7 @@ mod tests {
 }
 
 #[cfg(test)]
+/// Seeded pseudo-random inputs (not coverage guided); the coverage-guided target lives in /fuzz.
 mod fuzz {
     use super::*;
     use perusal_diff::Status;

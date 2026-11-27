@@ -7,7 +7,7 @@ fn gh(s: &MockServer) -> GitHub { GitHub { http: reqwest::Client::new(), api: s.
 fn gl(s: &MockServer) -> GitLab { GitLab { http: reqwest::Client::new(), api: s.uri(), token: "t".into() } }
 fn ghref() -> MrRef { MrRef { kind: Kind::GitHub, host: "h".into(), project: "o/r".into(), number: 3 } }
 fn glref() -> MrRef { MrRef { kind: Kind::GitLab, host: "h".into(), project: "g/p".into(), number: 4 } }
-fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3 }], general: vec![] } }
+fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary: "sum".into(), verdict: v, comments: vec![InlineComment { path: "a.rs".into(), start_line: 2, end_line: 4, body: "hm".into(), start_old: 2, end_old: 3, old_side: false }], general: vec![] } }
 
 #[tokio::test] async fn github_info_and_ci() {
     let s = MockServer::start().await;
@@ -153,6 +153,47 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     assert_eq!(ci_page(&Kind::GitHub, "https://github.com/o/r/pull/7"), "https://github.com/o/r/pull/7/checks");
 }
 
+#[tokio::test] async fn github_threads_carry_ids_and_resolved_state() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5},{"id":2,"in_reply_to_id":1,"user":{"login":"b"},"body":"a","path":"x.rs","line":5}]))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+        {"id":"PRRT_1","isResolved":true,"comments":{"nodes":[{"databaseId":1}]}}]}}}}}))).mount(&s).await;
+    let t = gh(&s).threads(&ghref()).await.unwrap();
+    assert_eq!(t[0].comment_ids, vec!["1", "2"]); assert!(t[0].resolved); assert_eq!(t[0].resolve_id(Kind::GitHub), Some("PRRT_1"));
+}
+#[tokio::test] async fn github_threads_survive_graphql_failure() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"user":{"login":"a"},"body":"q","path":"x.rs","line":5}]))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
+    let t = gh(&s).threads(&ghref()).await.unwrap(); assert_eq!(t.len(), 1); assert!(!t[0].resolved); assert_eq!(t[0].resolve_id(Kind::GitHub), None);
+}
+
+#[tokio::test] async fn gitlab_device_flow() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/oauth/authorize_device")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"device_code":"DC","user_code":"UC","verification_uri":"https://gl/oauth/device","verification_uri_complete":"https://gl/oauth/device?user_code=UC","interval":1}))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/oauth/token")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"gltok"}))).mount(&s).await;
+    let c = reqwest::Client::new();
+    let d = auth::device_start_for(&c, &s.uri(), "cid", true).await.unwrap(); assert_eq!(d.user_code, "UC"); assert!(d.verification_uri.contains("user_code=UC"));
+    assert_eq!(auth::device_poll_for(&c, &s.uri(), "cid", &d, 3, true).await.unwrap(), "gltok");
+    let bad = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_client","error_description":"unknown client"}))).mount(&bad).await;
+    assert!(auth::device_start_for(&c, &bad.uri(), "x", true).await.unwrap_err().contains("invalid_client"));
+}
+
+#[tokio::test] async fn removed_line_comments_use_the_old_side() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/repos/o/r/pulls/3/reviews")).and(body_partial_json(json!({"comments":[{"path":"a.rs","line":7,"side":"LEFT"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).expect(1).mount(&s).await;
+    let c = InlineComment { path: "a.rs".into(), start_line: 7, end_line: 7, body: "why removed?".into(), start_old: 7, end_old: 7, old_side: true };
+    gh(&s).submit(&ghref(), &Submission { head_sha: "abc".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![c], general: vec![] }).await.unwrap();
+    let g = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("GET")).and(path(b)).respond_with(ResponseTemplate::new(200).set_body_json(json!({"diff_refs":{"base_sha":"b","start_sha":"s","head_sha":"h"}}))).mount(&g).await;
+    Mock::given(method("POST")).and(path(format!("{b}/draft_notes"))).and(body_partial_json(json!({"position":{"old_line":7}}))).respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":1}))).expect(1).mount(&g).await;
+    Mock::given(method("POST")).and(path(format!("{b}/draft_notes/bulk_publish"))).respond_with(ResponseTemplate::new(204)).mount(&g).await;
+    let c = InlineComment { path: "a.rs".into(), start_line: 7, end_line: 7, body: "why removed?".into(), start_old: 7, end_old: 7, old_side: true };
+    gl(&g).submit(&glref(), &Submission { head_sha: "h".into(), summary: String::new(), verdict: Verdict::Comment, comments: vec![c], general: vec![] }).await.unwrap();
+}
 #[tokio::test] async fn github_resolved_threads_paged_and_failure_tolerant() {
     let s = MockServer::start().await;
     Mock::given(method("GET")).and(path("/repos/o/r/pulls/3/comments")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
@@ -246,4 +287,32 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("GET")).and(path("/projects")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7},{"id":8}]))).mount(&s).await;
     for id in [7, 8] { Mock::given(method("GET")).and(path(format!("/projects/{id}/merge_requests"))).respond_with(ResponseTemplate::new(401)).mount(&s).await; }
     assert!(matches!(gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await, Err(Error::Unauthorized)));
+}
+
+#[tokio::test] async fn remove_own_reaction() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"login":"me","username":"me"}))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/comments/9/reactions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"id":1,"content":"+1","user":{"login":"other"}},{"id":2,"content":"+1","user":{"login":"me"}}]))).mount(&s).await;
+    Mock::given(method("DELETE")).and(path("/repos/o/r/pulls/comments/9/reactions/2")).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
+    gh(&s).unreact(&ghref(), "9", "9", "+1").await.unwrap();
+    assert!(matches!(gh(&s).unreact(&ghref(), "9", "9", "heart").await, Err(Error::Http(404, _))));
+    let g = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"username":"me"}))).mount(&g).await;
+    Mock::given(method("GET")).and(path(format!("{b}/notes/5/award_emoji"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7,"name":"thumbsup","user":{"username":"me"}}]))).mount(&g).await;
+    Mock::given(method("DELETE")).and(path(format!("{b}/notes/5/award_emoji/7"))).respond_with(ResponseTemplate::new(204)).expect(1).mount(&g).await;
+    gl(&g).unreact(&glref(), "d", "5", "thumbsup").await.unwrap();
+}
+
+#[tokio::test] async fn which_comments_i_reacted_to() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"login":"me","username":"me"}))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/comments/1/reactions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"content":"+1","user":{"login":"me"}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/comments/2/reactions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":2,"content":"+1","user":{"login":"other"}},{"id":3,"content":"heart","user":{"login":"me"}}]))).mount(&s).await;
+    let got = gh(&s).my_reactions(&ghref(), &["1".into(), "2".into()], "+1").await.unwrap(); assert_eq!(got, vec!["1".to_string()]);
+    let g = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"username":"me"}))).mount(&g).await;
+    Mock::given(method("GET")).and(path(format!("{b}/notes/5/award_emoji"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7,"name":"thumbsup","user":{"username":"me"}}]))).mount(&g).await;
+    Mock::given(method("GET")).and(path(format!("{b}/notes/6/award_emoji"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&g).await;
+    let got = gl(&g).my_reactions(&glref(), &["5".into(), "6".into()], "thumbsup").await.unwrap(); assert_eq!(got, vec!["5".to_string()]);
 }

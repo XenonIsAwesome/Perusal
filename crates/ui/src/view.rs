@@ -1,3 +1,5 @@
+mod extra;
+pub fn show_key_name(k: &str) -> String { extra::show_key(k) }
 use crate::icons as ic;
 use crate::kit::{self, badge, ci_badge, diff_squares, field_key, icon, icon_btn, icon_text_btn, input_text, kbd, loading_dots, markdown_view, new_bounds, seg_box, seg_icon, tip, wire_input, Btn, FieldBounds, Fonts, Input, Pal};
 use crate::model::{self, Model};
@@ -22,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename, Gen, Find }
+enum Fid { Filter, Sort, Comment, Ask, Summary, Preset, Rename, Gen, Find, Palette, Reviewers }
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab { Review, Ai }
 #[derive(PartialEq, Clone, Copy)]
@@ -35,14 +37,20 @@ enum Page { Overview, Code }
 /// One occurrence found by Ctrl+F: the list row (diff) or page section (overview), which text of that row, and where in it.
 #[derive(Clone)]
 struct Hit { row: usize, part: usize, range: Range<usize> }
-struct Comp { editing: Option<i64>, global: bool, preview: bool }
+struct Comp { editing: Option<i64>, global: bool, preview: bool, host: Option<HostTarget> }
 
 #[derive(Clone)]
 struct RLine { line: Line, runs: Vec<(Range<usize>, HighlightStyle)> }
 #[derive(Clone)]
 struct CItem { key: String, author: String, body: String, draft: Option<i64>, ai: bool, resolved: bool, outdated: bool, replies: Vec<(String, String)>, /// the code a suggestion in the body replaces
     orig: Option<String>, /// new-file lines the comment is about
-    range: Option<(u32, u32)> }
+    range: Option<(u32, u32)>, /// set for threads that live on the host
+    host: Option<HostThread> }
+/// What the card needs to act on a host thread.
+#[derive(Clone)]
+struct HostThread { id: String, resolve_id: Option<String>, comment_ids: Vec<String> }
+#[derive(Clone)]
+enum HostTarget { Reply(String), Edit(String, String) }
 /// A collapsed comment: drawn as an icon in the line-number gutter of the line it belongs to.
 #[derive(Clone)]
 struct Mark { key: String, draft: bool, resolved: bool, range: Option<(u32, u32)> }
@@ -53,10 +61,13 @@ enum RowKind { FileHeader, /// one block of a rendered Markdown file shown insid
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32>, marks: Vec<Mark> }
 
-pub enum ViewEvent { Home, OpenSettings, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
+pub enum ViewEvent { Home, OpenSettings, MoveHead { url: String, old_head: String }, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
 impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
+    /// Comment ids you have 👍-ed on the host, and the ids that set was fetched for.
+    liked: HashSet<String>, likes_for: Vec<String>,
+    new_head: Option<String>, head_dismissed: bool, rev_open: bool, rev_in: Input, me: Option<String>, keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_files: bool, pal_in: Input, pal_idx: usize, help_open: bool,
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
     refreshing: bool, md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
@@ -114,10 +125,11 @@ impl View {
         if let Some(d) = presets.effective_default(&project) { f0 = d.filter.clone(); s0 = d.sort.clone(); let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
         // what the user last typed in this review wins over the preset default (even when they cleared it)
         if let Ok(Some((f, s))) = m.store.ui(m.vm.review) { f0 = f; s0 = s; let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
-        m.vm.sync_review_state(&m.store); let _ = m.vm.refresh();
+        m.vm.sync_review_state(&m.store); if let Ok(g) = m.store.load_groups(m.vm.review) { m.vm.set_manual_paths(g); } let _ = m.vm.refresh();
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
-        let mut v = View { refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        let (keys, key_err) = extra::load_keys(settings.vim_keys);
+        let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
@@ -125,10 +137,12 @@ impl View {
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
             verdict: Verdict::Comment, submit_busy: false, submit_msg: None, threads: vec![], ci: String::new(), snap: Snapshot { state: mr_state, ..Default::default() }, local_mr: None, notices: vec![], presets, project, settings, m };
+        if let Some(e) = key_err { v.note(NKind::Warning, e, None); }
         v.report_moved(); v
     }
     pub fn key_id(&self) -> String { self.m.remote.clone().map(|u| format!("remote:{u}")).unwrap_or_else(|| format!("local:{}#{}", self.m.repo.display(), self.m.branch)) }
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
+    fn save_groups(&self) { let _ = self.m.store.save_groups(self.m.vm.review, &self.m.vm.manual_paths()); }
     fn save_settings(&self) { model::save_settings(&self.settings); }
     fn note(&mut self, kind: NKind, t: impl Into<String>, key: Option<&'static str>) { self.notices.push((kind, t.into(), key)); }
     fn flush(&mut self, cx: &mut Context<Self>) { for (k, t, d) in std::mem::take(&mut self.notices) { cx.emit(ViewEvent::Notice(k, t, d)); } }
@@ -144,7 +158,8 @@ impl View {
     pub fn is_remote(&self) -> bool { self.m.mr.is_some() }
     /// Opens the Finish review dialog (used by the leave prompt's Submit choice).
     pub fn begin_finish(&mut self, cx: &mut Context<Self>) { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; cx.notify(); }
-    pub fn apply_settings(&mut self, s: Settings) {
+    pub fn apply_settings(&mut self, s: Settings, fonts: Fonts) {
+        self.fonts = fonts; self.keys = extra::load_keys(s.vim_keys).0;
         let regroup = s.group_related != self.settings.group_related || s.group_rules != self.settings.group_rules || s.files_tree != self.settings.files_tree;
         let diff_changed = s.diff_mode != self.settings.diff_mode;
         self.theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme);
@@ -187,8 +202,10 @@ impl View {
         let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None, marks: vec![] };
         for &fi in &batch {
             let f = self.m.vm.files[fi].clone();
-            let old = perusal_gitops::show(&self.m.repo, &self.m.base_sha, &f.path).unwrap_or_default();
-            let new = perusal_gitops::show(&self.m.repo, &self.m.branch, &f.path).unwrap_or_default();
+            // with a commit or range selected in the graph the diff shows only that range's changes
+            let (old_rev, new_rev) = self.diff_revs();
+            let old = perusal_gitops::show(&self.m.repo, &old_rev, &f.path).unwrap_or_default();
+            let new = perusal_gitops::show(&self.m.repo, &new_rev, &f.path).unwrap_or_default();
             if batch.len() == 1 && self.md_rendered && !f.symlink {
                 let src = if new.is_empty() { old } else { new }; self.md = Some(markdown::parse_located(&src)); self.md_src = src; self.base.clear(); self.rows.clear(); return;
             }
@@ -243,14 +260,15 @@ impl View {
         let path = &self.m.vm.files[fi].path; let mut out = vec![];
         for t in self.threads.iter().filter(|t| t.path.as_deref() == Some(path.as_str())) {
             let (author, body) = t.comments.first().cloned().unwrap_or_default();
-            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect(), orig: None, range: t.line.map(|l| (l, l)) }));
+            out.push((t.line, CItem { key: format!("t:{}", t.id), author, body, draft: None, ai: false, resolved: t.resolved, outdated: false, replies: t.comments.iter().skip(1).cloned().collect(), orig: None, range: t.line.map(|l| (l, l)),
+                host: Some(HostThread { id: t.id.clone(), resolve_id: self.m.mr.as_ref().and_then(|r| t.resolve_id(r.kind).map(String::from)), comment_ids: t.comment_ids.clone() }) }));
         }
         for d in self.m.store.drafts(self.m.vm.review).unwrap_or_default().into_iter().filter(|d| d.file.as_deref() == Some(path.as_str())) {
             let orig = (d.body.contains("```suggestion")).then(|| d.start_line.zip(d.end_line).and_then(|(a, b)| {
                 let t = perusal_gitops::show(&self.m.repo, &self.m.branch, path)?;
                 let v: Vec<&str> = t.lines().skip(a.saturating_sub(1) as usize).take((b + 1).saturating_sub(a) as usize).collect(); (!v.is_empty()).then(|| v.join("\n"))
             })).flatten();
-            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![], orig, range: d.end_line.or(d.start_line).map(|e| (d.start_line.unwrap_or(e).min(e), e)) }));
+            out.push((d.end_line.or(d.start_line), CItem { key: format!("d:{}", d.id), author: "You".into(), body: d.body, draft: Some(d.id), ai: d.ai, resolved: false, outdated: false, replies: vec![], orig, range: d.end_line.or(d.start_line).map(|e| (d.start_line.unwrap_or(e).min(e), e)), host: None }));
         }
         out
     }
@@ -321,10 +339,11 @@ impl View {
             let fi = self.current_file()?; let (lo, hi) = (a.min(b), a.max(b));
             let (first, last) = (blocks.get(lo)?.first_line, blocks.get(hi)?.last_line);
             let snippet: String = self.md_src.lines().skip(first.saturating_sub(1) as usize).take((last + 1 - first) as usize).collect::<Vec<_>>().join("\n");
-            return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: first, end: last, snippet });
+            return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: first, end: last, snippet, old_side: false });
         }
         let (a, b) = self.sel?; let fi = self.rows.iter().find(|r| r.ord == Some(a))?.fi;
         let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
+        let (mut olo, mut ohi) = (u32::MAX, 0u32);
         for r in self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)) {
             if let RowKind::MdBlock(lb) = &r.kind {
                 lo = lo.min(lb.first_line); hi = hi.max(lb.last_line);
@@ -333,11 +352,13 @@ impl View {
             }
             let lines: Vec<&Line> = match &r.kind { RowKind::Uni(l) => vec![&l.line], RowKind::Split(l, rr) => l.iter().chain(rr.iter()).map(|x| &x.line).collect(), _ => vec![] };
             for l in lines {
-                if let Some(n) = l.new_no.or(l.old_no) { lo = lo.min(n); hi = hi.max(n); }
+                if let Some(n) = l.new_no { lo = lo.min(n); hi = hi.max(n); } else if let Some(n) = l.old_no { olo = olo.min(n); ohi = ohi.max(n); }
                 snippet.push_str(match l.kind { Kind::Added => "+", Kind::Removed => "-", Kind::Context => " " }); snippet.push_str(&l.text); snippet.push('\n');
             }
         }
-        (hi > 0).then(|| Selection { file: self.m.vm.files[fi].path.clone(), start: lo, end: hi, snippet })
+        // only removed lines selected: the comment belongs on the old side; mixed selections anchor on their new lines
+        if hi == 0 && ohi > 0 { return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: olo, end: ohi, snippet, old_side: true }); }
+        (hi > 0).then(|| Selection { file: self.m.vm.files[fi].path.clone(), start: lo, end: hi, snippet, old_side: false })
     }
     /// The selected lines as they will look after the change (for suggested edits).
     fn selection_new_text(&self) -> Option<String> {
@@ -423,19 +444,40 @@ impl View {
     fn open_composer(&mut self, global: bool, editing: Option<i64>) {
         let text = editing.and_then(|id| self.m.store.drafts(self.m.vm.review).ok().and_then(|d| d.into_iter().find(|x| x.id == id)).map(|d| d.body)).unwrap_or_default();
         self.comment.f.set(&text); self.comment.f.multiline = true;
-        self.composer = Some(Comp { editing, global, preview: false }); self.focus = Some(Fid::Comment);
+        self.composer = Some(Comp { editing, global, preview: false, host: None }); self.focus = Some(Fid::Comment);
     }
     fn save_composer(&mut self, cx: &mut Context<Self>) { self.save_composer_with(false, cx); }
     /// Saves the comment as a draft; with `publish` it is also posted to the host right away (remote reviews).
     fn save_composer_with(&mut self, publish: bool, cx: &mut Context<Self>) {
         let text = self.comment.f.text.trim().to_string(); if text.is_empty() { return; }
         let Some(c) = self.composer.take() else { return };
+        if let Some(h) = c.host {
+            self.comment.f.clear(); self.focus = None;
+            let act = match h { HostTarget::Reply(thread) => model::HostAct::Reply { thread, body: text }, HostTarget::Edit(thread, comment) => model::HostAct::Edit { thread, comment, body: text } };
+            self.host_act(act, cx); return;
+        }
         let mut added: Option<i64> = None;
         if let Some(id) = c.editing { let _ = self.m.store.edit_draft(id, &text); self.note(NKind::Success, "Comment updated.", None); if publish { added = Some(id); } }
         else {
-            let sel = if c.global { None } else { self.selection() };
+            let mut sel = if c.global { None } else { self.selection() };
+            // while scoped to commits, line numbers belong to that commit's version: map them onto the review head or refuse
+            if let Some(s) = sel.as_mut() {
+                if self.m.vm.commit_scope.is_some() { if let Some((_, new_rev)) = self.m.graph.revs() {
+                    let mapped = if s.old_side { None } else {
+                        let (a, b) = (perusal_gitops::show(&self.m.repo, &new_rev, &s.file).unwrap_or_default(), perusal_gitops::show(&self.m.repo, &self.m.branch, &s.file).unwrap_or_default());
+                        perusal_diff::text::reanchor(&a, &b, (s.start, s.end))
+                    };
+                    match mapped {
+                        Some((a, b)) => { s.start = a; s.end = b; }
+                        None => {
+                            self.note(NKind::Warning, "Those lines were changed by a later commit, so the comment cannot be placed on the review head. Clear the commit scope (x) and comment there.", None);
+                            self.open_composer(false, None); self.comment.f.set(&text); return;
+                        }
+                    }
+                } }
+            }
             match (sel, self.current_file(), c.global) {
-                (Some(s), _, _) => { added = self.m.store.add_draft(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false).ok(); self.note(NKind::Success, format!("Draft added on {}:{}-{}", s.file, s.start, s.end), None); }
+                (Some(s), _, _) => { added = self.m.store.add_draft_side(self.m.vm.review, Some(&s.file), Some((s.start, s.end)), &text, false, s.old_side).ok(); self.note(NKind::Success, format!("Draft added on {}:{}-{}{}", s.file, s.start, s.end, if s.old_side { " (removed lines)" } else { "" }), None); }
                 (None, Some(fi), false) => { let path = self.m.vm.files[fi].path.clone(); added = self.m.store.add_draft(self.m.vm.review, Some(&path), None, &text, false).ok(); self.note(NKind::Success, format!("Draft added on {path}"), None); }
                 _ => { added = self.m.store.add_draft(self.m.vm.review, None, None, &text, false).ok(); self.note(NKind::Success, "Draft added on the merge request.", None); }
             }
@@ -448,10 +490,14 @@ impl View {
     fn next(&mut self) { self.m.vm.next(&self.m.store); self.reload(); }
     fn back(&mut self) { self.m.vm.back(); self.reload(); }
     fn step(&mut self, d: i32) { let n = self.m.vm.batch_count() as i32; if n > 0 { self.m.vm.cursor = (self.m.vm.cursor as i32 + d).rem_euclid(n) as usize; self.reload(); } }
+    /// (old, new) revisions the diff compares: the whole review, or the commit range selected in the graph.
+    fn diff_revs(&self) -> (String, String) {
+        match self.m.vm.commit_scope.as_ref().and(self.m.graph.revs()) { Some(r) => r, None => (self.m.base_sha.clone(), self.m.branch.clone()) }
+    }
     fn clear_scope(&mut self) { self.m.graph.clear(); self.m.vm.commit_scope = None; let _ = self.m.vm.refresh(); self.reload(); }
-    fn pick_commit(&mut self, i: usize) { self.page = Page::Code;
-        if self.m.graph.selection == Some((i, i)) { self.clear_scope(); return; }
-        self.m.graph.click(i); self.m.vm.commit_scope = self.m.graph.scope(&self.m.repo).ok().flatten(); let _ = self.m.vm.refresh(); self.reload();
+    fn pick_commit(&mut self, i: usize, shift: bool) { self.page = Page::Code;
+        if self.m.graph.selection == Some((i, i)) && !shift { self.clear_scope(); return; }
+        match (shift, self.m.graph.selection) { (true, Some((a, _))) => self.m.graph.select_range(a, i), _ => self.m.graph.click(i) } self.m.vm.commit_scope = self.m.graph.scope(&self.m.repo).ok().flatten(); let _ = self.m.vm.refresh(); self.reload();
     }
     fn set_diff_mode(&mut self, m: DiffMode) { if self.diff_mode != m { self.diff_mode = m; self.shown = None; self.clear_selection(); } }
     fn click_file(&mut self, fi: usize, mods: gpui::Modifiers) {
@@ -466,7 +512,7 @@ impl View {
     fn group_multi(&mut self) {
         let order = self.display_order(); let mut members: Vec<usize> = order.into_iter().filter(|i| self.multi.contains(i)).collect();
         if members.len() < 2 { return; }
-        members.dedup(); self.m.vm.group_files_manually(members); self.multi.clear(); self.reload();
+        members.dedup(); self.m.vm.group_files_manually(members); self.save_groups(); self.multi.clear(); self.reload();
         self.note(NKind::Info, "Grouped into one batch. Viewing it shows every file together.", None);
     }
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
@@ -479,6 +525,8 @@ impl View {
             Some(Fid::Filter) => { let t = self.m.vm.filter.clone(); self.filter.f.set(&t); }
             Some(Fid::Sort) => { let t = self.m.vm.sort.clone(); self.sort.f.set(&t); }
             Some(Fid::Rename) => { self.commit_rename(cx); }
+            Some(Fid::Palette) => { self.palette_open = false; }
+            Some(Fid::Reviewers) => { self.rev_open = false; }
             _ => {}
         }
         self.focus = None; self.sug.clear(); self.presets_open = false; self.error = None; self.sort_open = false; if !self.gen_busy { self.gen_for = None; }
@@ -577,11 +625,15 @@ impl View {
             self.note(kind, e.body.clone(), e.important.then_some(e.key));
         }
         if now.head != self.m.branch && prev.head == self.m.branch { /* surfaced once as a notice above; the review stays pinned */ }
+        let nh = (self.m.mr.is_some() && !now.head.is_empty() && now.head != self.m.branch).then(|| now.head.clone());
+        if nh != self.new_head { self.head_dismissed = false; self.new_head = nh; }
         self.m.mr_state = now.state.clone(); let _ = self.m.store.set_mr_state(self.m.vm.review, &now.state);
         let ci = now.ci.clone().unwrap_or_default();
         if ci != self.ci { self.ci = ci.clone(); cx.emit(ViewEvent::Ci(ci)); }
         self.snap = now; self.info = Some(s.info.clone());
-        if s.threads.len() != self.threads.len() || s.threads.iter().zip(&self.threads).any(|(a, b)| a.comments.len() != b.comments.len() || a.resolved != b.resolved) { self.threads = s.threads; self.rebuild_rows(); } else { self.threads = s.threads; }
+        if s.me.is_some() { self.me = s.me.clone(); }
+        if s.threads != self.threads { self.threads = s.threads; self.rebuild_rows(); } else { self.threads = s.threads; }
+        self.refresh_likes(false, cx);
     }
     fn ci_url(&self) -> Option<String> { let w = self.m.web_url.clone()?; Some(perusal_providers::ci_page(&self.m.mr.as_ref()?.kind, &w)) }
 
@@ -743,6 +795,7 @@ impl View {
         let (mut comments, mut general) = (vec![], vec![]);
         for d in drafts {
             match (&d.file, d.start_line, d.end_line) {
+                (Some(f), Some(a), Some(b)) if d.old_side => comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old: a, end_old: b, old_side: true }),
                 (Some(f), Some(a), Some(b)) => {
                     let (old, new) = (perusal_gitops::show(&self.m.repo, &self.m.base_sha, f).unwrap_or_default(), perusal_gitops::show(&self.m.repo, &self.m.branch, f).unwrap_or_default());
                     let (start_old, end_old) = (perusal_diff::text::old_line_for_new(&old, &new, a), perusal_diff::text::old_line_for_new(&old, &new, b));
@@ -752,7 +805,7 @@ impl View {
                         let at = if a == b { format!("{f}:{a}") } else { format!("{f}:{a}-{b}") };
                         summary.push_str(&format!("\n\n**{at}**: {}", d.body));
                     } else {
-                        comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old })
+                        comments.push(InlineComment { path: f.clone(), start_line: a, end_line: b, body: d.body, start_old, end_old, old_side: false })
                     }
                 }
                 (Some(f), _, _) => { summary.push_str(&format!("\n\n**{f}**: {}", d.body)); }
@@ -815,6 +868,7 @@ impl View {
     pub fn key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &ev.keystroke; let key = ks.key.as_str();
         let ctrl = ks.modifiers.control || ks.modifiers.platform;
+        if self.help_open { self.help_open = false; cx.notify(); return; }
         if ctrl && key == "f" { self.open_find(cx); return; }
         if self.finish_open && self.focus != Some(Fid::Summary) { if key == "escape" { self.finish_open = false; cx.notify(); } return; }
         if let Some(f) = self.focus {
@@ -841,27 +895,23 @@ impl View {
                 },
                 Fid::Gen => { if key == "escape" { self.gen_for = None; self.focus = None; } else if key == "enter" { self.start_gen(cx); } else { field_key(&mut self.gen.f, ks, cx); } }
                 Fid::Rename => { if key == "escape" { let t = self.m.title.clone(); self.rename.f.set(&t); self.focus = None; } else if key == "enter" { self.commit_rename(cx); self.focus = None; } else { field_key(&mut self.rename.f, ks, cx); } }
+                Fid::Palette => self.palette_key(key, ks, cx),
+                Fid::Reviewers => self.reviewers_key(key, ks, cx),
             }
             self.flush(cx); cx.notify(); return;
         }
-        if ctrl { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), "0" => self.zoom = theme::zoom(self.zoom, 0), _ => {} } cx.notify(); return; }
-        // pages: O switches; any code-navigation key from the overview goes to the code first
-        if key == "o" && self.info.is_some() { self.page = if self.page == Page::Overview { Page::Code } else { Page::Overview }; cx.notify(); return; }
-        if self.page == Page::Overview && matches!(key, "n" | "p" | "enter" | "backspace" | "v" | "u" | "m" | "x") { self.page = Page::Code; }
-        match key {
-            "escape" => { if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; } }
-            "/" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
-            "c" => { self.open_composer(self.page == Page::Overview && self.info.is_some(), None); }
-            "a" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
-            "s" => { cx.emit(ViewEvent::OpenSettings); }
-            "f" if !self.instant() => { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; }
-            "m" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
-            "r" | "f5" => self.refresh(cx),
-            "u" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
-            "v" => self.toggle_viewed(), "enter" => self.next(), "backspace" => self.back(),
-            "t" => self.toggle_tree(), "n" => self.step(1), "p" => self.step(-1), "x" => self.clear_scope(),
-            "g" => { self.settings.group_related = !self.settings.group_related; self.save_settings(); self.m.vm.grouping = self.settings.group_related; let _ = self.m.vm.refresh(); self.reload(); }
-            _ => {}
+        if ctrl && matches!(key, "=" | "+" | "-" | "0") { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), _ => self.zoom = theme::zoom(self.zoom, 0) } cx.notify(); return; }
+        if key == "f5" { self.refresh(cx); }
+        else if key == "escape" {
+            if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; }
+        } else {
+            let name = perusal_app::keymap::press_name(ctrl, ks.modifiers.alt, ks.modifiers.shift, key, ks.key_char.as_deref());
+            if let Some(a) = perusal_app::keymap::action_for(&self.keys, &name).map(str::to_string) {
+                // pages: any code-navigation key from the overview goes to the code first
+                if self.page == Page::Overview && matches!(a.as_str(), "next_file" | "prev_file" | "next_batch" | "prev_batch" | "toggle_viewed" | "toggle_split" | "toggle_markdown" | "clear_scope") { self.page = Page::Code; }
+                self.run_action(&a, cx);
+            }
+            else if ctrl { return; }
         }
         self.flush(cx); cx.notify();
     }
@@ -900,7 +950,7 @@ impl Render for View {
         let footer = div().flex().items_center().gap_4().px_4().py(px(5.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
             .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("o", "overview"), ("s", "settings"), ("Esc", "home")]
                 .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l)));
-        let overlay = self.finish_open.then(|| self.finish_overlay(cx));
+        let overlay = if self.rev_open { Some(self.reviewers_overlay(cx)) } else if self.help_open { Some(self.help_overlay(cx)) } else if self.palette_open { Some(self.palette_overlay(cx)) } else { self.finish_open.then(|| self.finish_overlay(cx).into_any_element()) };
 
         let side = |w: f32, open: bool, s: Side, cx: &mut Context<Self>, el: AnyElement| {
             let col = div().h_full().flex().flex_col().flex_none().bg(p.surface).overflow_hidden().child(el);
@@ -915,7 +965,7 @@ impl Render for View {
         div().relative().size_full().flex().flex_col().bg(p.bg).text_color(p.fg).text_size(px(14.0 * z))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.blur(cx); cx.notify(); }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen] { i.dragging = false; }
+                this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen, &mut this.pal_in, &mut this.rev_in] { i.dragging = false; }
                 if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
                 this.hb_drag = None;
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
@@ -937,7 +987,7 @@ impl Render for View {
                     let frac = ((y - oy - grab) / travel).clamp(0.0, 1.0); this.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.notify();
                 }
             }))
-            .child(top).child(progress).child(filter)
+            .child(top).children(self.head_banner(cx)).child(progress).child(filter)
             .child(div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol))
             .child(footer)
             .children(overlay)
@@ -957,9 +1007,11 @@ impl View {
             Fid::Gen => wire_input(el, cx, |t| &mut t.gen, |t, _| { t.focus = Some(Fid::Gen); }, ui, false),
             Fid::Rename => wire_input(el, cx, |t| &mut t.rename, |t, _| { t.focus = Some(Fid::Rename); }, ui, false),
             Fid::Find => wire_input(el, cx, |t| &mut t.find_in, |t, _| { t.focus = Some(Fid::Find); }, ui, false),
+            Fid::Palette => wire_input(el, cx, |t| &mut t.pal_in, |t, _| { t.focus = Some(Fid::Palette); }, ui, false),
+            Fid::Reviewers => wire_input(el, cx, |t| &mut t.rev_in, |t, _| { t.focus = Some(Fid::Reviewers); }, ui, false),
         }
     }
-    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename, Fid::Gen => &self.gen, Fid::Find => &self.find_in } }
+    fn input_of(&self, id: Fid) -> &Input { match id { Fid::Filter => &self.filter, Fid::Sort => &self.sort, Fid::Comment => &self.comment, Fid::Ask => &self.ask, Fid::Summary => &self.summary, Fid::Preset => &self.preset_name, Fid::Rename => &self.rename, Fid::Gen => &self.gen, Fid::Find => &self.find_in, Fid::Palette => &self.pal_in, Fid::Reviewers => &self.rev_in } }
     fn rail(&mut self, s: Side, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.pal;
         let (i, t) = if s == Side::Left { (ic::CHEVRON_RIGHT, "Show the files panel") } else { (ic::CHEVRON_LEFT, "Show the review panel") };
@@ -996,6 +1048,7 @@ impl View {
             .children(self.refreshing.then(|| kit::indeterminate_bar(&p)))
             .child(if reviewing { icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element() }
                 else { icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element() })
+            .when(self.m.mr.is_some(), |d| d.child(icon_btn("req-review", ic::PERSON_ADD, "Request a review from someone", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.rev_open = true; this.rev_in.f.clear(); this.focus = Some(Fid::Reviewers); cx.stop_propagation(); cx.notify(); }))))
             .child(icon_btn("settings", ic::SETTINGS, "Settings (s)", Btn::Secondary, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings))))
     }
 
@@ -1171,8 +1224,8 @@ impl View {
                 else { tip(icon_text_btn("grp-multi", ic::LINK, "Review together", Btn::Primary, &p).opacity(0.4).cursor_default(), "Select at least two files to review them together", &p) })
             .child(icon_btn("clr-multi", ic::CLOSE, "Clear selection", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.multi.clear(); cx.notify(); }))));
         let hint = (n == 0 && n_files > 1 && self.m.vm.commit_scope.is_none()).then(|| div().px_3().py(px(4.0)).text_xs().text_color(p.muted).border_b_1().border_color(p.border).child("Ctrl+click or Shift+click files to review them together"));
-        let scope = self.m.graph.selection.filter(|_| self.m.vm.commit_scope.is_some()).and_then(|(a, _)| self.m.graph.rows.get(a).cloned()).map(|r| div().flex().items_center().gap_2().px_3().py(px(6.0)).bg(p.accent.opacity(0.12)).border_b_1().border_color(p.border)
-            .child(icon(ic::COMMIT, 17.0, p.accent)).child(div().flex_1().min_w_0().truncate().text_sm().child(format!("Only commit {} · {} file{}", &r.sha[..7.min(r.sha.len())], n_files, if n_files == 1 { "" } else { "s" })))
+        let scope = self.m.graph.selection.filter(|_| self.m.vm.commit_scope.is_some()).and_then(|(a, b)| self.m.graph.rows.get(a).cloned().map(|r| (r, b - a + 1))).map(|(r, span)| div().flex().items_center().gap_2().px_3().py(px(6.0)).bg(p.accent.opacity(0.12)).border_b_1().border_color(p.border)
+            .child(icon(ic::COMMIT, 17.0, p.accent)).child(div().flex_1().min_w_0().truncate().text_sm().child(format!("{} {} · {} file{}", if span > 1 { format!("Only {span} commits up to") } else { "Only commit".to_string() }, &r.sha[..7.min(r.sha.len())], n_files, if n_files == 1 { "" } else { "s" })))
             .child(icon_btn("scope-x", ic::CLOSE, "Show all commits (x)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.clear_scope(); cx.notify(); }))));
         div().flex().flex_col().size_full().child(header).children(scope).children(bar).children(hint).child(list)
     }
@@ -1180,10 +1233,10 @@ impl View {
     /// One row of the diff list (a code line, a hunk marker, a note or a comment card).
     fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(r) = self.rows.get(ix).cloned() else { return div().into_any_element() };
-        let p = self.pal; let h = px(20.0 * self.zoom); let fsz_f = 13.0 * self.zoom; let fsz = px(fsz_f); let mono = self.fonts.mono.clone();
+        let p = self.pal; let h = px(20.0 * self.zoom * self.settings.line_height); let fsz_f = 13.0 * self.zoom; let fsz = px(fsz_f); let mono = self.fonts.mono.clone();
         let fi = r.fi; let st = self.m.vm.files[fi].status;
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
-        let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).text_size(fsz).text_color(p.fg);
+        let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).when(!self.settings.ligatures, |d| d.font_features(gpui::FontFeatures::disable_ligatures())).text_size(fsz).text_color(p.fg);
         let hx = self.hx; let hxt = self.hx_text.clone();
         let found = self.hits_in_row(ix);
         let code = |rl: &RLine, part: usize| -> gpui::Div {
@@ -1264,6 +1317,9 @@ impl View {
         let (k1, k2) = (c.key.clone(), c.key.clone()); let id = SharedString::from(c.key.clone());
         let first_line: String = c.body.lines().next().unwrap_or("").chars().take(120).collect();
         let draft = c.draft; let orig = c.orig.clone(); let who_c = self.who(&c.author);
+        let host = c.host.clone(); let mine = self.me.as_deref().map(|m| m == c.author).unwrap_or(false);
+        let kind_of = self.m.mr.as_ref().map(|r| r.kind).unwrap_or(perusal_providers::Kind::GitHub);
+        let me = self.me.clone();
         let body = |text: &str| -> AnyElement { if raw { div().font_family(mono.clone()).text_sm().whitespace_normal().child(text.to_string()).into_any_element() } else { kit::markdown_view_ctx(&markdown::parse(text), &p, &mono, orig.as_deref()).text_sm().into_any_element() } };
         let accent = if c.draft.is_some() { p.warn } else if c.resolved { p.success } else { p.accent };
         div().flex().w_full().px_2().py(px(4.0)).child(
@@ -1278,11 +1334,16 @@ impl View {
                     .when(!c.replies.is_empty(), |d| d.child(div().text_xs().text_color(p.muted).child(format!("{} repl{}", c.replies.len(), if c.replies.len() == 1 { "y" } else { "ies" }))))
                     .child(div().flex_1().min_w_0().truncate().text_xs().text_color(p.muted).when(collapsed, |d| d.child(first_line)))
                     .child(icon_btn(SharedString::from(format!("raw-{}", c.key)), if raw { ic::PREVIEW } else { ic::CODE }, if raw { "Show the rendered comment" } else { "Show the raw Markdown" }, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { if !this.raw_c.remove(&k2) { this.raw_c.insert(k2.clone()); } this.rebuild_rows(); cx.notify(); })))
+                    .children(host.clone().map(|h| self.thread_buttons(&c.key, &h, c.resolved, mine, kind_of, cx)))
                     .children(draft.map(|d| icon_btn(SharedString::from(format!("ed-{d}")), ic::EDIT, "Edit this comment", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.open_composer(false, Some(d)); cx.stop_propagation(); cx.notify(); }))))
                     .children(draft.filter(|_| instant).map(|d| icon_btn(SharedString::from(format!("pub-{d}")), ic::SEND, "Publish this draft now", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.publish_draft(d, cx); cx.stop_propagation(); cx.notify(); }))))
                     .children(draft.map(|d| icon_btn(SharedString::from(format!("rm-{d}")), ic::DELETE, "Delete this draft", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { let _ = this.m.store.delete_draft(d); this.resync(); cx.stop_propagation(); cx.notify(); })))))
                 .when(!collapsed, |d| d.child(div().flex().flex_col().gap_2().px_3().py_2().child(body(&c.body))
-                    .children(c.replies.iter().map(|(a, t)| div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(p.border).child(div().flex().items_center().gap_2().child(kit::avatar(a, 20.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(a.clone()))).child(body(t))).collect::<Vec<_>>())))
+                    .children(c.replies.iter().enumerate().map(|(i, (a, t))| {
+                        let own = me.as_deref() == Some(a.as_str()); let ids = host.clone().map(|h| (h.id, h.comment_ids.get(i + 1).cloned()));
+                        let btns = if own { ids.map(|(tid, cid)| self.reply_buttons(&c.key, i, tid, cid, t, cx)) } else { None };
+                        div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(p.border).child(div().flex().items_center().gap_2().child(kit::avatar(a, 20.0)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).flex_1().child(a.clone())).children(btns)).child(body(t))
+                    }).collect::<Vec<_>>())))
         ).id(id)
     }
 
@@ -1429,7 +1490,7 @@ impl View {
                 .child(div().flex().items_center().gap_2().text_xs().font_family(mono.clone()).child(div().text_color(p.success).child(format!("+{adds}"))).child(div().text_color(p.danger).child(format!("−{dels}"))).child(diff_squares(adds, dels, &p, 10.0)));
             if let Some(s) = sym { h = h.child(s); }
             if ncomments > 0 { h = h.child(icon_btn("collapse-c", ic::UNFOLD_LESS, "Collapse or expand all comments in this file", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.collapse_all_comments(); cx.notify(); }))); }
-            if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.reload(); } cx.notify(); }))); }
+            if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.save_groups(); this.reload(); } cx.notify(); }))); }
             h
         });
 
@@ -1507,7 +1568,8 @@ impl View {
         let c = self.composer.as_ref().map(|c| (c.editing, c.global, c.preview)).unwrap_or((None, false, false));
         let (editing, global, preview) = c;
         let sel = if global || editing.is_some() { None } else { self.selection() };
-        let target: SharedString = if editing.is_some() { "Edit comment".into() } else if global { "Comment on the whole merge request".into() } else { match (&sel, self.current_file()) { (Some(s), _) => format!("Comment on {}:{}–{}", s.file, s.start, s.end), (None, Some(fi)) => format!("Comment on {} (select lines first to anchor it)", self.m.vm.files[fi].path), _ => "General comment".into() }.into() };
+        let host_label = self.composer.as_ref().and_then(|c| c.host.as_ref()).map(|h| match h { HostTarget::Reply(_) => ("Reply to this thread (posted immediately)", "Reply"), HostTarget::Edit(..) => ("Edit your posted comment (updated on the host immediately)", "Save edit") });
+        let target: SharedString = if let Some((t, _)) = host_label { t.into() } else if editing.is_some() { "Edit comment".into() } else if global { "Comment on the whole merge request".into() } else { match (&sel, self.current_file()) { (Some(s), _) => format!("Comment on {}:{}–{}", s.file, s.start, s.end), (None, Some(fi)) => format!("Comment on {} (select lines first to anchor it)", self.m.vm.files[fi].path), _ => "General comment".into() }.into() };
         let has_new = sel.is_some() && self.selection_new_text().is_some();
         let focused = self.focus == Some(Fid::Comment);
         let tb = |id: &'static str, i: ic::Icon, t: &'static str, cx: &mut Context<Self>, f: fn(&mut TextField2)| icon_btn(id, i, t, Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.focus = Some(Fid::Comment); f(&mut this.comment.f); cx.stop_propagation(); cx.notify(); }));
@@ -1535,8 +1597,8 @@ impl View {
             .child(div().mx_3().rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).child(editor))
             .child(div().flex().items_center().gap_2().px_3().py_2().child(div().flex_1().min_w_0().truncate().text_xs().text_color(p.muted).child("Ctrl+Enter saves a draft. Markdown and ```suggestion blocks are supported."))
                 .child(icon_text_btn("cmp-cancel", ic::CLOSE, "Cancel", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.composer = None; this.focus = None; cx.stop_propagation(); cx.notify(); })))
-                .children((self.m.mr.is_some() && !self.instant()).then(|| icon_text_btn("cmp-publish", ic::SEND, "Publish now", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer_with(true, cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
-                .child(icon_text_btn("cmp-save", ic::CHECK, if editing.is_some() { "Save changes" } else { "Add draft" }, Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer(cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
+                .children((self.m.mr.is_some() && !self.instant() && host_label.is_none()).then(|| icon_text_btn("cmp-publish", ic::SEND, "Publish now", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer_with(true, cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
+                .child(icon_text_btn("cmp-save", ic::CHECK, if let Some((_, b)) = host_label { b } else if editing.is_some() { "Save changes" } else { "Add draft" }, Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_composer(cx); this.flush(cx); cx.stop_propagation(); cx.notify(); }))))
     }
 
     fn right_panel(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft]) -> impl IntoElement {
@@ -1563,7 +1625,7 @@ impl View {
         let commit_rows: Vec<_> = self.m.graph.rows.iter().enumerate().map(|(i, r)| {
             let sel = self.m.graph.selection.map(|(a, b)| i >= a && i <= b).unwrap_or(false) && self.m.vm.commit_scope.is_some(); let last = i + 1 == self.m.graph.rows.len();
             div().id(("c", i)).flex().gap_2().px_3().cursor_pointer().when(sel, |d| d.bg(p.accent.opacity(0.14))).hover(move |s| s.bg(p.hover))
-                .on_click(cx.listener(move |this, _, _, cx| { if this.m.graph.rows.get(i).map(|r| r.in_mr).unwrap_or(false) { this.pick_commit(i); } cx.notify(); }))
+                .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { if this.m.graph.rows.get(i).map(|r| r.in_mr).unwrap_or(false) { this.pick_commit(i, ev.modifiers().shift); } cx.notify(); }))
                 .child(div().flex().flex_col().items_center().w(px(12.0)).flex_none()
                     .child(div().h(px(8.0)).w(px(2.0)).bg(if i == 0 { gpui::transparent_black() } else { p.border }))
                     .child(div().size(px(10.0)).rounded_full().when(r.in_mr, |d| d.bg(p.accent)).when(!r.in_mr, |d| d.border_2().border_color(p.muted)))

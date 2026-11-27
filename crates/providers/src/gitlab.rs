@@ -34,10 +34,12 @@ impl GitLab {
 /// Draft-note body for one inline comment. A multi-line selection needs `line_range` (start and end line codes);
 /// `new_line` alone anchors the note to its last line only.
 pub fn gitlab_position(c: &InlineComment, base_sha: &Option<String>, head: &str, start_sha: &Option<String>) -> Value {
-    let mut pos = json!({"position_type": "text", "old_path": c.path, "new_path": c.path, "new_line": c.end_line, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha});
+    let mut pos = json!({"position_type": "text", "old_path": c.path, "new_path": c.path, "base_sha": base_sha, "head_sha": head, "start_sha": start_sha});
+    // a comment on a removed line is anchored by its old line number only
+    pos[if c.old_side { "old_line" } else { "new_line" }] = json!(c.end_line);
     if c.start_line < c.end_line {
         let hash = sha1_smol::Sha1::from(c.path.as_bytes()).digest().to_string();
-        let end = |l: u32, o: u32| json!({"line_code": format!("{hash}_{o}_{l}"), "type": "new", "new_line": l});
+        let end = |l: u32, o: u32| if c.old_side { json!({"line_code": format!("{hash}_{l}_0"), "type": "old", "old_line": l}) } else { json!({"line_code": format!("{hash}_{o}_{l}"), "type": "new", "new_line": l}) };
         pos["line_range"] = json!({"start": end(c.start_line, c.start_old), "end": end(c.end_line, c.end_old)});
     }
     json!({"note": c.body, "position": pos})
@@ -61,7 +63,8 @@ impl Provider for GitLab {
             Some(Thread { id: d["id"].as_str().unwrap_or("").into(), path: first.pointer("/position/new_path").and_then(|x| x.as_str()).map(String::from),
                 line: first.pointer("/position/new_line").and_then(|x| x.as_u64()).map(|l| l as u32), resolved: thread_resolved(&notes),
                 comments: notes.iter().map(|n| (n["author"]["username"].as_str().unwrap_or("").into(), n["body"].as_str().unwrap_or("").into())).collect(),
-                avatars: notes.iter().map(|n| n["author"]["avatar_url"].as_str().unwrap_or("").into()).collect() })
+                avatars: notes.iter().map(|n| n["author"]["avatar_url"].as_str().unwrap_or("").into()).collect(),
+                comment_ids: notes.iter().map(|n| n["id"].to_string()).collect(), node_id: None })
         }).collect())
     }
     /// Draft notes then bulk publish. If any step fails, drafts already created are deleted: nothing half-posted.
@@ -118,6 +121,27 @@ impl Provider for GitLab {
     }
     async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
         check(self.req(reqwest::Method::POST, &format!("{}/notes/{comment}/award_emoji", Self::mr(r))).json(&json!({"name": emoji})).send().await).await.map(|_| ())
+    }
+    async fn my_reactions(&self, r: &MrRef, comments: &[String], emoji: &str) -> Result<Vec<String>> {
+        let me = self.current_user().await?;
+        let mut set = tokio::task::JoinSet::new();
+        for c in comments.iter().take(100) {
+            let (g, url, c, emoji, me) = (GitLab { http: self.http.clone(), api: self.api.clone(), token: self.token.clone() }, format!("{}/notes/{c}/award_emoji?per_page=100", Self::mr(r)), c.clone(), emoji.to_string(), me.clone());
+            set.spawn(async move {
+                let list: Vec<Value> = check(g.req(reqwest::Method::GET, &url).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                Ok::<_, Error>(list.iter().any(|x| x["name"].as_str() == Some(emoji.as_str()) && x.pointer("/user/username").and_then(|l| l.as_str()) == Some(me.as_str())).then_some(c))
+            });
+        }
+        let mut out = vec![];
+        while let Some(res) = set.join_next().await { if let Ok(Ok(Some(c))) = res { out.push(c); } }
+        Ok(out)
+    }
+    async fn unreact(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        let me = self.current_user().await?;
+        let list: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("{}/notes/{comment}/award_emoji?per_page=100", Self::mr(r))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let mine = list.iter().find(|x| x["name"].as_str() == Some(emoji) && x.pointer("/user/username").and_then(|l| l.as_str()) == Some(me.as_str())).and_then(|x| x["id"].as_u64());
+        let Some(id) = mine else { return Err(Error::Http(404, "you have not reacted with that".into())) };
+        check(self.req(reqwest::Method::DELETE, &format!("{}/notes/{comment}/award_emoji/{id}", Self::mr(r))).send().await).await.map(|_| ())
     }
     async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
         check(self.req(reqwest::Method::PUT, &format!("{}/notes/{comment}", Self::mr(r))).json(&json!({"body": body})).send().await).await.map(|_| ())
