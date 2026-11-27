@@ -95,7 +95,7 @@ pub struct View {
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds, b_panes: FieldBounds,
     /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
-    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32, zoom_at: Option<Instant>,
+    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32, zoom_at: Option<Instant>, zoom_in_at: Option<Instant>, zoom_ticking: bool,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, md_was: bool, md_jump: bool, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
@@ -163,7 +163,7 @@ impl View {
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
         let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), md_olds: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
-            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, zoom_at: None, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
+            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, zoom_at: None, zoom_in_at: None, zoom_ticking: false, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], md_rendered: false, md_was: false, md_jump: false, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![], saved_pos: None, gutter: HashMap::new(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
@@ -1095,7 +1095,6 @@ impl Render for View {
             .child(if fs { div().flex().flex_1().min_h_0().child(center) } else { div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol) })
             .when(!fs, |d| d.child(footer))
             .children(overlay)
-            .children(self.zoom_pill(cx))
             .child(self.wheel_zoom(cx))
     }
 }
@@ -1518,17 +1517,34 @@ impl View {
             .child(div().absolute().top(px(top)).right(px(2.0)).w(px(8.0)).h(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
     }
 
-    /// Zooms one step (0 resets) and shows the zoom pill for a few seconds.
-    fn step_zoom(&mut self, step: i32, cx: &mut Context<Self>) {
-        self.zoom = theme::zoom(self.zoom, step); self.zoom_at = Some(Instant::now());
-        cx.spawn(async move |this, cx| { cx.background_executor().timer(std::time::Duration::from_millis(4200)).await; let _ = this.update(cx, |_, cx| cx.notify()); }).detach();
+    /// Opacity of the zoom pill: fades in quickly after a change, holds, then fades out; 0 when it is not shown.
+    fn zoom_alpha(&self) -> f32 {
+        let (Some(at), Some(since)) = (self.zoom_at, self.zoom_in_at) else { return 0.0 };
+        let (hold, out) = (3.5, 0.4); let t = at.elapsed().as_secs_f32();
+        if t >= hold + out { return 0.0; }
+        let fade_in = (since.elapsed().as_secs_f32() / 0.15).min(1.0);
+        let fade_out = if t > hold { 1.0 - (t - hold) / out } else { 1.0 };
+        fade_in.min(fade_out).clamp(0.0, 1.0)
     }
-    /// The floating zoom level with a reset button, visible shortly after every zoom change.
+    /// Zooms one step (0 resets) and shows the zoom pill; a ticker repaints while it fades in and out.
+    fn step_zoom(&mut self, step: i32, cx: &mut Context<Self>) {
+        if self.zoom_alpha() <= 0.0 { self.zoom_in_at = Some(Instant::now()); }
+        self.zoom = theme::zoom(self.zoom, step); self.zoom_at = Some(Instant::now());
+        if self.zoom_ticking { return; }
+        self.zoom_ticking = true;
+        cx.spawn(async move |this, cx| { loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
+            let Ok(more) = this.update(cx, |t, cx| { let m = t.zoom_alpha() > 0.0; if !m { t.zoom_ticking = false; } cx.notify(); m }) else { break };
+            if !more { break; }
+        } }).detach();
+    }
+    /// The floating zoom level with a reset button, centred just above the diff's floating panel; fades in and out after every zoom change.
     fn zoom_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = self.pal; self.zoom_at.filter(|t| t.elapsed() < std::time::Duration::from_millis(4000))?;
-        Some(deferred(div().id("zoom-pill").absolute().top(px(56.0)).right(px(16.0)).flex().items_center().gap_1().pl_3().pr_1().py(px(2.0)).rounded_full().bg(p.surface).border_1().border_color(p.border).shadow_md().text_sm().text_color(p.fg)
-            .child(format!("{}%", theme::zoom_percent(self.zoom)))
-            .child(icon_btn("zoom-reset", ic::REFRESH, "Reset zoom (Ctrl+0)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.step_zoom(0, cx); cx.notify(); })))).with_priority(60).into_any_element())
+        let p = self.pal; let a = self.zoom_alpha(); if a <= 0.0 { return None; }
+        Some(div().absolute().bottom(px(78.0)).left_0().right_0().flex().justify_center().child(
+            div().id("zoom-pill").flex().items_center().gap_1().pl_3().pr_1().py(px(2.0)).rounded_full().bg(p.surface).border_1().border_color(p.border).shadow_md().text_sm().text_color(p.fg).opacity(a)
+                .child(format!("{}%", theme::zoom_percent(self.zoom)))
+                .child(icon_btn("zoom-reset", ic::REFRESH, "Reset zoom (Ctrl+0)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.step_zoom(0, cx); cx.notify(); })))).into_any_element())
     }
     /// Ctrl + mouse wheel zooms like Ctrl + / Ctrl -. Registered for the capture phase so the list underneath does not scroll as well.
     fn wheel_zoom(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1720,7 +1736,7 @@ impl View {
                 .child(icon_btn("ov-gcomment", ic::ADD_COMMENT, "Comment on the whole merge request (c)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))
                 .children((!self.instant()).then(|| icon_text_btn("ov-finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
-        div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(page).child(bar).children(composer).into_any_element()
+        div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(page).child(bar).children(self.zoom_pill(cx)).children(composer).into_any_element()
     }
 
     fn code_center(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1804,7 +1820,7 @@ impl View {
                 .children(show_finish.then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
 
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
-        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(toolbar).child(bar);
+        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(toolbar).child(bar).children(self.zoom_pill(cx));
         div().relative().flex().flex_col().flex_1().min_w_0().min_h_0().children(header).child(wrap).children(composer)
     }
 

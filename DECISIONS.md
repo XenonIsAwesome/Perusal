@@ -135,4 +135,4 @@
 - Reopening a review lands on the file and commit range the reviewer last had open (`review_pos` table, saved whenever the shown batch changes, commits stored by hash so they survive a head move; a file or commit that no longer exists is ignored).
 - Picture viewer review fixes: each tile is sized from its own picture's dimensions (a smaller old picture is no longer enlarged into the new one's box); a renamed picture's old side is read from its old path (`FileStat::old_path`); blobs over 8 MB (`diff::image::MAX_BYTES`, checked with `git cat-file -s`) keep the binary-file note. Known gap: the remaining pictures are still loaded on the UI thread when a batch opens.
 - The resume position is only written when the file or commit range actually changed. The Recent refresh loop only does work while Home is on screen.
-- Zooming (Ctrl +/-/0 or Ctrl+wheel) shows a floating pill with the zoom percentage and a reset button for four seconds after each change.
+- Zooming (Ctrl +/-/0 or Ctrl+wheel) shows a floating pill with the zoom percentage and a reset button and fades in and out above the diff's floating panel.
