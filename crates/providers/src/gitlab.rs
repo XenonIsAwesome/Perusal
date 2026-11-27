@@ -23,8 +23,15 @@ impl GitLab {
         while let Some(r) = set.join_next().await {
             match r { Ok(Ok(list)) => { ok_any = true; out.extend(list.iter().map(|m| mr_row(m, host))); } Ok(Err(e)) => { first_err.get_or_insert(e); } Err(_) => {} }
         }
+        // Requests that ask for your review in projects outside the capped list come from the global listing.
+        if let Ok(me) = self.current_user().await {
+            let q = format!("/merge_requests?reviewer_username={me}&scope=all&state={st}&order_by=updated_at&sort=desc&per_page=50");
+            if let Ok(resp) = check(self.req(reqwest::Method::GET, &q).send().await).await { if let Ok(v) = resp.json::<Vec<Value>>().await { out.extend(v.iter().map(|m| mr_row(m, host))); } }
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|m| seen.insert(m.url.clone()));
         // every project failing (rate limit, expired token) is an error, not an empty list
-        match first_err { Some(e) if !ok_any => Err(e), _ => Ok(out) }
+        match first_err { Some(e) if !ok_any && out.is_empty() => Err(e), _ => Ok(out) }
     }
     pub fn api_base(host: &str) -> String { format!("https://{host}/api/v4") }
     fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder { let r = self.http.request(m, format!("{}{path}", self.api)); if self.token.is_empty() { r } else { r.header("PRIVATE-TOKEN", &self.token) } }
@@ -87,7 +94,10 @@ impl Provider for GitLab {
                 if let Some(id) = v["id"].as_u64() { created.push(id); }
             }
             check(self.req(reqwest::Method::POST, &format!("{base}/draft_notes/bulk_publish")).send().await).await?;
-            if s.verdict == Verdict::Approve { check(self.req(reqwest::Method::POST, &format!("{base}/approve")).send().await).await?; }
+            if s.verdict == Verdict::Approve {
+                // a refused approval is answered with 401 even though the token worked for the notes above
+                check(self.req(reqwest::Method::POST, &format!("{base}/approve")).send().await).await.map_err(|e| match e { Error::Unauthorized => Error::Http(401, "401 Unauthorized".into()), o => o })?;
+            }
             Ok(())
         }.await;
         if res.is_err() { for id in created { let _ = self.req(reqwest::Method::DELETE, &format!("{base}/draft_notes/{id}")).send().await; } }

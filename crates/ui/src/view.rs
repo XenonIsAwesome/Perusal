@@ -93,7 +93,7 @@ pub struct View {
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, md_was: bool, md_jump: bool, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>, gutter: HashMap<usize, usize>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_h: Option<f32>, resizing_cd: Option<(f32, f32)>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
@@ -150,7 +150,7 @@ impl View {
         let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), md_olds: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], md_rendered: false, md_was: false, md_jump: false, diff_mode: settings.diff_mode, sym_target: None,
-            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![],
+            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![], gutter: HashMap::new(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
@@ -162,6 +162,8 @@ impl View {
     fn current_file(&self) -> Option<usize> { self.m.vm.current_batch().first().copied() }
     fn save_groups(&self) { let _ = self.m.store.save_groups(self.m.vm.review, &self.m.vm.manual_paths()); }
     fn save_settings(&self) { model::save_settings(&self.settings); }
+    /// Puts a file's path on the clipboard (the copy button in the file's top bar).
+    fn copy_path(&mut self, path: &str, cx: &mut Context<Self>) { cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string())); self.note(NKind::Success, format!("Copied {path}"), Some("copied-path")); self.flush(cx); }
     fn note(&mut self, kind: NKind, t: impl Into<String>, key: Option<&'static str>) { self.notices.push((kind, t.into(), key)); }
     fn flush(&mut self, cx: &mut Context<Self>) { for (k, t, d) in std::mem::take(&mut self.notices) { cx.emit(ViewEvent::Notice(k, t, d)); } }
     fn resync(&mut self) { self.m.vm.sync_review_state(&self.m.store); let _ = self.m.vm.refresh(); self.rebuild_rows(); }
@@ -264,8 +266,9 @@ impl View {
                 if o > 0 { last_old = o; }
                 if n > 0 { last_new = n; }
             };
-            // added or deleted files have nothing on one side, so they always use a single column
-            let split = self.diff_mode == DiffMode::Split && !matches!(f.status, Status::Added | Status::Deleted);
+            // files with nothing on one side (added, deleted, or only additions / only deletions) always use a single column
+            let split = self.diff_mode == DiffMode::Split && !f.one_sided();
+            self.gutter.insert(fi, perusal_diff::digits(old.lines().count().max(new.lines().count()) as u32).max(3));
             if !split {
                 for l in &lines { hunk(&mut rows, l.old_no.unwrap_or(0), l.new_no.unwrap_or(0)); rows.push(Row { fi, kind: RowKind::Uni(rl(l)), ord: None, new_line: l.new_no, marks: vec![] }); }
             } else {
@@ -844,7 +847,7 @@ impl View {
     }
     fn build_submission(&self) -> Submission {
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
-        self.submission_of(drafts, self.summary.f.text.trim().to_string(), self.verdict.clone())
+        self.submission_of(drafts, self.summary.f.text.trim().to_string(), self.verdict)
     }
     fn submission_of(&self, drafts: Vec<perusal_core::store::Draft>, mut summary: String, verdict: Verdict) -> Submission {
         let (mut comments, mut general) = (vec![], vec![]);
@@ -1291,7 +1294,10 @@ impl View {
     fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(r) = self.rows.get(ix).cloned() else { return div().into_any_element() };
         let p = self.pal; let h = px(20.0 * self.zoom * self.settings.line_height); let fsz_f = 13.0 * self.zoom; let fsz = px(fsz_f); let mono = self.fonts.mono.clone();
-        let fi = r.fi; let st = self.m.vm.files[fi].status;
+        let fi = r.fi; let st = self.m.vm.files[fi].status; let (f_adds, f_dels) = (self.m.vm.files[fi].additions, self.m.vm.files[fi].deletions);
+        // line-number column: wide enough for the file's largest line number at the current zoom, never wrapping
+        let gw = px((self.gutter.get(&fi).copied().unwrap_or(3) as f32 * 0.62 * fsz_f).ceil() + 16.0 * self.zoom);
+        let sw = px(20.0 * self.zoom);
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
         let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).when(!self.settings.ligatures, |d| d.font_features(gpui::FontFeatures::disable_ligatures())).text_size(fsz).text_color(p.fg);
         let pk = self.pane_of(ix); let hx = self.hxs.get(pk).copied().unwrap_or(0.0); let hxt = self.hx_texts.get(pk).cloned().unwrap_or_default();
@@ -1310,8 +1316,8 @@ impl View {
             let (bg, sign, gut) = match l.kind { Kind::Added => (p.added, "+", p.added_word.opacity(0.55)), Kind::Removed => (p.removed, "−", p.removed_word.opacity(0.55)), Kind::Context => (gpui::transparent_black(), " ", gpui::transparent_black()) };
             let no = if left { l.old_no } else { l.new_no };
             div().flex().items_center().h_full().flex_1().min_w_0().overflow_hidden().bg(if selected { p.accent.opacity(0.28) } else { bg })
-                .child(div().w(px(46.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(no.map(|n| n.to_string()).unwrap_or_default()))
-                .child(div().w(px(20.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
+                .child(div().w(gw).flex_none().px_2().text_right().whitespace_nowrap().overflow_hidden().text_color(p.muted).bg(gut).child(no.map(|n| n.to_string()).unwrap_or_default()))
+                .child(div().w(sw).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(sign))
                 .child(code(rl, if left { 0 } else { 1 }))
         };
         let marks: Vec<AnyElement> = r.marks.iter().enumerate().map(|(i, m)| {
@@ -1330,6 +1336,7 @@ impl View {
                 return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).when(!paned, |d| d.cursor_pointer().hover(move |x| x.bg(p.hover))).when(paned && self.panes.len() > 1, |d| d.pl(px(36.0)))
                     .when(!paned, |d| d.child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted))).child(div().flex_1().min_w_0().truncate().child(f.path.clone()))
                     .children(marks)
+                    .child({ let path = f.path.clone(); icon_btn(("copy-path", ix), ic::CONTENT_COPY, "Copy the file path", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.copy_path(&path, cx); cx.stop_propagation(); cx.notify(); })) })
                     .child(div().flex().gap_2().text_xs().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
                     .when(!paned, |d| d.on_click(cx.listener(move |this, _, _, cx| { if !this.collapsed_files.remove(&fi) { this.collapsed_files.insert(fi); } this.shown = None; this.load_diff(); cx.notify(); }))).into_any_element();
             }
@@ -1337,7 +1344,7 @@ impl View {
                 .when(*expandable, |d| d.child(div().id(("expand", ix)).px_2().rounded_md().border_1().border_color(p.border).cursor_pointer().hover(move |x| x.bg(p.hover)).text_sm().child("Show anyway")
                     .on_click(cx.listener(move |this, _, _, cx| { this.forced.insert(fi); this.shown = None; this.load_diff(); cx.notify(); })))).into_any_element(),
             RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
-            RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()).into_any_element(),
+            RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(gw + sw).flex_none()).child(t.clone()).into_any_element(),
             RowKind::Comment(c) => return self.comment_card(fi, &c.clone(), cx).into_any_element(),
             RowKind::MdBlock(lb) => {
                 use markdown::{Block, Change};
@@ -1352,11 +1359,11 @@ impl View {
                 let l = &rl.line;
                 let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
                 let gut = match l.kind { Kind::Added => p.added_word.opacity(0.55), Kind::Removed => p.removed_word.opacity(0.55), Kind::Context => gpui::transparent_black() };
-                let (show_old, show_new) = (st != Status::Added, st != Status::Deleted);
+                let (show_old, show_new) = (st != Status::Added && !(f_dels == 0 && f_adds > 0), st != Status::Deleted && !(f_adds == 0 && f_dels > 0));
                 base.bg(if selected { p.accent.opacity(0.28) } else { bg })
-                    .when(show_old, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
-                    .when(show_new, |d| d.child(div().w(px(52.0)).flex_none().px_2().text_right().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))
-                    .child(div().w(px(22.0)).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(match l.kind { Kind::Added => "+", Kind::Removed => "−", _ => " " }))
+                    .when(show_old, |d| d.child(div().w(gw).flex_none().px_2().text_right().whitespace_nowrap().overflow_hidden().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
+                    .when(show_new, |d| d.child(div().w(gw).flex_none().px_2().text_right().whitespace_nowrap().overflow_hidden().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))
+                    .child(div().w(sw).flex_none().text_center().text_color(match l.kind { Kind::Added => p.success, Kind::Removed => p.danger, _ => p.muted }).child(match l.kind { Kind::Added => "+", Kind::Removed => "−", _ => " " }))
                     .child(code(rl, 0))
             }
             RowKind::Split(a, b) => base.child(cell(a.as_ref(), true)).child(div().w(px(1.0)).h_full().bg(p.border)).child(cell(b.as_ref(), false)),
@@ -1647,7 +1654,7 @@ impl View {
         let manual = batch.first().map(|&i| self.m.vm.is_manually_grouped(i)).unwrap_or(false);
         let (adds, dels): (u32, u32) = batch.iter().fold((0, 0), |a, &i| (a.0 + self.m.vm.files[i].additions, a.1 + self.m.vm.files[i].deletions));
         let md_on = self.md_rendered; let mode = self.diff_mode;
-        let one_sided = !batch.is_empty() && batch.iter().all(|&i| matches!(self.m.vm.files[i].status, Status::Added | Status::Deleted) || self.m.vm.files[i].symlink);
+        let one_sided = !batch.is_empty() && batch.iter().all(|&i| self.m.vm.files[i].one_sided() || self.m.vm.files[i].symlink);
         let ncomments = self.comment_count();
         let (panes_on, fs) = (self.batch_panes, self.fullscreen);
         let custom = self.layout.custom;
@@ -1663,6 +1670,10 @@ impl View {
             let mut h = div().flex().items_center().gap_3().px_4().py_2().border_b_1().border_color(p.border).bg(p.surface).child(div().flex_1().min_w_0().child(title))
                 .child(div().flex().items_center().gap_2().text_xs().font_family(mono.clone()).child(div().text_color(p.success).child(format!("+{adds}"))).child(div().text_color(p.danger).child(format!("−{dels}"))).child(diff_squares(adds, dels, &p, 10.0)));
             if let Some(s) = sym { h = h.child(s); }
+            if let (1, Some(f)) = (batch.len(), &first) {
+                let path = f.path.clone();
+                h = h.child(icon_btn("copy-path", ic::CONTENT_COPY, "Copy the file path", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.copy_path(&path, cx); cx.stop_propagation(); cx.notify(); })));
+            }
             if ncomments > 0 { h = h.child(icon_btn("collapse-c", ic::UNFOLD_LESS, "Collapse or expand all comments in this file", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.collapse_all_comments(); cx.notify(); }))); }
             if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.save_groups(); this.reload(); } cx.notify(); }))); }
             h
@@ -1870,7 +1881,7 @@ impl View {
         let (nd, nai, unviewed, total) = self.finish_counts();
         let remote = self.m.mr.is_some();
         let gitlab = self.m.mr.as_ref().map(|m| m.kind == perusal_providers::Kind::GitLab).unwrap_or(false);
-        let v = self.verdict.clone(); let focused = self.focus == Some(Fid::Summary);
+        let v = self.verdict; let focused = self.focus == Some(Fid::Summary);
         let vchip = |id: &'static str, label: &'static str, on: bool, color: gpui::Hsla| div().id(id).flex().items_center().gap_2().px_3().h(px(32.0)).rounded_md().border_1().border_color(if on { color } else { p.border }).bg(if on { color.opacity(0.14) } else { gpui::transparent_black() }).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).hover(move |x| x.bg(p.hover)).child(label);
         let summary_box = self.winp(Fid::Summary, div().id("sum-box").flex().px_3().py(px(8.0)).rounded_md().border_1().border_color(if focused { p.accent } else { p.border }).bg(p.bg).min_h(px(90.0)).child(input_text(&self.summary, focused, "Summary (optional): what should the author know?", &p, false, 4)), cx);
         let msg = self.submit_msg.clone().map(|(ok, m)| div().flex().items_start().gap_2().px_3().py_2().rounded_md().border_1().border_color(if ok { p.success } else { p.danger }).bg(if ok { p.success.opacity(0.1) } else { p.danger.opacity(0.1) }).text_sm().text_color(if ok { p.success } else { p.danger })

@@ -49,7 +49,7 @@ pub struct Root {
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>, r_search: Input, m_search: Input,
     recent: Vec<RecentRow>, r_remote: Remote, r_state: St,
-    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, close_req: Option<CloseReq>, mine_saved: perusal_app::mine::Saved, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
+    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_gen: u64, recent_busy: bool, close_req: Option<CloseReq>, mine_saved: perusal_app::mine::Saved, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
     mrs: Vec<(u64, String, String)>, busy: bool, token_host: Option<String>, retry_url: Option<String>, msg: Option<(NKind, String)>,
 }
 
@@ -61,10 +61,10 @@ impl Root {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut r = Root { fs_applied: false, fs_confirmed: false, decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None, r_search: Input::new(""), m_search: Input::new(""),
-            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, close_req: None, mine_saved: perusal_app::mine::Saved::default(), mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
+            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_gen: 0, recent_busy: false, close_req: None, mine_saved: perusal_app::mine::Saved::default(), mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
         r.restore_mine();
-        r.refresh_recent();
+        r.refresh_recent(); r.refresh_recent_states(cx);
         if r.settings.home_tab.start(r.recent.len()) == perusal_app::settings::HomeTab::Mine { r.htab = HTab::Mine; r.load_mine(cx); }
         // repaint when a background avatar download finishes
         cx.spawn(async move |this, cx| { let mut seen = crate::avatars::version(); loop { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; let v = crate::avatars::version(); if v != seen { seen = v; if this.update(cx, |_, cx| cx.notify()).is_err() { break; } } } }).detach();
@@ -324,14 +324,25 @@ impl Root {
         }
         cx.notify();
     }
+    /// Loads My reviews for the current role and state. Asking again while a load is running is not dropped (that left the list
+    /// showing the previous filter's results): the running one is superseded and its answer ignored.
     fn load_mine(&mut self, cx: &mut Context<Self>) {
-        if self.mine_loading { return; }
         let signed = self.settings.hosts.iter().any(|h| model::token_for(&h.host).is_some());
-        self.mine_loaded = true; if !signed { self.mine.clear(); self.mine_errs.clear(); cx.notify(); return; }
+        self.mine_loaded = true; self.mine_gen += 1;
+        if !signed { self.mine.clear(); self.mine_errs.clear(); self.mine_loading = false; cx.notify(); return; }
         self.mine_loading = true; cx.notify();
-        let (hosts, role, state) = (self.settings.hosts.clone(), self.mine_role, self.mine_state);
+        let (gen, hosts, role, state) = (self.mine_gen, self.settings.hosts.clone(), self.mine_role, self.mine_state);
         let task = cx.background_executor().spawn(async move { model::fetch_my_reviews(&hosts, role, state) });
-        cx.spawn(async move |this, cx| { let (l, e, me) = task.await; let _ = this.update(cx, |t, cx| { t.mine = l; t.mine_errs = e; t.mine_me = me; t.mine_loading = false; cx.notify(); }); }).detach();
+        cx.spawn(async move |this, cx| { let (l, e, me) = task.await; let _ = this.update(cx, |t, cx| { if t.mine_gen != gen { return; } t.mine = l; t.mine_errs = e; t.mine_me = me; t.mine_loading = false; cx.notify(); }); }).detach();
+    }
+    /// Re-reads the host state (open / merged / closed) of the remote reviews on the Recent page in the background.
+    fn refresh_recent_states(&mut self, cx: &mut Context<Self>) {
+        if self.recent_busy { return; }
+        let rows: Vec<(i64, String)> = self.recent.iter().filter(|r| r.key.starts_with("remote:") && r.mr_state != "merged").take(40).map(|r| (r.id, r.key.trim_start_matches("remote:").to_string())).collect();
+        if rows.is_empty() { return; }
+        self.recent_busy = true;
+        let task = cx.background_executor().spawn(async move { model::refresh_mr_states(rows) });
+        cx.spawn(async move |this, cx| { let changed = task.await; let _ = this.update(cx, |t, cx| { t.recent_busy = false; if changed > 0 { t.refresh_recent(); cx.notify(); } }); }).detach();
     }
 
     // ---- input plumbing
@@ -547,7 +558,7 @@ impl Root {
                 .child(this.chip_with("m-rev", Some(icon(if reviewer_on { ic::CHECK_BOX } else { ic::CHECK_BOX_OUTLINE_BLANK }, 16.0, if reviewer_on { p.accent } else { p.muted }).into_any_element()), "Assigned to me as reviewer".into(), reviewer_on)
                     .on_click(cx.listener(|t, _, _, cx| { t.mine_role = if t.mine_role == Role::ReviewRequested { Role::Reviewable } else { Role::ReviewRequested }; t.load_mine(cx); })))
                 .children(any_sel.then(|| this.chip("m-clear", "Clear filters".into(), false).on_click(cx.listener(|t, _, _, cx| { t.mine_sel = Sel::default(); cx.notify(); }))))
-                .child(div().flex_1()).child(icon_btn("mine-refresh", ic::REFRESH, "Refresh", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.mine_loading = false; this.load_mine(cx); }))))
+                .child(div().flex_1()).child(icon_btn("mine-refresh", ic::REFRESH, "Refresh", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.load_mine(cx); }))))
             .child(div().flex().flex_wrap().items_center().gap_2()
                 .child(div().text_xs().text_color(p.muted).child("Remote"))
                 .children([(Remote::All, "All"), (Remote::GitHub, "GitHub"), (Remote::GitLab, "GitLab")].map(|(r, l)| this.chip(("mrr", r as usize), l.into(), this.mine_remote == r).on_click(cx.listener(move |t, _, _, cx| { t.mine_remote = r; cx.notify(); }))))
@@ -609,7 +620,7 @@ impl Root {
         let p = self.pal;
         let left_tabs = div().flex().items_center().border_b_1().border_color(p.border).bg(p.surface).px_2()
             .child({ let on = self.htab == HTab::Recent; div().id("h-recent").flex().items_center().gap_2().px_3().py_3().cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() })
-                .child(icon(ic::HISTORY, 17.0, if on { p.accent } else { p.muted })).child("Recent reviews").child(badge(format!("{}", self.recent.len()), p.muted, p.hover)).on_click(cx.listener(|t, _, _, cx| { t.htab = HTab::Recent; cx.notify(); })) })
+                .child(icon(ic::HISTORY, 17.0, if on { p.accent } else { p.muted })).child("Recent reviews").child(badge(format!("{}", self.recent.len()), p.muted, p.hover)).on_click(cx.listener(|t, _, _, cx| { t.htab = HTab::Recent; t.refresh_recent_states(cx); cx.notify(); })) })
             .child({ let on = self.htab == HTab::Mine; div().id("h-mine").flex().items_center().gap_2().px_3().py_3().cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() })
                 .child(icon(ic::FORUM, 17.0, if on { p.accent } else { p.muted })).child("My reviews").on_click(cx.listener(|t, _, _, cx| { t.htab = HTab::Mine; if !t.mine_loaded { t.load_mine(cx); } cx.notify(); })) });
         let list = if self.htab == HTab::Recent { self.render_recent(cx) } else { self.render_mine(cx) };

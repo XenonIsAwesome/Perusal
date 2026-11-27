@@ -200,7 +200,7 @@ pub fn submit_review(mr: &MrRef, sub: &perusal_providers::Submission) -> Result<
     rt()?.block_on(p.submit(mr, sub)).map_err(|e| match e {
         perusal_providers::Error::Unauthorized => format!("{} rejected the token. Enter a new one from Home.", mr.host),
         perusal_providers::Error::Unsupported(w) => format!("{} does not support: {w}. Choose another verdict.", mr.host),
-        other => other.to_string(),
+        other => perusal_providers::explain_submit_error(&mr.kind, sub.verdict, &other),
     })
 }
 
@@ -341,6 +341,27 @@ pub fn fetch_my_reviews(hosts: &[HostCfg], role: Role, state: StateFilter) -> Mi
     all.sort_by(|a, b| b.updated.cmp(&a.updated));
     crate::avatars::learn_mrs(&all);
     (all, errs, mes)
+}
+
+/// Asks each host for the current state of the remote reviews on the Recent page and stores any change. Rows are (review id, canonical URL).
+/// Hosts without a token and unreachable hosts are skipped. Returns how many rows changed.
+pub fn refresh_mr_states(rows: Vec<(i64, String)>) -> usize {
+    let work: Vec<Vec<(i64, String)>> = { let mut w: Vec<Vec<(i64, String)>> = vec![vec![]; 6]; for (i, r) in rows.into_iter().enumerate() { w[i % 6].push(r); } w };
+    let found: Vec<(i64, String)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = work.iter().map(|part| sc.spawn(move || {
+            let Ok(rt) = rt() else { return vec![] };
+            part.iter().filter_map(|(id, url)| {
+                let r = perusal_providers::parse_mr_url(url).ok()?;
+                let p = provider(&r, token_for(&r.host).unwrap_or_default()).ok()?;
+                let info = rt.block_on(p.mr_info(&r)).ok()?;
+                Some((*id, norm_state(&info.state)))
+            }).collect::<Vec<_>>()
+        })).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    let Ok(store) = Store::open(&db_path()) else { return 0 };
+    let before: std::collections::HashMap<i64, String> = store.recent_rows().unwrap_or_default().into_iter().map(|r| (r.id, r.mr_state)).collect();
+    found.into_iter().filter(|(id, st)| before.get(id) != Some(st) && store.set_mr_state(*id, st).is_ok()).count()
 }
 
 /// Signed-in user for a host (validates the token).
