@@ -25,7 +25,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, review INTEGER, role TEXT, text TEXT);
             CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);
             CREATE TABLE IF NOT EXISTS groups(review INTEGER, gid INTEGER, path TEXT, PRIMARY KEY(review, path));
-            CREATE TABLE IF NOT EXISTS review_ui(review INTEGER PRIMARY KEY, filter TEXT, sort TEXT);")?;
+            CREATE TABLE IF NOT EXISTS review_ui(review INTEGER PRIMARY KEY, filter TEXT, sort TEXT);
+            CREATE TABLE IF NOT EXISTS review_pos(review INTEGER PRIMARY KEY, file TEXT, newest TEXT, oldest TEXT);")?;
         // additive migrations for databases created by earlier versions
         for alter in ["ALTER TABLE reviews ADD COLUMN mr_state TEXT DEFAULT ''", "ALTER TABLE reviews ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE chat ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE drafts ADD COLUMN old_side INTEGER DEFAULT 0"] { let _ = conn.execute(alter, []); }
         Ok(Store { conn })
@@ -50,6 +51,18 @@ impl Store {
     pub fn ui(&self, review: i64) -> Result<Option<(String, String)>> {
         match self.conn.query_row("SELECT filter, sort FROM review_ui WHERE review=?1", params![review], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
             Ok(v) => Ok(Some(v)), Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), Err(e) => Err(e),
+        }
+    }
+    /// Remembers where the reviewer was: the open file and the commit range selected in the graph (newest, oldest sha).
+    pub fn set_position(&self, review: i64, file: Option<&str>, commits: Option<(&str, &str)>) -> Result<()> {
+        let (n, o) = commits.map(|(n, o)| (Some(n), Some(o))).unwrap_or((None, None));
+        self.conn.execute("INSERT INTO review_pos(review,file,newest,oldest) VALUES(?1,?2,?3,?4) ON CONFLICT(review) DO UPDATE SET file=?2, newest=?3, oldest=?4", params![review, file, n, o])?; Ok(())
+    }
+    /// The remembered (file, (newest, oldest) commit range); `None` when nothing was saved yet.
+    #[allow(clippy::type_complexity)]
+    pub fn position(&self, review: i64) -> Result<Option<(Option<String>, Option<(String, String)>)>> {
+        match self.conn.query_row("SELECT file, newest, oldest FROM review_pos WHERE review=?1", params![review], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))) {
+            Ok((f, n, o)) => Ok(Some((f, n.zip(o)))), Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), Err(e) => Err(e),
         }
     }
     /// True when leaving would lose work: not submitted yet and there are drafts or a partly finished viewed list.
@@ -157,7 +170,7 @@ impl Store {
         Ok(ids.len())
     }
     pub fn discard(&self, review: i64) -> Result<()> {
-        for t in ["viewed", "drafts", "journal", "chat", "groups", "review_ui"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
+        for t in ["viewed", "drafts", "journal", "chat", "groups", "review_ui", "review_pos"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
     }
     /// Rows for the recent-reviews page, pinned first then most recently opened.
@@ -190,6 +203,16 @@ mod tests {
         s.add_draft(r, None, None, "more", false).unwrap(); assert!(s.unfinished(r).unwrap()); // new work reopens it
         s.set_state(r, "submitted").unwrap(); s.set_viewed(r, "a", false).unwrap(); assert!(!s.unfinished(r).unwrap()); // un-viewing keeps a submitted review closed
         s.discard(r).unwrap(); assert!(s.ui(r).unwrap().is_none());
+    }
+    #[test] fn remembers_position() {
+        let s = Store::memory().unwrap();
+        let r = s.open_review("k", "T", "h", 3).unwrap();
+        assert_eq!(s.position(r).unwrap(), None);
+        s.set_position(r, Some("a/b.rs"), Some(("n1", "o1"))).unwrap();
+        assert_eq!(s.position(r).unwrap(), Some((Some("a/b.rs".into()), Some(("n1".into(), "o1".into())))));
+        s.set_position(r, Some("c.rs"), None).unwrap();
+        assert_eq!(s.position(r).unwrap(), Some((Some("c.rs".into()), None)));
+        s.discard(r).unwrap(); assert_eq!(s.position(r).unwrap(), None);
     }
     #[test] fn review_lifecycle() {
         let s = Store::memory().unwrap();

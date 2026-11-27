@@ -1,5 +1,6 @@
 //! Per-file stats index, noisy-file rules and grouping. UI-free.
 pub mod text;
+pub mod image;
 use std::process::Command;
 use std::path::Path;
 

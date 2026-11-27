@@ -147,6 +147,12 @@ pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> {
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
+/// File content at a revision as raw bytes (images and other binary files), if present.
+pub fn show_bytes(dir: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
+    let o = Command::new("git").args(["show", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;
+    o.status.success().then_some(o.stdout)
+}
+
 /// True when what a review shows for `path` differs between two states of the request: the file at the old and new head, or at the old and
 /// new merge-base (a moved target branch changes the diff too). Used to drop the "viewed" mark of a file that changed under the reviewer.
 pub fn file_changed_between(dir: &Path, old_base: &str, old_head: &str, new_base: &str, new_head: &str, path: &str) -> bool {

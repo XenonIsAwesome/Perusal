@@ -99,6 +99,12 @@ impl ReviewVm {
     pub fn select_file(&mut self, i: usize) {
         if let Some(b) = self.batches.iter().position(|b| b.contains(&i)) { if b != self.cursor { self.history.push(self.cursor); } self.cursor = b; }
     }
+    /// Moves the cursor to the batch holding the file at `path`; false when that file is not visible (filtered out, outside the commit scope).
+    pub fn select_path(&mut self, path: &str) -> bool {
+        let Some(i) = self.files.iter().position(|f| f.path == path) else { return false };
+        if !self.batches.iter().any(|b| b.contains(&i)) { return false; }
+        self.select_file(i); true
+    }
     pub fn current_batch(&self) -> &[usize] { self.batches.get(self.cursor).map(|v| v.as_slice()).unwrap_or(&[]) }
     pub fn batches_contain_together(&self, a: usize, b: usize) -> bool { self.batches.iter().any(|x| x.contains(&a) && x.contains(&b)) }
     pub fn batch_count(&self) -> usize { self.batches.len() }
