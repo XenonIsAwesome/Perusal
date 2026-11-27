@@ -4,6 +4,7 @@ use gpui::{canvas, div, MouseButton, prelude::*, px, rgb, Animation, AnimationEx
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
+use perusal_app::markdown::Change;
 use perusal_app::textfield::{is_paste, TextField};
 use perusal_app::theme::Theme;
 use std::collections::BTreeMap;
@@ -289,32 +290,10 @@ pub fn seg_box(p: &Pal) -> Div { div().flex().rounded_md().border_1().border_col
 /// Renders parsed markdown as a document.
 /// Highlight runs per line of `text` (parsed as a whole file, so multi-line comments and strings work): byte ranges within each line.
 pub fn line_spans(lang: &str, text: &str, p: &Pal) -> Vec<Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>> {
-    let mut starts = vec![0usize]; for (i, b) in text.bytes().enumerate() { if b == b'\n' { starts.push(i + 1); } }
-    let n = starts.len(); let mut out: Vec<Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>> = vec![vec![]; n];
-    if lang.is_empty() { return out; }
-    let mut spans = perusal_diff::text::highlight(lang, text); spans.sort_by_key(|s| s.0);
-    let mut last_end = 0usize;
-    for (a, b, c) in spans {
-        if a < last_end { continue; } last_end = b;
-        let st = gpui::HighlightStyle { color: Some(p.syntax(c)), ..Default::default() };
-        let mut li = starts.partition_point(|s| *s <= a).saturating_sub(1);
-        while li < n && starts[li] < b {
-            let ls = starts[li]; let le = if li + 1 < n { starts[li + 1] - 1 } else { text.len() };
-            let (sa, sb) = (a.max(ls), b.min(le));
-            if sa < sb && text.is_char_boundary(sa) && text.is_char_boundary(sb) { out[li].push((sa - ls..sb - ls, st)); }
-            li += 1;
-        }
-    }
-    out
+    perusal_app::markdown::line_classes(lang, text).into_iter().map(|v| v.into_iter().map(|(r, c)| (r, gpui::HighlightStyle { color: Some(p.syntax(c)), ..Default::default() })).collect()).collect()
 }
 
-/// Language for a Markdown fence label (```rust, ```js, ```sh ...); empty for none, "generic" for labels we do not know.
-pub fn fence_language(label: &str) -> &'static str {
-    let l = label.split(|c: char| c.is_whitespace() || c == ',' || c == '{').next().unwrap_or("").to_lowercase();
-    if l.is_empty() || l == "text" || l == "txt" || l == "plain" || l == "diff" { return ""; }
-    let ext = match l.as_str() { "rust" => "rs", "python" | "python3" => "py", "javascript" | "node" => "js", "typescript" => "ts", "shell" | "console" | "sh" | "zsh" | "bash" => "sh", "golang" => "go", "c++" | "cplusplus" => "cpp", "markup" | "xml" | "svg" => "html", "yml" | "toml" | "yaml" => "generic", o => o };
-    match perusal_diff::text::language_for_ext(ext) { "" => "generic", o => o }
-}
+pub use perusal_app::markdown::fence_language;
 
 fn code_lines(text: &str, lang: &str, p: &Pal) -> Vec<Div> {
     let spans = line_spans(lang, text, p);
@@ -362,9 +341,21 @@ pub fn markdown_view_ctx(blocks: &[perusal_app::markdown::Block], p: &Pal, mono:
             }).collect::<Vec<_>>()),
             Block::Quote(inner) => div().pl_3().border_l_4().border_color(p.border).text_color(p.muted).child(markdown_view_ctx(inner, p, mono, original)),
             Block::Rule => div().h(px(1.0)).w_full().bg(p.border).my_2(),
-            Block::Table { head, rows } => div().flex().flex_col().rounded_md().border_1().border_color(p.border).overflow_hidden()
-                .child(div().flex().bg(p.surface).font_weight(FontWeight::SEMIBOLD).children(head.iter().map(|c| div().flex_1().min_w_0().px_3().py_1().border_r_1().border_color(p.border).child(inline(c, p, mono))).collect::<Vec<_>>()))
-                .children(rows.iter().map(|r| div().flex().border_t_1().border_color(p.border).children(r.iter().map(|c| div().flex_1().min_w_0().px_3().py_1().border_r_1().border_color(p.border).child(inline(c, p, mono))).collect::<Vec<_>>())).collect::<Vec<_>>()),
+            // a table is drawn as one piece per row when each row is commented on by itself: the pieces stack into one bordered table
+            Block::Table { head, rows } => {
+                let cell = |c: &Vec<perusal_app::markdown::Span>| div().flex_1().min_w_0().px_3().py_1().border_r_1().border_color(p.border).child(inline(c, p, mono));
+                let mut t = div().flex().flex_col().border_l_1().border_r_1().border_b_1().border_color(p.border);
+                if !head.is_empty() { t = t.border_t_1().rounded_t_md().child(div().flex().bg(p.surface).font_weight(FontWeight::SEMIBOLD).children(head.iter().map(&cell).collect::<Vec<_>>())); }
+                t.children(rows.iter().map(|r| div().flex().border_t_1().border_color(p.border).children(r.iter().map(&cell).collect::<Vec<_>>())).collect::<Vec<_>>())
+            }
+            Block::CodeLine { text, runs, first, last, change } => {
+                let mut hl: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = runs.iter().map(|(r, c)| (r.clone(), gpui::HighlightStyle { color: Some(p.syntax(*c)), ..Default::default() })).collect();
+                if find_active() { let extra = find_runs(text); if !extra.is_empty() { hl = gpui::combine_highlights(hl, extra).collect(); } }
+                if *change == Change::Removed { hl = gpui::combine_highlights(hl, [(0..text.len(), gpui::HighlightStyle { strikethrough: Some(gpui::StrikethroughStyle { thickness: px(1.0), color: None }), ..Default::default() })]).collect(); }
+                div().px_3().bg(match change { Change::Added => p.added, Change::Removed => p.removed, _ => p.surface }).border_l_1().border_r_1().border_color(p.border).font_family(mono.clone()).text_size(px(13.0)).whitespace_nowrap().overflow_hidden()
+                    .when(*first, |d| d.border_t_1().rounded_t_md().pt_2()).when(*last, |d| d.border_b_1().rounded_b_md().pb_2())
+                    .child(gpui::StyledText::new(if text.is_empty() { " ".to_string() } else { text.clone() }).with_highlights(hl))
+            }
         });
     }
     col
@@ -399,6 +390,9 @@ fn clip_runs(runs: &[(std::ops::Range<usize>, gpui::HighlightStyle)], start: usi
     runs.iter().filter_map(|(r, s)| { let (a, b) = (r.start.max(start), r.end.min(start + len)); (a < b).then(|| (a - start..b - start, *s)) }).collect()
 }
 
+/// Background of added or removed text in a rich diff.
+fn change_bg(c: Change, p: &Pal) -> Option<Hsla> { match c { Change::Added => Some(p.added_word), Change::Removed => Some(p.removed_word), _ => None } }
+
 /// Inline Markdown as a wrapping row of words, so each span can have its own weight, style, font and click action
 /// (bold, italic, monospace code, clickable links).
 fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -> Div {
@@ -411,7 +405,7 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -
         if s.code {
             n += 1;
             let url = s.link.clone();
-            let el = div().id(("md-code", n)).px(px(5.0)).mx(px(1.0)).rounded(px(4.0)).bg(p.hover).font_family(mono.clone()).text_size(px(13.0)).text_color(if url.is_some() { p.accent } else { p.fg }).whitespace_nowrap().child(match clip_runs(&hl, span_start, s.text.len()) { r if r.is_empty() => div().child(s.text.clone()), r => div().child(gpui::StyledText::new(s.text.clone()).with_highlights(r)) });
+            let el = div().id(("md-code", n)).px(px(5.0)).mx(px(1.0)).rounded(px(4.0)).bg(change_bg(s.change, p).unwrap_or(p.hover)).font_family(mono.clone()).text_size(px(13.0)).text_color(if url.is_some() { p.accent } else { p.fg }).whitespace_nowrap().child(match clip_runs(&hl, span_start, s.text.len()) { r if r.is_empty() => div().child(s.text.clone()), r => div().child(gpui::StyledText::new(s.text.clone()).with_highlights(r)) });
             row = row.child(match url { Some(u) => el.cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)).into_any_element(), None => el.into_any_element() });
             continue;
         }
@@ -429,7 +423,8 @@ fn inline(spans: &[perusal_app::markdown::Span], p: &Pal, mono: &SharedString) -
             // no real bold/italic face in the UI font: borrow one from another family, else tint so the emphasis is still visible
             if s.bold { if let Some(f) = &bold_alt { el = el.font_family(f.clone()); } }
             if s.italic { if let Some(f) = &italic_alt { el = el.font_family(f.clone()); } }
-            if s.strike { el = el.line_through(); }
+            if s.strike || s.change == Change::Removed { el = el.line_through(); }
+            if let Some(bg) = change_bg(s.change, p) { el = el.bg(bg).rounded(px(2.0)); }
             let el = match &s.link {
                 Some(u) => { let u = u.clone(); el.text_color(p.accent).underline().cursor_pointer().on_click(move |_, _, cx| cx.open_url(&u)) }
                 None => el,

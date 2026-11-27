@@ -10,3 +10,4 @@
 - M6 Packaging and release: scripts and the tag-driven workflow exist; only the deb script and YAML syntax have been run.
 - M7 Polish: keymap/palette/help, quit prompt, fonts/line height/ligatures/reduced motion, thread actions, move to new head, persisted manual groups, removed-line comments. Open: split panes, ACP surface, real-host verification.
 - Split panes for batches (resizable, snapping, corner handles), full-screen diff viewer, Ctrl+wheel zoom and a panes/stacked setting with per-review override: done, screenshot-verified on a headless display.
+- Markdown preview: virtualized for single files too (fixes slow scrolling on big files), GitHub-style rich diff (green additions, red struck-through deletions, word-level edits) and per-row commenting of table rows and code lines: done, screenshot-verified on a headless X display with software Vulkan.
