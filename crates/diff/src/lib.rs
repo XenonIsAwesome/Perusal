@@ -36,6 +36,11 @@ impl FileStat {
         FileStat { path: path.into(), status, additions, deletions, hunks: 1, size: 0, binary: false, symlink: false,
             generated: is_noisy_path(path), viewed: false, comments: 0, unresolved: 0, ai_flagged: false, meaningful: additions + deletions }
     }
+    /// True when one side of a side-by-side view would be empty or a mere copy of the other: added and deleted files, and files
+    /// that only gain lines or only lose lines. Those are shown in a single column.
+    pub fn one_sided(&self) -> bool {
+        matches!(self.status, Status::Added | Status::Deleted) || (self.additions > 0) != (self.deletions > 0)
+    }
     pub fn name(&self) -> &str { self.path.rsplit('/').next().unwrap_or(&self.path) }
     pub fn ext(&self) -> &str { let n = self.name(); n.rsplit_once('.').map(|x| x.1).unwrap_or("") }
     pub fn net(&self) -> i64 { self.additions as i64 - self.deletions as i64 }
@@ -107,11 +112,23 @@ pub fn index_range(repo: &Path, base: &str, head: &str) -> std::io::Result<Vec<F
     Ok(files)
 }
 
+/// Number of decimal digits in `n` (0 has one); sizes the line-number column.
+pub fn digits(n: u32) -> usize { n.max(1).ilog10() as usize + 1 }
+
 pub mod rules;
 pub use rules::{group_files, GroupRule};
 
 #[cfg(test)]
 mod tests {
+    #[test] fn one_sided_files() {
+        assert!(FileStat::new("a", Status::Added, 4, 0).one_sided());
+        assert!(FileStat::new("a", Status::Deleted, 0, 4).one_sided());
+        assert!(FileStat::new("DECISIONS.md", Status::Modified, 1, 0).one_sided()); // only additions
+        assert!(FileStat::new("a", Status::Modified, 0, 2).one_sided()); // only deletions
+        assert!(!FileStat::new("a", Status::Modified, 3, 2).one_sided());
+        assert!(!FileStat::new("a", Status::Renamed, 0, 0).one_sided());
+    }
+    #[test] fn digit_counts() { assert_eq!((digits(0), digits(9), digits(10), digits(99_999), digits(100_000)), (1, 1, 2, 5, 6)); }
     use super::*;
     #[test]
     fn diff_z_parses_modes_renames_and_symlinks() {

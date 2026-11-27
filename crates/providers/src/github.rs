@@ -21,18 +21,43 @@ impl GitHub {
         let repos: Vec<Value> = check(self.req(reqwest::Method::GET, "/user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100").send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
         let names: Vec<String> = repos.iter().filter(|r| r["archived"].as_bool() != Some(true) && r.pointer("/permissions/push").and_then(|x| x.as_bool()).unwrap_or(false)).filter_map(|r| r["full_name"].as_str().map(String::from)).take(40).collect();
         let st = match state { StateFilter::Open => "open", StateFilter::All => "all", _ => "closed" };
-        let mut set = tokio::task::JoinSet::new();
-        for n in names {
-            let (http, api, token) = (self.http.clone(), self.api.clone(), self.token.clone());
-            set.spawn(async move {
-                let g = GitHub { http, api, token };
-                let v: Vec<Value> = check(g.req(reqwest::Method::GET, &format!("/repos/{n}/pulls?state={st}&sort=updated&direction=desc&per_page=30")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
-                Ok::<_, Error>((n, v))
-            });
+        // Queried in small waves: firing 40 requests at once trips GitHub's abuse limits, and the repositories that then fail would silently be missing.
+        let mut results = vec![];
+        for wave in names.chunks(8) {
+            let mut set = tokio::task::JoinSet::new();
+            for n in wave.iter().cloned() {
+                let (http, api, token) = (self.http.clone(), self.api.clone(), self.token.clone());
+                set.spawn(async move {
+                    let g = GitHub { http, api, token };
+                    let url = format!("/repos/{n}/pulls?state={st}&sort=updated&direction=desc&per_page=30");
+                    let mut last = None;
+                    for attempt in 0..2 {
+                        if attempt > 0 { tokio::time::sleep(std::time::Duration::from_millis(400)).await; }
+                        match check(g.req(reqwest::Method::GET, &url).send().await).await {
+                            Ok(r) => return match r.json::<Vec<Value>>().await { Ok(v) => Ok((n, v)), Err(e) => Err(Error::Offline(e.to_string())) },
+                            Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                            Err(e) => last = Some(e),
+                        }
+                    }
+                    Err(last.unwrap_or(Error::Offline("no answer".into())))
+                });
+            }
+            while let Some(r) = set.join_next().await { if let Ok(r) = r { results.push(r); } }
         }
-        let (mut out, mut first_err, mut ok_any) = (vec![], None, false);
-        while let Some(r) = set.join_next().await {
-            let (project, list) = match r { Ok(Ok(v)) => v, Ok(Err(e)) => { first_err.get_or_insert(e); continue } Err(_) => continue };
+        let (mut out, mut requested, mut first_err, mut ok_any) = (vec![], vec![], None, false);
+        let mut search_err = None;
+        // Pull requests that ask for your review in repositories outside the capped list (or where you cannot push) come from search.
+        // (an unreachable search is kept as the error to report when nothing else came back)
+        {
+            let st_q = match state { StateFilter::Open => "+is:open", StateFilter::Merged => "+is:merged", StateFilter::Closed => "+is:closed+is:unmerged", StateFilter::All => "" };
+            let q = format!("/search/issues?q=is:pr+review-requested:@me{st_q}&sort=updated&order=desc&per_page=50");
+            match check(self.req(reqwest::Method::GET, &q).send().await).await {
+                Ok(resp) => match resp.json::<Value>().await { Ok(v) => requested.extend(v["items"].as_array().into_iter().flatten().map(|i| search_row(i, host))), Err(e) => { search_err = Some(Error::Offline(e.to_string())); } },
+                Err(e) => { search_err = Some(e); }
+            }
+        }
+        for r in results {
+            let (project, list) = match r { Ok(v) => v, Err(e) => { first_err.get_or_insert(e); continue } };
             ok_any = true;
             for p in list {
                 let merged = !p["merged_at"].is_null();
@@ -44,8 +69,13 @@ impl GitHub {
                     labels: p["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: p["body"].as_str().unwrap_or("").into(), draft: p["draft"].as_bool() == Some(true) });
             }
         }
-        // every repository failing (rate limit, expired token) is an error, not an empty list
-        match first_err { Some(e) if !ok_any => Err(e), _ => Ok(out) }
+        // the same pull request can come from both sources: keep the repository listing's richer row (it has the reviewer list)
+        let mut seen = std::collections::HashSet::new();
+        out.extend(requested);
+        out.retain(|m| seen.insert(m.url.clone()));
+        // every repository failing (rate limit, expired token) is an error, not an empty list; the repositories' error is the more telling one
+        let first_err = first_err.or(search_err);
+        match first_err { Some(e) if !ok_any && out.is_empty() => Err(e), _ => Ok(out) }
     }
     fn graphql_url(&self) -> String { if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) } }
     /// Review threads by the database id of their first comment: (GraphQL node id, resolved). Paged (capped at 50 pages); empty on any failure.
@@ -201,14 +231,17 @@ impl Provider for GitHub {
         let r = match role { Role::ReviewRequested => "review-requested:@me", Role::Authored => "author:@me", Role::Assigned => "assignee:@me", Role::Reviewable => "" };
         let st = match state { StateFilter::Open => "+is:open", StateFilter::Merged => "+is:merged", StateFilter::Closed => "+is:closed+is:unmerged", StateFilter::All => "" };
         let v: Value = check(self.req(reqwest::Method::GET, &format!("/search/issues?q=is:pr+{r}{st}&sort=updated&order=desc&per_page=50")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
-        Ok(v["items"].as_array().cloned().unwrap_or_default().iter().map(|i| {
-            let merged = i.pointer("/pull_request/merged_at").map(|m| !m.is_null()).unwrap_or(false);
-            let state = if merged { "merged" } else if i["state"] == "open" { "open" } else { "closed" };
-            let project = i["repository_url"].as_str().and_then(|u| u.split("/repos/").nth(1)).unwrap_or("").to_string();
-            RemoteMr { url: i["html_url"].as_str().unwrap_or("").into(), title: i["title"].as_str().unwrap_or("").into(), project, number: i["number"].as_u64().unwrap_or(0),
-                author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub,
-                author_avatar: i.pointer("/user/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&i["assignees"], "login"), reviewers: vec![],
-                labels: i["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: i["body"].as_str().unwrap_or("").into(), draft: i["draft"].as_bool() == Some(true) }
-        }).collect())
+        Ok(v["items"].as_array().cloned().unwrap_or_default().iter().map(|i| search_row(i, host)).collect())
     }
+}
+
+/// One result of `/search/issues` (a pull request) as a listed row.
+fn search_row(i: &Value, host: &str) -> RemoteMr {
+    let merged = i.pointer("/pull_request/merged_at").map(|m| !m.is_null()).unwrap_or(false);
+    let state = if merged { "merged" } else if i["state"] == "open" { "open" } else { "closed" };
+    let project = i["repository_url"].as_str().and_then(|u| u.split("/repos/").nth(1)).unwrap_or("").to_string();
+    RemoteMr { url: i["html_url"].as_str().unwrap_or("").into(), title: i["title"].as_str().unwrap_or("").into(), project, number: i["number"].as_u64().unwrap_or(0),
+        author: i.pointer("/user/login").and_then(|x| x.as_str()).unwrap_or("").into(), state: state.into(), updated: i["updated_at"].as_str().unwrap_or("").into(), host: host.into(), kind: Kind::GitHub,
+        author_avatar: i.pointer("/user/avatar_url").and_then(|x| x.as_str()).unwrap_or("").into(), assignees: people(&i["assignees"], "login"), reviewers: vec![],
+        labels: i["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().map(String::from)).collect(), description: i["body"].as_str().unwrap_or("").into(), draft: i["draft"].as_bool() == Some(true) }
 }

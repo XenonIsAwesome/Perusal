@@ -282,6 +282,31 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("GET")).and(path("/repos/o/b/pulls")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
     assert_eq!(gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await.unwrap().len(), 1);
 }
+#[tokio::test] async fn github_reviewable_adds_review_requests_from_outside_the_repo_list() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"full_name":"o/a","permissions":{"push":true}}]))).mount(&s).await;
+    let pr = |n: u64, repo: &str| json!({"html_url":format!("https://x/{repo}/pull/{n}"),"title":"T","number":n,"state":"open","merged_at":null,"updated_at":"2026","user":{"login":"u"},"assignees":[],"labels":[],"body":"","draft":false});
+    Mock::given(method("GET")).and(path("/repos/o/a/pulls")).respond_with(ResponseTemplate::new(200).set_body_json(json!([pr(1, "o/a")]))).mount(&s).await;
+    // the search finds the same pull request again plus one in a repository that is not in the list
+    let mut dup = pr(1, "o/a"); dup["repository_url"] = json!("https://api/repos/o/a");
+    let mut extra = pr(9, "z/other"); extra["repository_url"] = json!("https://api/repos/z/other");
+    Mock::given(method("GET")).and(path("/search/issues")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[dup, extra]}))).mount(&s).await;
+    let l = gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await.unwrap();
+    assert_eq!(l.iter().map(|m| (m.project.as_str(), m.number)).collect::<Vec<_>>(), vec![("o/a", 1), ("z/other", 9)]);
+}
+#[tokio::test] async fn github_review_request_search_covers_merged_and_reports_failure() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&s).await;
+    let item = json!({"html_url":"https://x/z/o/pull/4","title":"M","number":4,"state":"closed","pull_request":{"merged_at":"2026"},"updated_at":"2026","user":{"login":"u"},"assignees":[],"labels":[],"repository_url":"https://api/repos/z/o"});
+    Mock::given(method("GET")).and(path("/search/issues")).and(wiremock::matchers::query_param("q", "is:pr review-requested:@me is:merged")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[item]}))).expect(1).mount(&s).await;
+    let l = gh(&s).my_reviews("github.com", Role::Reviewable, StateFilter::Merged).await.unwrap();
+    assert_eq!((l[0].number, l[0].state.as_str()), (4, "merged"));
+    // with nothing else to show, a failed search is an error and not an empty list
+    let f = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user/repos")).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&f).await;
+    Mock::given(method("GET")).and(path("/search/issues")).respond_with(ResponseTemplate::new(429).insert_header("retry-after", "9")).mount(&f).await;
+    assert!(matches!(gh(&f).my_reviews("github.com", Role::Reviewable, StateFilter::Open).await, Err(Error::RateLimited(Some(9)))));
+}
 #[tokio::test] async fn gitlab_reviewable_errors_when_every_project_fails() {
     let s = MockServer::start().await;
     Mock::given(method("GET")).and(path("/projects")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7},{"id":8}]))).mount(&s).await;
