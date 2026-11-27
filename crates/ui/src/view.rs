@@ -1503,7 +1503,7 @@ impl View {
                 .children(sb).children(hsb)
                 .when(paned && multi, |d| d.child(div().id(("grip", k)).absolute().top(px(3.0)).left(relative(0.5)).ml(px(-14.0)).w(px(28.0)).h(px(20.0)).flex().items_center().justify_center().rounded_md().cursor_grab().text_color(p.muted).hover(move |s| s.bg(p.hover))
                     .on_drag(DraggedPane { from: k, title: title.clone(), pal: p }, |d, _, _, cx| cx.new(|_| DragPaneView(d.clone())))
-                    .tooltip_text("Drag onto another pane to swap them".to_string(), &p).child(icon(ic::DRAG_INDICATOR, 16.0, p.muted))));
+                    .tooltip_text("Drag onto another pane to swap them".to_string(), &p).child(div().flex().flex_col().gap(px(3.0)).children((0..2).map(|_| div().flex().gap(px(3.0)).children((0..3).map(|_| div().size(px(3.0)).rounded_full().bg(p.muted))))))));
             area = area.child(pane);
         }
         if paned {
