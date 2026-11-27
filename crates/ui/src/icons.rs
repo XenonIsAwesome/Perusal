@@ -132,3 +132,4 @@ pub const VIEW_QUILT: Icon = Icon('\u{e8f1}');
 pub const VIEW_STREAM: Icon = Icon('\u{e8ee}');
 pub const DASHBOARD: Icon = Icon('\u{e871}');
 pub const RESET_LAYOUT: Icon = Icon('\u{e8ba}');
+pub const DASHBOARD_CUSTOMIZE: Icon = Icon('\u{e99b}');

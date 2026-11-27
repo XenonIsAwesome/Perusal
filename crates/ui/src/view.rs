@@ -9,7 +9,7 @@ use perusal_agents::{CtxDraft, CtxThread, ReviewContext, launch_with, on_path, p
 use perusal_app::events::{self, Snapshot};
 use perusal_app::markdown::{self, Located};
 use perusal_app::notify::Kind as NKind;
-use perusal_app::panes::{Arrangement, BatchView, Corner, DividerId, Layout, Rect};
+use perusal_app::panes::{drop_zone, Arrangement, BatchView, Corner, DividerId, Drop, Edge, Layout, Rect};
 use perusal_app::settings::{DiffMode, MdMode, Settings};
 use perusal_app::theme::{self, Theme};
 use perusal_app::tree::{self, TreeRow};
@@ -89,7 +89,7 @@ pub struct View {
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds, b_panes: FieldBounds,
     /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
-    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
+    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
@@ -148,7 +148,7 @@ impl View {
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
         let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
-            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
+            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![],
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
@@ -371,7 +371,7 @@ impl View {
     /// Pane `k`'s rectangle in unit coordinates of the pane area.
     fn pane_rect(&self, k: usize) -> Rect { if self.paned() { self.layout.rects().get(k).map(|r| r.1).unwrap_or_default() } else { Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 } } }
     fn set_batch_panes(&mut self, on: bool) { if self.batch_panes != on { self.batch_panes = on; self.clear_selection(); self.shown = None; } }
-    fn set_arrangement(&mut self, a: Arrangement) { self.arrangement = a; self.clear_selection(); self.rebuild_rows(); }
+    fn set_arrangement(&mut self, a: Arrangement) { self.arrangement = a; self.layout = Layout::new(self.panes.len(), a); self.clear_selection(); self.rebuild_rows(); }
     fn set_fullscreen(&mut self, on: bool, cx: &mut Context<Self>) { if self.fullscreen != on { self.fullscreen = on; cx.emit(ViewEvent::Fullscreen); } }
     pub fn is_fullscreen(&self) -> bool { self.fullscreen }
     fn toggle_comment(&mut self, key: &str) { if !self.collapsed_c.remove(key) { self.collapsed_c.insert(key.to_string()); } self.rebuild_rows(); }
@@ -1020,7 +1020,7 @@ impl Render for View {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen, &mut this.pal_in, &mut this.rev_in] { i.dragging = false; }
                 if let Some((k, _)) = this.sb_drag.take() { if let Some(pn) = this.panes.get(k) { pn.list.scrollbar_drag_ended(); } }
-                this.hb_drag = None; this.pane_drag = None; this.pane_snapped = false;
+                this.hb_drag = None; this.pane_drag = None; this.pane_hover = None; this.pane_snapped = false;
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
                 if this.resizing_cd.take().is_some() { this.settings.commits_height = this.commits_h; this.save_settings(); }
                 cx.notify();
@@ -1325,7 +1325,7 @@ impl View {
         let inner = match &r.kind {
             RowKind::FileHeader => {
                 let paned = self.paned(); let closed = self.file_collapsed(fi); let f = &self.m.vm.files[fi];
-                return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).when(!paned, |d| d.cursor_pointer().hover(move |x| x.bg(p.hover)))
+                return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).when(!paned, |d| d.cursor_pointer().hover(move |x| x.bg(p.hover))).when(paned && self.panes.len() > 1, |d| d.pl(px(36.0)))
                     .when(!paned, |d| d.child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted))).child(div().flex_1().min_w_0().truncate().child(f.path.clone()))
                     .children(marks)
                     .child(div().flex().gap_2().text_xs().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
@@ -1490,8 +1490,24 @@ impl View {
             let (sb, hsb) = (self.scrollbar(k, cx), self.hscrollbar(k, cx));
             let title: SharedString = self.panes[k].key.first().and_then(|&fi| self.m.vm.files.get(fi)).map(|f| f.path.clone()).unwrap_or_default().into();
             let pane = div().id(("pane", k)).absolute().left(relative(r.x)).top(relative(r.y)).w(relative(r.w)).h(relative(r.h)).overflow_hidden()
-                .when(multi, |d| d.border_1().border_color(p.border).drag_over::<DraggedPane>(move |s, _, _, _| s.border_color(p.accent).bg(p.accent.opacity(0.12)))
-                    .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| { if this.layout.swap(d.from, k) { this.clear_selection(); } cx.notify(); })))
+                .when(multi, |d| d.border_1().border_color(p.border)
+                    .on_drag_move(cx.listener(move |this, ev: &gpui::DragMoveEvent<DraggedPane>, _, cx| {
+                        let (b, pos) = (ev.bounds, ev.event.position);
+                        let hover = (b.contains(&pos) && ev.drag(cx).from != k).then(|| {
+                            let (w, h): (f32, f32) = (b.size.width.into(), b.size.height.into());
+                            drop_zone((f32::from(pos.x) - f32::from(b.origin.x)) / w.max(1.0), (f32::from(pos.y) - f32::from(b.origin.y)) / h.max(1.0))
+                        }).map(|z| (k, z));
+                        if (hover.is_some() || this.pane_hover.map(|h| h.0) == Some(k)) && this.pane_hover != hover { this.pane_hover = hover; cx.notify(); }
+                    }))
+                    .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
+                        let zone = this.pane_hover.filter(|h| h.0 == k).map(|h| h.1).unwrap_or(Drop::Swap); this.pane_hover = None;
+                        let done = match zone { Drop::Swap => this.layout.swap(d.from, k), Drop::Split(e) => this.layout.move_pane(d.from, k, e) };
+                        if done { this.clear_selection(); } cx.notify();
+                    })))
+                .children(self.pane_hover.filter(|h| h.0 == k).map(|(_, z)| {
+                    let (x, y, w, h) = match z { Drop::Swap => (0.0, 0.0, 1.0, 1.0), Drop::Split(Edge::Left) => (0.0, 0.0, 0.5, 1.0), Drop::Split(Edge::Right) => (0.5, 0.0, 0.5, 1.0), Drop::Split(Edge::Top) => (0.0, 0.0, 1.0, 0.5), Drop::Split(Edge::Bottom) => (0.0, 0.5, 1.0, 0.5) };
+                    div().absolute().left(relative(x)).top(relative(y)).w(relative(w)).h(relative(h)).bg(p.accent.opacity(if z == Drop::Swap { 0.14 } else { 0.28 })).border_2().border_color(p.accent)
+                }))
                 .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, _, cx| {
                     let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
                     if dx != 0.0 && !ev.modifiers.control {
@@ -1501,9 +1517,9 @@ impl View {
                 }))
                 .child(list(list_state, cx.processor(move |this, ix: usize, _w, cx| { let g = start + ix; let el = this.render_row(g, cx); match this.row_tint(g) { Some(c) => div().w_full().bg(c).child(el).into_any_element(), None => el } })).size_full())
                 .children(sb).children(hsb)
-                .when(paned && multi, |d| d.child(div().id(("grip", k)).absolute().top(px(3.0)).left(relative(0.5)).ml(px(-14.0)).w(px(28.0)).h(px(20.0)).flex().items_center().justify_center().rounded_md().cursor_grab().text_color(p.muted).hover(move |s| s.bg(p.hover))
+                .when(paned && multi, |d| d.child(div().id(("grip", k)).absolute().top(px(3.0)).left(px(4.0)).w(px(28.0)).h(px(20.0)).flex().items_center().justify_center().rounded_md().cursor_grab().text_color(p.muted).hover(move |s| s.bg(p.hover))
                     .on_drag(DraggedPane { from: k, title: title.clone(), pal: p }, |d, _, _, cx| cx.new(|_| DragPaneView(d.clone())))
-                    .tooltip_text("Drag onto another pane to swap them".to_string(), &p).child(div().flex().flex_col().gap(px(3.0)).children((0..2).map(|_| div().flex().gap(px(3.0)).children((0..3).map(|_| div().size(px(3.0)).rounded_full().bg(p.muted))))))));
+                    .tooltip_text("Drag onto another pane: the middle swaps them, a side splits that pane".to_string(), &p).child(div().flex().flex_col().gap(px(3.0)).children((0..2).map(|_| div().flex().gap(px(3.0)).children((0..3).map(|_| div().size(px(3.0)).rounded_full().bg(p.muted))))))));
             area = area.child(pane);
         }
         if paned {
@@ -1626,7 +1642,8 @@ impl View {
         let one_sided = !batch.is_empty() && batch.iter().all(|&i| matches!(self.m.vm.files[i].status, Status::Added | Status::Deleted) || self.m.vm.files[i].symlink);
         let ncomments = self.comment_count();
         let (panes_on, fs) = (self.batch_panes, self.fullscreen);
-        let (arr_icon, arr_tip) = match self.arrangement { Arrangement::Auto => (ic::DASHBOARD, "Pane layout: automatic. Click to change"), Arrangement::Columns => (ic::VIEW_COLUMN, "Pane layout: side by side. Click to change"), Arrangement::Rows => (ic::HORIZONTAL_SPLIT, "Pane layout: stacked rows. Click to change"), Arrangement::Grid => (ic::GRID_VIEW, "Pane layout: grid. Click to change") };
+        let custom = self.layout.custom;
+        let (arr_icon, arr_tip) = if custom { (ic::DASHBOARD_CUSTOMIZE, "Pane layout: custom (you dragged panes). Click to pick a preset") } else { match self.arrangement { Arrangement::Auto => (ic::DASHBOARD, "Pane layout: automatic. Click to change"), Arrangement::Columns => (ic::VIEW_COLUMN, "Pane layout: side by side. Click to change"), Arrangement::Rows => (ic::HORIZONTAL_SPLIT, "Pane layout: stacked rows. Click to change"), Arrangement::Grid => (ic::GRID_VIEW, "Pane layout: grid. Click to change") } };
 
         let title = if batch.len() > 1 { div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Batch of {} files", batch.len()))).child(div().text_xs().text_color(p.muted).child(if manual { "grouped by you" } else { "related files" })) }
             else if let Some(f) = &first { let (dir, name) = match f.path.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n.to_string()), None => (String::new(), f.path.clone()) };
@@ -1697,8 +1714,8 @@ impl View {
                     .child(seg_icon("bv-panes", ic::VIEW_QUILT, "Show the files of this batch in split panes (w)", panes_on, &p).on_click(cx.listener(|this, _, _, cx| { this.set_batch_panes(true); cx.notify(); })))
                     .child(seg_icon("bv-stack", ic::VIEW_STREAM, "Show the files of this batch one after the other (w)", !panes_on, &p).on_click(cx.listener(|this, _, _, cx| { this.set_batch_panes(false); cx.notify(); }))))
                     .when(panes_on, |d| d.child(icon_btn("bv-arr", arr_icon, arr_tip, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
-                        let all = Arrangement::ALL; let i = all.iter().position(|a| *a == this.arrangement).unwrap_or(0); this.set_arrangement(all[(i + 1) % all.len()]); cx.notify();
-                    }))).child(icon_btn("bv-reset", ic::RESET_LAYOUT, "Reset the pane sizes (or double-click a divider)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.layout.reset_all(); cx.notify(); })))))
+                        let all = Arrangement::ALL; let i = all.iter().position(|a| *a == this.arrangement).unwrap_or(0); let next = if this.layout.custom { this.arrangement } else { all[(i + 1) % all.len()] }; this.set_arrangement(next); cx.notify();
+                    }))).child(icon_btn("bv-reset", ic::RESET_LAYOUT, "Reset the pane sizes (or double-click a divider)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.layout = Layout::new(this.panes.len(), this.arrangement); cx.notify(); })))))
                 .child(icon_btn("fullscreen", if fs { ic::FULLSCREEN_EXIT } else { ic::FULLSCREEN }, if fs { "Leave full screen (F11 or Esc)" } else { "Diff viewer full screen (F11)" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let on = !this.fullscreen; this.set_fullscreen(on, cx); cx.notify(); })))
                 .child(sep())
                 .children((!self.instant()).then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));

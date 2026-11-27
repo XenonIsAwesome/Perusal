@@ -50,7 +50,24 @@ pub struct Corner { pub v: DividerId, pub h: DividerId, pub x: f32, pub y: f32 }
 pub const SNAP_FRACTIONS: [f32; 5] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75];
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Layout { pub n: usize, pub arrangement: Arrangement, root: Node }
+pub struct Layout { pub n: usize, pub arrangement: Arrangement, /// Set once panes were dragged into a hand-made arrangement.
+    pub custom: bool, root: Node }
+
+/// The side of a pane something is dropped on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge { Left, Right, Top, Bottom }
+
+/// Where on a pane a dragged pane lands: an edge splits the target, the middle swaps the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drop { Swap, Split(Edge) }
+
+/// Which drop a point inside a pane (unit coordinates of that pane) means: the outer 28 % on a side splits that side, the rest swaps.
+pub fn drop_zone(rx: f32, ry: f32) -> Drop {
+    const E: f32 = 0.28;
+    let d = [(rx, Edge::Left), (1.0 - rx, Edge::Right), (ry, Edge::Top), (1.0 - ry, Edge::Bottom)];
+    let (dist, edge) = d.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+    if dist < E { Drop::Split(edge) } else { Drop::Swap }
+}
 
 fn equal(n: usize) -> Vec<f32> { vec![1.0 / n as f32; n] }
 
@@ -81,10 +98,10 @@ impl Layout {
                 if nrows == 1 { rows.into_iter().next().unwrap() } else { Node::Split { cols: false, fracs: equal(nrows), kids: rows } }
             }
         } };
-        Layout { n, arrangement, root }
+        Layout { n, arrangement, custom: false, root }
     }
     /// True when this layout was built for `n` panes and `arrangement`, so user resizing can be kept.
-    pub fn fits(&self, n: usize, arrangement: Arrangement) -> bool { self.n == n.max(1) && self.arrangement == arrangement }
+    pub fn fits(&self, n: usize, arrangement: Arrangement) -> bool { self.n == n.max(1) && (self.custom || self.arrangement == arrangement) }
 
     fn walk(node: &Node, r: Rect, path: &mut Vec<usize>, f: &mut impl FnMut(&Node, Rect, &[usize])) {
         f(node, r, path);
@@ -179,6 +196,42 @@ impl Layout {
         if a == b || a >= self.n || b >= self.n { return false; }
         go(&mut self.root, a, b); true
     }
+    /// Moves pane `from` next to pane `to` on `edge`: `to` is split in two and the panes around `from`'s old place grow into it.
+    pub fn move_pane(&mut self, from: usize, to: usize, edge: Edge) -> bool {
+        fn remove(n: &mut Node, a: usize) -> bool {
+            let Node::Split { fracs, kids, .. } = n else { return false };
+            if let Some(i) = kids.iter().position(|k| *k == Node::Leaf(a)) {
+                kids.remove(i); fracs.remove(i); let sum: f32 = fracs.iter().sum(); fracs.iter_mut().for_each(|f| *f /= sum);
+                if kids.len() == 1 { *n = kids.pop().unwrap(); }
+                return true;
+            }
+            kids.iter_mut().any(|k| remove(k, a))
+        }
+        fn insert(n: &mut Node, to: usize, from: usize, edge: Edge) -> bool {
+            match n {
+                Node::Leaf(i) if *i == to => {
+                    let cols = matches!(edge, Edge::Left | Edge::Right);
+                    let kids = if matches!(edge, Edge::Left | Edge::Top) { vec![Node::Leaf(from), Node::Leaf(to)] } else { vec![Node::Leaf(to), Node::Leaf(from)] };
+                    *n = Node::Split { cols, fracs: vec![0.5, 0.5], kids }; true
+                }
+                Node::Leaf(_) => false,
+                Node::Split { kids, .. } => kids.iter_mut().any(|k| insert(k, to, from, edge)),
+            }
+        }
+        // a split inside a split of the same direction is just more siblings
+        fn flatten(n: &mut Node) {
+            let Node::Split { cols, fracs, kids } = n else { return };
+            kids.iter_mut().for_each(flatten);
+            let (mut nf, mut nk) = (vec![], vec![]);
+            for (f, k) in fracs.iter().zip(kids.drain(..)) {
+                match k { Node::Split { cols: c2, fracs: f2, kids: k2 } if c2 == *cols => { for (a, b) in f2.into_iter().zip(k2) { nf.push(f * a); nk.push(b); } } k => { nf.push(*f); nk.push(k); } }
+            }
+            *fracs = nf; *kids = nk;
+        }
+        if from == to || from >= self.n || to >= self.n || !remove(&mut self.root, from) { return false; }
+        let ok = insert(&mut self.root, to, from, edge); flatten(&mut self.root);
+        self.custom = true; ok
+    }
     /// Equal sizes again for the split containing `id` (double-click on a divider).
     pub fn reset(&mut self, id: &DividerId) {
         if let Some(Node::Split { fracs, .. }) = node_at_mut(&mut self.root, &id.path) { let n = fracs.len(); *fracs = equal(n); }
@@ -239,6 +292,23 @@ mod tests { use super::*;
         assert!(l.swap(0, 2)); let after = l.rects();
         assert_eq!(after[0].1, before[2].1); assert_eq!(after[2].1, before[0].1); assert_eq!(after[1].1, before[1].1);
         assert!(!l.swap(1, 1) && !l.swap(0, 9)); assert!((area(&l) - 1.0).abs() < 1e-4);
+    }
+    #[test] fn moving_a_pane_splits_the_target_and_the_rest_fill_in() {
+        // 3 panes: 0 and 1 on top, 2 below. Drop 2 on the left of 0: three columns, 2 | 0 | 1.
+        let mut l = Layout::new(3, Arrangement::Auto); assert!(l.move_pane(2, 0, Edge::Left)); assert!(l.custom);
+        let r = l.rects(); assert!(r[2].1.x < r[0].1.x && r[0].1.x < r[1].1.x);
+        assert!((r[2].1.w - 0.25).abs() < 1e-4 && (r[0].1.w - 0.25).abs() < 1e-4 && (r[1].1.w - 0.5).abs() < 1e-4, "{r:?}");
+        assert!(r.iter().all(|(_, x)| (x.h - 1.0).abs() < 1e-4)); assert!((area(&l) - 1.0).abs() < 1e-4);
+        // 2x2 grid: drop 3 on the top of 0: 3 above 0 in the left column, 1 and 2 keep their halves
+        let mut g = Layout::new(4, Arrangement::Grid); assert!(g.move_pane(3, 0, Edge::Top));
+        let r = g.rects(); assert!(r[3].1.y < r[0].1.y && r[3].1.x == r[0].1.x && (r[3].1.h - 0.25).abs() < 1e-4, "{r:?}"); assert!((area(&g) - 1.0).abs() < 1e-4);
+        assert!(!g.move_pane(1, 1, Edge::Left) && !g.move_pane(9, 0, Edge::Left));
+        for n in 2..=7 { for a in Arrangement::ALL { for e in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] { let mut l = Layout::new(n, a); assert!(l.move_pane(n - 1, 0, e)); assert_eq!(l.rects().len(), n); assert!((area(&l) - 1.0).abs() < 1e-3, "{n} {a:?} {e:?}"); } } }
+        assert!(g.fits(4, Arrangement::Rows) && !g.fits(3, Arrangement::Grid), "custom layouts survive an arrangement change until reset");
+    }
+    #[test] fn drop_zones() {
+        assert_eq!(drop_zone(0.1, 0.5), Drop::Split(Edge::Left)); assert_eq!(drop_zone(0.9, 0.5), Drop::Split(Edge::Right));
+        assert_eq!(drop_zone(0.5, 0.05), Drop::Split(Edge::Top)); assert_eq!(drop_zone(0.5, 0.95), Drop::Split(Edge::Bottom)); assert_eq!(drop_zone(0.5, 0.5), Drop::Swap);
     }
     #[test] fn arrangement_serde() { #[derive(Serialize, Deserialize)] struct T { a: Arrangement, b: BatchView } let t: T = toml::from_str("a = \"grid\"\nb = \"stacked\"").unwrap(); assert_eq!((t.a, t.b), (Arrangement::Grid, BatchView::Stacked)); }
 }
