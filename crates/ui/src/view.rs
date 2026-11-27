@@ -363,7 +363,7 @@ impl View {
         self.hxs.resize(n, 0.0); self.hx_texts.truncate(n); while self.hx_texts.len() < n { self.hx_texts.push(Default::default()); }
         if self.paned() && !self.layout.fits(n, self.arrangement) { self.layout = Layout::new(n, self.arrangement); }
     }
-    fn reset_hx(&mut self) { for x in &mut self.hxs { *x = 0.0; } for c in &self.hx_texts { c.set(0.0); } }
+    fn reset_hx(&mut self) { self.hxs.fill(0.0); for c in &self.hx_texts { c.set(0.0); } }
     /// The pane a row belongs to.
     fn pane_of(&self, row: usize) -> usize { self.panes.iter().position(|p| p.range.contains(&row)).unwrap_or(0) }
     /// Pane `k`'s rectangle in unit coordinates of the pane area.
