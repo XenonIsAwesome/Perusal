@@ -85,6 +85,13 @@ impl ReviewVm {
         self.manual.retain(|g| g.len() >= 2); self.manual.push(members.clone());
         let _ = self.refresh(); self.select_file(members[0]);
     }
+    /// Manual groups as file paths (stable across reloads).
+    pub fn manual_paths(&self) -> Vec<Vec<String>> { self.manual.iter().map(|g| g.iter().filter_map(|&i| self.files.get(i).map(|f| f.path.clone())).collect()).collect() }
+    /// Restores manual groups saved by path; paths that are no longer in the review are skipped.
+    pub fn set_manual_paths(&mut self, groups: Vec<Vec<String>>) {
+        self.manual = groups.into_iter().map(|g| g.iter().filter_map(|p| self.files.iter().position(|f| &f.path == p)).collect::<Vec<_>>()).filter(|g| g.len() >= 2).collect();
+        let _ = self.refresh();
+    }
     /// Dissolves the manual group containing `fi`.
     pub fn ungroup(&mut self, fi: usize) { self.manual.retain(|g| !g.contains(&fi)); let _ = self.refresh(); }
     pub fn is_manually_grouped(&self, fi: usize) -> bool { self.manual.iter().any(|g| g.contains(&fi)) }
@@ -147,6 +154,11 @@ mod tests {
         vm.set_filter("additions > 8").unwrap(); assert_eq!(vm.batch_count(), 3);
         assert!(vm.set_filter("nope >").is_err()); assert_eq!(vm.filter, "additions > 8");
         vm.sort = "additions desc".into(); vm.refresh().unwrap(); assert_eq!(vm.files[vm.current_batch()[0]].path, "Cargo.lock");
+    }
+    #[test] fn manual_groups_by_path_roundtrip() {
+        let (_s, mut vm) = setup(); vm.group_files_manually(vec![2, 4]); let saved = vm.manual_paths(); assert_eq!(saved.len(), 1);
+        vm.ungroup(2); assert!(vm.manual.is_empty()); vm.set_manual_paths(saved); assert!(vm.is_manually_grouped(4));
+        vm.set_manual_paths(vec![vec!["gone.rs".into(), "also-gone.rs".into()]]); assert!(vm.manual.is_empty());
     }
     #[test] fn manual_groups_override_and_ungroup() {
         let (s, mut vm) = setup(); vm.group_files_manually(vec![2, 4]);

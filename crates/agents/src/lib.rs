@@ -159,7 +159,9 @@ pub fn find_program(program: &str) -> Option<std::path::PathBuf> {
 pub fn on_path(program: &str) -> bool { find_program(program).is_some() }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Selection { pub file: String, pub start: u32, pub end: u32, pub snippet: String }
+pub struct Selection { pub file: String, pub start: u32, pub end: u32, pub snippet: String,
+    /// All selected lines were removed lines, so `start`/`end` are old-side line numbers.
+    pub old_side: bool }
 
 impl Prompts {
     /// Ask-AI prompt: optional selected code, recent history and the question (template `chat.md`).
@@ -289,7 +291,7 @@ mod tests {
         assert!(parse_review("[{\"file\":\"a\",\"start_line\":5,\"end_line\":1,\"severity\":\"nit\",\"body\":\"x\"}]").is_err());
     }
     #[test] fn prompts_and_launch() {
-        let sel = Selection { file: "a.rs".into(), start: 2, end: 4, snippet: "fn x() {}".into() };
+        let sel = Selection { file: "a.rs".into(), start: 2, end: 4, snippet: "fn x() {}".into(), old_side: false };
         let p = Prompts::default().chat(Some(&sel), &[("user".into(), "hi".into()), ("agent".into(), "hello".into())], "why?");
         assert!(p.contains("a.rs:2-4") && p.contains("fn x() {}") && p.contains("untrusted") && p.contains("Reviewer: hi") && p.contains("You: hello") && p.trim_end().ends_with("Answer concisely."));
         assert!(!Prompts::default().chat(None, &[], "q").contains("{{"));

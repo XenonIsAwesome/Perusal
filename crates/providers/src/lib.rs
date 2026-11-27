@@ -6,7 +6,7 @@ pub mod auth;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind { GitHub, GitLab }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,7 +103,9 @@ pub enum Verdict { Approve, RequestChanges, Comment }
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineComment { pub path: String, pub start_line: u32, pub end_line: u32, pub body: String,
     /// Old-side line numbers paired with `start_line`/`end_line` (GitLab line codes need them); 0 when unknown.
-    pub start_old: u32, pub end_old: u32 }
+    pub start_old: u32, pub end_old: u32,
+    /// Line numbers are on the old side of the diff (a comment on a removed line).
+    pub old_side: bool }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: Verdict, pub comments: Vec<InlineComment>,
@@ -112,8 +114,16 @@ pub struct Submission { pub head_sha: String, pub summary: String, pub verdict: 
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Thread { pub id: String, pub path: Option<String>, pub line: Option<u32>, pub resolved: bool, pub comments: Vec<(String, String)>,
+    /// Host ids of `comments`, same order (used to react to, edit or delete a single comment).
+    pub comment_ids: Vec<String>,
+    /// GitHub only: the GraphQL id needed to resolve/unresolve the thread (`None` when it could not be fetched).
+    pub node_id: Option<String>,
     /// Avatar URL of each comment's author, parallel to `comments` (empty string when unknown).
     pub avatars: Vec<String> }
+impl Thread {
+    /// The id to pass to `resolve` for this host, if resolving is possible.
+    pub fn resolve_id(&self, kind: Kind) -> Option<&str> { match kind { Kind::GitLab => Some(self.id.as_str()), Kind::GitHub => self.node_id.as_deref() } }
+}
 
 #[derive(Debug)]
 pub enum Error { Unauthorized, RateLimited(Option<u64>), Offline(String), Unsupported(&'static str), Http(u16, String) }
@@ -160,6 +170,10 @@ pub trait Provider: Send + Sync {
     async fn reply(&self, _r: &MrRef, _thread: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("reply")) }
     async fn resolve(&self, _r: &MrRef, _thread: &str, _resolved: bool) -> Result<()> { Err(Error::Unsupported("resolve")) }
     async fn react(&self, _r: &MrRef, _thread: &str, _comment: &str, _emoji: &str) -> Result<()> { Err(Error::Unsupported("reactions")) }
+    /// Which of `comments` you have reacted to with `emoji` (ids as in `Thread::comment_ids`). Capped at 100 comments.
+    async fn my_reactions(&self, _r: &MrRef, _comments: &[String], _emoji: &str) -> Result<Vec<String>> { Err(Error::Unsupported("reactions")) }
+    /// Removes your own reaction `emoji` from a comment.
+    async fn unreact(&self, _r: &MrRef, _thread: &str, _comment: &str, _emoji: &str) -> Result<()> { Err(Error::Unsupported("remove reaction")) }
     async fn edit_comment(&self, _r: &MrRef, _thread: &str, _comment: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("edit")) }
     async fn delete_comment(&self, _r: &MrRef, _thread: &str, _comment: &str) -> Result<()> { Err(Error::Unsupported("delete")) }
     /// Login of the authenticated user.

@@ -96,11 +96,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let t = std::time::Instant::now();
             perusal_filter::sort(&idx, &mut sel, "additions + deletions desc, name asc")?;
             let srt = t.elapsed();
+            // The CPU side of drawing one very large file: line diff, syntax highlighting and split pairing (what the window does
+            // before it can show the first row). GPU painting and scroll rate need a display and are checked with screenshots.
+            let old: String = (0..50_000).map(|i| format!("fn item_{i}(x: u32) -> u32 {{ x + {i} }} // line {i}\n")).collect();
+            let new: String = (0..50_000).map(|i| if i % 7 == 0 { format!("fn item_{i}(x: u32) -> u32 {{ x * {i} + 1 }} // changed {i}\n") } else { format!("fn item_{i}(x: u32) -> u32 {{ x + {i} }} // line {i}\n") }).collect();
+            let t = std::time::Instant::now();
+            let ls = perusal_diff::text::diff_lines(&old, &new, 3); let diff_t = t.elapsed();
+            let t = std::time::Instant::now();
+            let hl = perusal_diff::text::highlight("rust", &new); let hl_t = t.elapsed();
+            let t = std::time::Instant::now();
+            let pairs = perusal_diff::text::split_pairs(&ls); let pair_t = t.elapsed();
+            println!("large file (50k lines): diff={diff_t:?} ({} rows) highlight={hl_t:?} ({} spans) split={pair_t:?} ({} pairs)", ls.len(), hl.len(), pairs.len());
             let rss_mb = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmHWM")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0) / 1024;
             println!("files={} open={open:?} filter={filt:?} sort={srt:?} peak_rss={rss_mb}MB", idx.len());
             let _ = std::fs::remove_dir_all(&d);
-            let ok = open.as_millis() < 1000 && filt.as_millis() < 100 && srt.as_millis() < 100 && rss_mb < 1024;
-            println!("budget (open<1s, filter<100ms, sort<100ms, mem<1GB): {}", if ok { "PASS" } else { "FAIL" });
+            let ok = open.as_millis() < 1000 && filt.as_millis() < 100 && srt.as_millis() < 100 && rss_mb < 1024 && (diff_t + hl_t + pair_t).as_millis() < 1500;
+            println!("budget (open<1s, filter<100ms, sort<100ms, mem<1GB, 50k-line file prepared<1.5s): {}", if ok { "PASS" } else { "FAIL" });
             if !ok { std::process::exit(1); }
         }
         Cmd::Export { repo, branch } => {

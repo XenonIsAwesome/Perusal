@@ -12,6 +12,12 @@ impl GraphVm {
     /// Select a contiguous range of rows (inclusive); only MR commits can be selected.
     pub fn select_range(&mut self, a: usize, b: usize) { let (lo, hi) = (a.min(b), a.max(b)); if self.rows.get(lo..=hi).map(|r| r.iter().all(|x| x.in_mr)).unwrap_or(false) { self.selection = Some((lo, hi)); } }
     pub fn clear(&mut self) { self.selection = None; }
+    /// The revisions the diffs should compare while a commit or range is selected: (parent of the oldest selected commit, newest selected commit).
+    pub fn revs(&self) -> Option<(String, String)> {
+        let (lo, hi) = self.selection?;
+        if !self.rows.get(lo)?.in_mr { return None; }
+        Some((format!("{}^", self.rows.get(hi)?.sha), self.rows[lo].sha.clone()))
+    }
     /// Paths to scope the file list to; `None` when nothing is selected.
     pub fn scope(&self, dir: &Path) -> Result<Option<HashSet<String>>, String> {
         let Some((lo, hi)) = self.selection else { return Ok(None) };

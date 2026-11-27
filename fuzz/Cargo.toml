@@ -1,0 +1,22 @@
+[package]
+name = "perusal-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+perusal-filter = { path = "../crates/filter" }
+perusal-diff = { path = "../crates/diff" }
+
+[[bin]]
+name = "filter_parser"
+path = "fuzz_targets/filter_parser.rs"
+test = false
+doc = false
+
+# keep this crate out of the main workspace
+[workspace]

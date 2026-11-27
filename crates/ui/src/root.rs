@@ -1,6 +1,6 @@
 //! Root: the tab strip (Home plus one tab per open review), the Home screen, shared Settings/setup, and notifications.
 use crate::icons as ic;
-use crate::kit::{self, badge, icon, icon_btn, icon_text_btn, input_text, loading_dots, pick_fonts, wire_input, Btn, Fonts, Input, Pal};
+use crate::kit::{self, badge, icon, icon_btn, icon_text_btn, input_text, loading_dots, wire_input, Btn, Fonts, Input, Pal};
 use crate::model::{self, Model, OpenErr};
 use crate::settings_view::{SettingsEvent, SettingsView};
 use crate::view::{View, ViewEvent};
@@ -74,7 +74,33 @@ impl Root {
             Initial::Url(u) => { r.url.f.set(&u); r.open_url(u, cx) }
         }
         if !r.settings.onboarded { r.open_settings(true, cx); }
+        r.listen_for_links(cx);
+        if perusal_app::desktop::appimage().is_some() && !perusal_app::desktop::entry_path(&std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default(), std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).as_deref()).exists() {
+            r.toast(NKind::Info, "Perusal is running from an AppImage. Register it for perusal:// links in Settings > Appearance > Links.", cx);
+        }
         r
+    }
+    /// Single instance: a second `perusal <link>` launch hands its link to this window over a Unix socket and exits.
+    fn listen_for_links(&mut self, cx: &mut Context<Self>) {
+        let sock = perusal_app::deeplink::socket_path(&model::data_dir());
+        let Ok(l) = perusal_app::deeplink::listen(&sock) else { return };
+        { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)); }
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || { while let Ok(m) = perusal_app::deeplink::accept_one(&l) { if tx.send(m).is_err() { break; } } });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                while let Ok(m) = rx.try_recv() {
+                    let alive = this.update(cx, |t, cx| {
+                        match perusal_app::deeplink::url_from_arg(m.trim()) {
+                            Ok(u) => { cx.activate(true); t.active = None; t.url.f.set(&u); t.open_url(u, cx); }
+                            Err(e) => t.toast(NKind::Error, format!("Ignored a link: {e}"), cx),
+                        }
+                    });
+                    if alive.is_err() { return; }
+                }
+            }
+        }).detach();
     }
     /// Loads the remembered My reviews filters.
     fn restore_mine(&mut self) {
@@ -114,7 +140,9 @@ impl Root {
     fn apply_settings(&mut self, s: Settings, cx: &mut Context<Self>) {
         let theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&theme);
         if let Some(sv) = &self.settings_view { sv.update(cx, |v, _| v.set_pal(Pal::new(&theme))); }
-        for t in &self.tabs { let s2 = s.clone(); t.view.update(cx, |v, _| v.apply_settings(s2)); }
+        kit::REDUCED_MOTION.store(s.motion_reduced(), std::sync::atomic::Ordering::Relaxed);
+        self.fonts = kit::pick_fonts_for(cx, &s); let fonts = self.fonts.clone();
+        for t in &self.tabs { let (s2, f2) = (s.clone(), fonts.clone()); t.view.update(cx, |v, _| v.apply_settings(s2, f2)); }
         self.settings = s; cx.notify();
     }
 
@@ -128,13 +156,7 @@ impl Root {
                 let v = cx.new(|_| View::new(m, settings, fonts));
                 let key = v.read(cx).key_id();
                 if let Some(i) = self.tabs.iter().position(|t| t.key == key) { self.active = Some(i); self.msg = None; cx.notify(); return; }
-                let sub = cx.subscribe(&v, |this, v, ev: &ViewEvent, cx| match ev {
-                    ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
-                    ViewEvent::OpenSettings => this.open_settings(false, cx),
-                    ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
-                    ViewEvent::Renamed(t) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.title = t.clone(); } this.refresh_recent(); cx.notify(); }
-                    ViewEvent::Ci(c) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.ci = c.clone(); } cx.notify(); }
-                });
+                let sub = Self::subscribe_view(&v, cx);
                 v.update(cx, |v, cx| v.start_polling(cx));
                 self.tabs.push(TabItem { key, title, ci: String::new(), view: v, _sub: sub }); self.active = Some(self.tabs.len() - 1); self.msg = None; self.token_host = None; self.refresh_recent();
             }
@@ -142,6 +164,39 @@ impl Root {
             Err(OpenErr::Msg(m)) => self.say(NKind::Error, m),
         }
         cx.notify();
+    }
+    /// Moves one tab's review to the MR's current head (drafts re-anchored, changed files unmarked) and swaps in the new view.
+    fn move_review_tab(&mut self, id: gpui::EntityId, url: String, old_head: String, cx: &mut Context<Self>) {
+        self.toast(NKind::Info, "Fetching the latest commits…".to_string(), cx);
+        let task = cx.background_executor().spawn(async move { Model::move_to_latest(&url, &old_head) });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |t, cx| {
+                match r {
+                    Ok((m, msg)) => {
+                        let Some(i) = t.tabs.iter().position(|x| x.view.entity_id() == id) else { return };
+                        let (fonts, settings) = (t.fonts.clone(), t.settings.clone());
+                        let v = cx.new(|_| View::new(m, settings, fonts)); let sub = Self::subscribe_view(&v, cx);
+                        v.update(cx, |v, cx| v.start_polling(cx));
+                        t.tabs[i].title = v.read(cx).tab_title(); t.tabs[i].view = v; t.tabs[i]._sub = sub;
+                        t.toast(NKind::Success, msg, cx);
+                    }
+                    Err(OpenErr::NeedsToken { host, .. }) => t.toast(NKind::Error, format!("Sign in to {host} from Settings to move this review."), cx),
+                    Err(OpenErr::Msg(m)) => t.toast(NKind::Error, m, cx),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn subscribe_view(v: &Entity<View>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(v, |this, v, ev: &ViewEvent, cx| match ev {
+                    ViewEvent::MoveHead { url, old_head } => this.move_review_tab(v.entity_id(), url.clone(), old_head.clone(), cx),
+                    ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
+                    ViewEvent::OpenSettings => this.open_settings(false, cx),
+                    ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
+                    ViewEvent::Renamed(t) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.title = t.clone(); } this.refresh_recent(); cx.notify(); }
+                    ViewEvent::Ci(c) => { let id = v.entity_id(); if let Some(tab) = this.tabs.iter_mut().find(|x| x.view.entity_id() == id) { tab.ci = c.clone(); } cx.notify(); }
+        })
     }
     fn tab_index(&self, id: gpui::EntityId) -> Option<usize> { self.tabs.iter().position(|t| t.view.entity_id() == id) }
     /// Closes a tab, first asking what to do with the review when leaving would lose work.
@@ -354,17 +409,17 @@ impl Root {
         }).collect();
         let custom = self.settings.custom_titlebar;
         let max = window.is_maximized();
-        let ctl = |id: &'static str, i: ic::Icon, tip_t: &'static str, danger: bool, cx: &mut Context<Self>, f: fn(&mut Window)| {
+        let ctl = |id: &'static str, i: ic::Icon, tip_t: &'static str, danger: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             let hv = if danger { gpui::rgb(0xe81123).into() } else { p.hover };
             kit::tip(div().id(id).flex().items_center().justify_center().w(px(46.0)).h(px(36.0)).cursor_pointer().hover(move |x| x.bg(hv)).child(icon(i, 16.0, p.fg))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |_, _, w, cx| { f(w); cx.notify(); })), tip_t, &p)
+                .on_click(cx.listener(move |this, _, w, cx| { f(this, w, cx); cx.notify(); })), tip_t, &p)
         };
         // the empty part of the strip drags the window; double click maximizes
         let drag = div().id("strip-drag").flex_1().h(px(36.0)).when(custom, |d| d.on_mouse_down(MouseButton::Left, cx.listener(|_, ev: &gpui::MouseDownEvent, w, _| { if ev.click_count >= 2 { w.zoom_window(); } else { w.start_window_move(); } })));
         div().flex().items_end().w_full().bg(p.surface).border_b_1().border_color(p.border).child(home).children(tabs).child(drag)
-            .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |w| w.minimize_window()))
-                .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |w| w.zoom_window()))
+            .when(custom, |d| d.child(ctl("win-min", ic::MINIMIZE, "Minimize", false, cx, |_, w, _| w.minimize_window()))
+                .child(ctl("win-max", if max { ic::FILTER_NONE } else { ic::CROP_SQUARE }, if max { "Restore" } else { "Maximize" }, false, cx, |_, w, _| w.zoom_window()))
                 .child(kit::tip(div().id("win-close").flex().items_center().justify_center().w(px(46.0)).h(px(36.0)).cursor_pointer().hover(|x| x.bg(gpui::rgb(0xe81123))).child(icon(ic::CLOSE, 16.0, p.fg))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, w, cx| { if this.request_quit(cx) { w.remove_window(); } cx.notify(); })), "Close", &p)))
@@ -601,6 +656,7 @@ impl Render for Root {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 let ks = &ev.keystroke; let ctrl = ks.modifiers.control || ks.modifiers.platform;
                 if this.close_req.is_some() { if ks.key == "escape" { this.resolve_close(CloseChoice::Cancel, cx); } return; }
+                if ctrl && ks.key == "q" && this.settings_view.is_none() { if this.request_quit(cx) { _w.remove_window(); } return; }
                 if let Some(sv) = this.settings_view.clone() { sv.update(cx, |v, cx| v.key(ev, cx)); return; }
                 if ctrl && ks.key == "tab" { this.cycle(if ks.modifiers.shift { -1 } else { 1 }, cx); return; }
                 if ctrl && ks.key == "w" { if let Some(a) = this.active { this.request_close_tab(a, cx); } return; }
@@ -626,7 +682,8 @@ pub fn run(initial: Initial) {
     std::thread::spawn(|| { let _ = perusal_agents::search_dirs(); }); // warm the login-shell PATH lookup off the UI thread
     gpui_platform::application().run(move |cx: &mut App| {
         let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/MaterialIcons-Regular.ttf").as_slice())]);
-        let fonts = pick_fonts(cx);
+        let st0 = model::load_settings(); kit::REDUCED_MOTION.store(st0.motion_reduced(), std::sync::atomic::Ordering::Relaxed);
+        let fonts = kit::pick_fonts_for(cx, &st0);
         let bounds = Bounds::centered(None, size(px(1480.0), px(900.0)), cx);
         let custom = model::load_settings().custom_titlebar;
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), window_min_size: Some(size(px(900.0), px(560.0))),

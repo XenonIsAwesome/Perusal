@@ -3,7 +3,9 @@
 use rusqlite::{params, Connection, Result};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Draft { pub id: i64, pub file: Option<String>, pub start_line: Option<u32>, pub end_line: Option<u32>, pub body: String, pub ai: bool }
+pub struct Draft { pub id: i64, pub file: Option<String>, pub start_line: Option<u32>, pub end_line: Option<u32>, pub body: String, pub ai: bool,
+    /// The line numbers refer to the old (removed) side of the diff, as for a comment on a deleted line.
+    pub old_side: bool }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecentRow { pub id: i64, pub key: String, pub title: String, pub viewed: u32, pub total: u32, pub drafts: u32, pub pinned: bool, pub state: String, pub mr_state: String }
@@ -22,9 +24,10 @@ impl Store {
             CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, review INTEGER, file TEXT, start_line INTEGER, end_line INTEGER, body TEXT, ai INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY, review INTEGER, role TEXT, text TEXT);
             CREATE TABLE IF NOT EXISTS journal(id INTEGER PRIMARY KEY, review INTEGER, at INTEGER, event TEXT);
+            CREATE TABLE IF NOT EXISTS groups(review INTEGER, gid INTEGER, path TEXT, PRIMARY KEY(review, path));
             CREATE TABLE IF NOT EXISTS review_ui(review INTEGER PRIMARY KEY, filter TEXT, sort TEXT);")?;
         // additive migrations for databases created by earlier versions
-        for alter in ["ALTER TABLE reviews ADD COLUMN mr_state TEXT DEFAULT ''", "ALTER TABLE reviews ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE chat ADD COLUMN conv INTEGER DEFAULT 0"] { let _ = conn.execute(alter, []); }
+        for alter in ["ALTER TABLE reviews ADD COLUMN mr_state TEXT DEFAULT ''", "ALTER TABLE reviews ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE chat ADD COLUMN conv INTEGER DEFAULT 0", "ALTER TABLE drafts ADD COLUMN old_side INTEGER DEFAULT 0"] { let _ = conn.execute(alter, []); }
         Ok(Store { conn })
     }
     pub fn memory() -> Result<Self> { Self::open(":memory:") }
@@ -65,6 +68,19 @@ impl Store {
         else { self.conn.execute("DELETE FROM viewed WHERE review=?1 AND path=?2", params![review, path])?; }
         self.log(review, &format!("viewed {path} {viewed}"))
     }
+    /// Manual file groups (made with Ctrl/Shift+click), by path, so they survive closing the review.
+    pub fn save_groups(&self, review: i64, groups: &[Vec<String>]) -> Result<()> {
+        self.conn.execute("DELETE FROM groups WHERE review=?1", params![review])?;
+        for (i, g) in groups.iter().enumerate() { for p in g { self.conn.execute("INSERT OR REPLACE INTO groups VALUES(?1,?2,?3)", params![review, i as i64, p])?; } }
+        Ok(())
+    }
+    pub fn load_groups(&self, review: i64) -> Result<Vec<Vec<String>>> {
+        let mut s = self.conn.prepare("SELECT gid,path FROM groups WHERE review=?1 ORDER BY gid, rowid")?;
+        let rows: Vec<(i64, String)> = s.query_map(params![review], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        let mut out: Vec<Vec<String>> = vec![]; let mut last = None;
+        for (g, p) in rows { if last != Some(g) { out.push(vec![]); last = Some(g); } out.last_mut().unwrap().push(p); }
+        Ok(out)
+    }
     pub fn viewed(&self, review: i64) -> Result<Vec<String>> {
         let mut s = self.conn.prepare("SELECT path FROM viewed WHERE review=?1 ORDER BY path")?;
         let r = s.query_map(params![review], |r| r.get(0))?.collect(); r
@@ -75,17 +91,18 @@ impl Store {
         let t: u32 = self.conn.query_row("SELECT total_files FROM reviews WHERE id=?1", params![review], |r| r.get(0))?;
         Ok((v, t))
     }
-    pub fn add_draft(&self, review: i64, file: Option<&str>, lines: Option<(u32, u32)>, body: &str, ai: bool) -> Result<i64> {
-        self.conn.execute("INSERT INTO drafts(review,file,start_line,end_line,body,ai) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![review, file, lines.map(|l| l.0), lines.map(|l| l.1), body, ai])?;
+    pub fn add_draft(&self, review: i64, file: Option<&str>, lines: Option<(u32, u32)>, body: &str, ai: bool) -> Result<i64> { self.add_draft_side(review, file, lines, body, ai, false) }
+    pub fn add_draft_side(&self, review: i64, file: Option<&str>, lines: Option<(u32, u32)>, body: &str, ai: bool, old_side: bool) -> Result<i64> {
+        self.conn.execute("INSERT INTO drafts(review,file,start_line,end_line,body,ai,old_side) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![review, file, lines.map(|l| l.0), lines.map(|l| l.1), body, ai, old_side])?;
         self.reopen(review);
         let id = self.conn.last_insert_rowid(); self.log(review, &format!("draft+ {id}"))?; Ok(id)
     }
     pub fn edit_draft(&self, id: i64, body: &str) -> Result<()> { self.conn.execute("UPDATE drafts SET body=?2 WHERE id=?1", params![id, body])?; Ok(()) }
     pub fn delete_draft(&self, id: i64) -> Result<()> { self.conn.execute("DELETE FROM drafts WHERE id=?1", params![id])?; Ok(()) }
     pub fn drafts(&self, review: i64) -> Result<Vec<Draft>> {
-        let mut s = self.conn.prepare("SELECT id,file,start_line,end_line,body,ai FROM drafts WHERE review=?1 ORDER BY id")?;
-        let r = s.query_map(params![review], |r| Ok(Draft { id: r.get(0)?, file: r.get(1)?, start_line: r.get(2)?, end_line: r.get(3)?, body: r.get(4)?, ai: r.get(5)? }))?.collect(); r
+        let mut s = self.conn.prepare("SELECT id,file,start_line,end_line,body,ai,COALESCE(old_side,0) FROM drafts WHERE review=?1 ORDER BY id")?;
+        let r = s.query_map(params![review], |r| Ok(Draft { id: r.get(0)?, file: r.get(1)?, start_line: r.get(2)?, end_line: r.get(3)?, body: r.get(4)?, ai: r.get(5)?, old_side: r.get::<_, i64>(6)? != 0 }))?.collect(); r
     }
     /// Markdown export of the drafts, grouped by file.
     pub fn export_markdown(&self, review: i64) -> Result<String> {
@@ -104,6 +121,7 @@ impl Store {
     pub fn move_head(&self, review: i64, new_head: &str, content: &dyn Fn(&str, bool) -> Option<String>) -> Result<Vec<i64>> {
         let mut lost = Vec::new();
         for d in self.drafts(review)? {
+            if d.old_side { continue; }
             let (Some(f), Some(a), Some(b)) = (&d.file, d.start_line, d.end_line) else { continue };
             let moved = match (content(f, true), content(f, false)) {
                 (Some(o), Some(n)) => perusal_diff::text::reanchor(&o, &n, (a, b)), _ => None };
@@ -139,7 +157,7 @@ impl Store {
         Ok(ids.len())
     }
     pub fn discard(&self, review: i64) -> Result<()> {
-        for t in ["viewed", "drafts", "journal", "chat", "review_ui"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
+        for t in ["viewed", "drafts", "journal", "chat", "groups", "review_ui"] { self.conn.execute(&format!("DELETE FROM {t} WHERE review=?1"), params![review])?; }
         self.conn.execute("DELETE FROM reviews WHERE id=?1", params![review])?; Ok(())
     }
     /// Rows for the recent-reviews page, pinned first then most recently opened.
@@ -188,6 +206,18 @@ mod tests {
         assert_eq!(s.recent().unwrap()[0].4, 2);
         let row = &s.recent_rows().unwrap()[0]; assert_eq!((row.key.as_str(), row.viewed, row.total, row.drafts), ("gh/o/r#1", 1, 4, 2));
         s.discard(r).unwrap(); assert!(s.recent().unwrap().is_empty());
+    }
+    #[test] fn old_side_drafts_keep_their_side_and_lines_on_move() {
+        let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h1", 1).unwrap();
+        let d = s.add_draft_side(r, Some("f"), Some((4, 4)), "was removed", false, true).unwrap(); let n = s.add_draft(r, Some("f"), Some((2, 2)), "new side", false).unwrap();
+        let lost = s.move_head(r, "h2", &|_, _| Some("a\nb\n".into())).unwrap(); assert!(!lost.contains(&d));
+        let ds = s.drafts(r).unwrap(); assert!(ds.iter().find(|x| x.id == d).unwrap().old_side && ds.iter().find(|x| x.id == d).unwrap().start_line == Some(4)); assert!(!ds.iter().find(|x| x.id == n).unwrap().old_side);
+    }
+    #[test] fn manual_groups_roundtrip() {
+        let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h", 3).unwrap();
+        s.save_groups(r, &[vec!["a.h".into(), "a.c".into()], vec!["x".into(), "y".into()]]).unwrap();
+        assert_eq!(s.load_groups(r).unwrap(), vec![vec!["a.h".to_string(), "a.c".to_string()], vec!["x".to_string(), "y".to_string()]]);
+        s.save_groups(r, &[]).unwrap(); assert!(s.load_groups(r).unwrap().is_empty());
     }
     #[test] fn move_head_reanchors() {
         let s = Store::memory().unwrap(); let r = s.open_review("k", "t", "h1", 1).unwrap();

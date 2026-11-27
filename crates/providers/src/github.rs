@@ -47,25 +47,26 @@ impl GitHub {
         // every repository failing (rate limit, expired token) is an error, not an empty list
         match first_err { Some(e) if !ok_any => Err(e), _ => Ok(out) }
     }
-    /// Database ids of the first comment of every resolved review thread (paged GraphQL, capped at 50 pages); empty on any failure.
-    async fn resolved_roots(&self, r: &MrRef) -> Vec<u64> {
-        let Some((owner, name)) = r.project.split_once('/') else { return vec![] };
-        let gql = if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) };
-        let (mut ids, mut cursor) = (vec![], Value::Null);
+    fn graphql_url(&self) -> String { if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) } }
+    /// Review threads by the database id of their first comment: (GraphQL node id, resolved). Paged (capped at 50 pages); empty on any failure.
+    async fn graphql_threads(&self, r: &MrRef) -> std::collections::HashMap<String, (Option<String>, bool)> {
+        let mut m = std::collections::HashMap::new();
+        let Some((owner, name)) = r.project.split_once('/') else { return m };
+        let gql = self.graphql_url(); let mut cursor = Value::Null;
         for _ in 0..50 {
-            let q = json!({"query": "query($o:String!,$n:String!,$p:Int!,$c:String){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100,after:$c){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{databaseId}}}}}}}",
+            let q = json!({"query": "query($o:String!,$n:String!,$p:Int!,$c:String){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100,after:$c){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}",
                 "variables": {"o": owner, "n": name, "p": r.number, "c": cursor}});
             let Ok(resp) = check(self.http.post(&gql).bearer_auth(&self.token).json(&q).send().await).await else { break };
             let Ok(v) = resp.json::<Value>().await else { break };
             let Some(rt) = v.pointer("/data/repository/pullRequest/reviewThreads") else { break };
             for n in rt["nodes"].as_array().into_iter().flatten() {
-                if n["isResolved"].as_bool() == Some(true) { if let Some(id) = n.pointer("/comments/nodes/0/databaseId").and_then(|x| x.as_u64()) { ids.push(id); } }
+                if let Some(db) = n.pointer("/comments/nodes/0/databaseId").and_then(|x| x.as_u64()) { m.insert(db.to_string(), (n["id"].as_str().map(String::from), n["isResolved"].as_bool() == Some(true))); }
             }
             if rt.pointer("/pageInfo/hasNextPage").and_then(|x| x.as_bool()) != Some(true) { break; }
             cursor = rt.pointer("/pageInfo/endCursor").cloned().unwrap_or(Value::Null);
             if cursor.is_null() { break; }
         }
-        ids
+        m
     }
 }
 
@@ -84,15 +85,16 @@ impl Provider for GitHub {
         for c in v {
             let root = c["in_reply_to_id"].as_u64().map(|x| x.to_string()).unwrap_or(c["id"].to_string());
             let who = c["user"]["login"].as_str().unwrap_or("").to_string(); let body = c["body"].as_str().unwrap_or("").to_string(); let av = c["user"]["avatar_url"].as_str().unwrap_or("").to_string();
-            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); t.avatars.push(av); }
-            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)], avatars: vec![av] }); }
+            let cid = c["id"].to_string();
+            if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.comments.push((who, body)); t.avatars.push(av); t.comment_ids.push(cid); }
+            else { out.push(Thread { id: root, path: c["path"].as_str().map(String::from), line: c["line"].as_u64().map(|l| l as u32), resolved: false, comments: vec![(who, body)], avatars: vec![av], comment_ids: vec![cid], node_id: None }); }
         }
-        // the REST API does not say which review threads are resolved; ask GraphQL (best effort)
-        for id in self.resolved_roots(r).await { if let Some(t) = out.iter_mut().find(|t| t.id == id.to_string()) { t.resolved = true; } }
+        // the REST API does not say which review threads are resolved nor gives their GraphQL ids; ask GraphQL (best effort)
+        for (root, (node, done)) in self.graphql_threads(r).await { if let Some(t) = out.iter_mut().find(|t| t.id == root) { t.node_id = node; t.resolved = done; } }
         // general conversation on the pull request (issue comments); optional, so a failure here keeps the inline threads
         if let Ok(resp) = check(self.req(reqwest::Method::GET, &format!("/repos/{}/issues/{}/comments?per_page=100", r.project, r.number)).send().await).await {
             if let Ok(list) = resp.json::<Vec<Value>>().await {
-                for c in list { out.push(Thread { id: format!("i{}", c["id"]), path: None, line: None, resolved: false, comments: vec![(c["user"]["login"].as_str().unwrap_or("").to_string(), c["body"].as_str().unwrap_or("").to_string())], avatars: vec![c["user"]["avatar_url"].as_str().unwrap_or("").to_string()] }); }
+                for c in list { out.push(Thread { id: format!("i{}", c["id"]), path: None, line: None, resolved: false, comments: vec![(c["user"]["login"].as_str().unwrap_or("").to_string(), c["body"].as_str().unwrap_or("").to_string())], avatars: vec![c["user"]["avatar_url"].as_str().unwrap_or("").to_string()], comment_ids: vec![], node_id: None }); }
             }
         }
         Ok(out)
@@ -101,8 +103,8 @@ impl Provider for GitHub {
     async fn submit(&self, r: &MrRef, s: &Submission) -> Result<()> {
         let event = match s.verdict { Verdict::Approve => "APPROVE", Verdict::RequestChanges => "REQUEST_CHANGES", Verdict::Comment => "COMMENT" };
         let comments: Vec<Value> = s.comments.iter().map(|c| if c.start_line != c.end_line {
-            json!({"path": c.path, "start_line": c.start_line, "line": c.end_line, "side": "RIGHT", "body": c.body})
-        } else { json!({"path": c.path, "line": c.end_line, "side": "RIGHT", "body": c.body}) }).collect();
+            json!({"path": c.path, "start_line": c.start_line, "line": c.end_line, "side": if c.old_side { "LEFT" } else { "RIGHT" }, "start_side": if c.old_side { "LEFT" } else { "RIGHT" }, "body": c.body})
+        } else { json!({"path": c.path, "line": c.end_line, "side": if c.old_side { "LEFT" } else { "RIGHT" }, "body": c.body}) }).collect();
         let body = json!({"commit_id": s.head_sha, "body": s.summary, "event": event, "comments": comments});
         // A review with nothing to say (no summary, no inline comments, a plain Comment verdict) is rejected by GitHub; skip it when only general comments remain.
         if !(s.verdict == Verdict::Comment && s.summary.is_empty() && s.comments.is_empty() && !s.general.is_empty()) {
@@ -131,7 +133,7 @@ impl Provider for GitHub {
     }
     async fn set_viewed(&self, r: &MrRef, path: &str, viewed: bool) -> Result<()> {
         // GraphQL: needs the PR node id first.
-        let gql = if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) };
+        let gql = self.graphql_url();
         let q = json!({"query": "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}",
             "variables": {"o": r.project.split('/').next(), "r": r.project.split('/').nth(1), "n": r.number}});
         let v: Value = check(self.http.post(&gql).bearer_auth(&self.token).json(&q).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
@@ -156,6 +158,27 @@ impl Provider for GitHub {
     }
     async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
         check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/comments/{comment}/reactions", r.project)).json(&json!({"content": emoji})).send().await).await.map(|_| ())
+    }
+    async fn my_reactions(&self, r: &MrRef, comments: &[String], emoji: &str) -> Result<Vec<String>> {
+        let me = self.current_user().await?;
+        let mut set = tokio::task::JoinSet::new();
+        for c in comments.iter().take(100) {
+            let (g, project, c, emoji, me) = (GitHub { http: self.http.clone(), api: self.api.clone(), token: self.token.clone() }, r.project.clone(), c.clone(), emoji.to_string(), me.clone());
+            set.spawn(async move {
+                let list: Vec<Value> = check(g.req(reqwest::Method::GET, &format!("/repos/{project}/pulls/comments/{c}/reactions?per_page=100")).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                Ok::<_, Error>(list.iter().any(|x| x["content"].as_str() == Some(emoji.as_str()) && x.pointer("/user/login").and_then(|l| l.as_str()) == Some(me.as_str())).then_some(c))
+            });
+        }
+        let mut out = vec![];
+        while let Some(res) = set.join_next().await { if let Ok(Ok(Some(c))) = res { out.push(c); } }
+        Ok(out)
+    }
+    async fn unreact(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        let me = self.current_user().await?;
+        let list: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/comments/{comment}/reactions?per_page=100", r.project)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let mine = list.iter().find(|x| x["content"].as_str() == Some(emoji) && x.pointer("/user/login").and_then(|l| l.as_str()) == Some(me.as_str())).and_then(|x| x["id"].as_u64());
+        let Some(id) = mine else { return Err(Error::Http(404, "you have not reacted with that".into())) };
+        check(self.req(reqwest::Method::DELETE, &format!("/repos/{}/pulls/comments/{comment}/reactions/{id}", r.project)).send().await).await.map(|_| ())
     }
     async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
         check(self.req(reqwest::Method::PATCH, &format!("/repos/{}/pulls/comments/{comment}", r.project)).json(&json!({"body": body})).send().await).await.map(|_| ())

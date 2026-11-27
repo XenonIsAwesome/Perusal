@@ -106,6 +106,24 @@ Settings > Appearance > **Open themes folder** opens `~/.config/perusal/themes/`
 ## Releases
 Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak bundle, a tarball, both browser extensions and `SHA256SUMS`. The package version is the tag without the `v`. Pull requests run the test suite and clippy.
 
+## v5 additions
+- **Keys:** `?` lists every shortcut and `Ctrl+P` opens a command palette (type to filter, Enter runs). Rebind keys in `~/.config/perusal/keymap.toml`:
+  ```toml
+  [keys]
+  comment = "z"
+  next_file = "j"
+  ```
+  A key bound twice or an unknown action name makes the whole file ignored, with a warning. Settings > Appearance > Keyboard has a vim preset (j/k) and opens the config folder.
+- **Quitting:** closing the window (or Ctrl+Q) with an unfinished review asks: Submit (remote reviews), Keep for later (drafts are saved either way), Discard.
+- **Existing threads:** each thread card has Reply, Resolve/Unresolve and a thumbs-up; your own comments and replies also have Edit and Delete. These go to the host at once and are not part of the pending review. The person icon in the header requests a review from the usernames you type.
+- **New commits:** when the host head changes a banner offers Move to latest. Drafts follow their lines where those survive (the toast says how many need a new place), and files that changed are marked unviewed again. A force-push is reported as such.
+- **Commits:** Shift+click a second commit in the graph to scope the review to the range.
+- **Comments on removed lines** are posted on the old side of the diff.
+- **Manual file groups** are saved with the review.
+- **Fonts and motion:** Settings > Appearance has UI font, code font, code line height, ligatures and Reduce motion.
+- **Tokens** go to the OS keychain when `secret-tool` is available (GNOME Keyring, KWallet); existing token files are moved there on first use.
+- **Links:** `perusal <link>` opens in the running window. For an AppImage, Settings > Appearance > Links registers it as the `perusal://` handler.
+- **GitLab sign-in** also works through the browser (OAuth device flow) once you enter the client ID of an OAuth application with device flow enabled.
 - **Overview:** pull/merge request reviews have two screens in the centre pane, switched with the Overview / Changes tabs or the `O` key. The Overview shows title, state, branches, the Markdown description and the general conversation (comments not tied to a line, plus your own global drafts), with a button to add a global comment and one to jump to the changes. It is the first screen by default; Settings > Review > First screen can open on the code instead. Selecting a file, `n`/`p`, `Enter` and the like jump to the code. Local branch reviews have no overview.
 
 - **User pictures:** people show with their host picture (overview author, assignees and reviewers, comment authors and replies, commits in the graph, My reviews rows). When a picture is unavailable or does not apply, such as a local git committer, you get a generated badge: two letters of the name (`XenonIsAwesome` is `XA`) on a colour picked from the name.
@@ -115,3 +133,8 @@ Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak
 - **Refresh:** the circular arrow in the review header (or R / F5) fetches new commits, CI and comments and brings the review up to date, keeping drafts, filter and sort; a spinner and a progress bar show it is working. Files you had marked viewed that changed in the update are unmarked (also when you reopen a review whose request has new commits).
 - **Tabs:** middle-click a review tab to close it. **Whole-request comments** (the overview Comment button) are drafts like any other and are posted as separate conversation threads when you finish the review.
 - **Search on Home:** Recent reviews and My reviews each have a search box above the filters. Every word you type must match (case-insensitive) the title, repository/branch or host, project, number, author or state, and it combines with the Remote and State chips. The clear button empties it.
+
+## Keyboard, search and reactions (v5.1)
+- **Go to file:** `Ctrl+Shift+P` opens a file search (file-name matches first); Enter jumps to the batch that holds the file. Files hidden by the current filter say so.
+- **Rebinding in the app:** Settings > Keyboard lists every shortcut; click one and press the new key (Esc cancels, conflicts and keys the app keeps for itself are refused). Changes apply at once and are written to `keymap.toml`, which then holds only your overrides.
+- **👍 toggle:** the 👍 button on a thread card is highlighted when you already liked that comment and then removes your reaction; otherwise it adds one.
