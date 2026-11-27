@@ -93,7 +93,7 @@ pub struct View {
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, md_was: bool, md_jump: bool, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>, gutter: HashMap<usize, usize>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>, gutter: HashMap<usize, (usize, bool, bool)>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_h: Option<f32>, resizing_cd: Option<(f32, f32)>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
@@ -268,7 +268,8 @@ impl View {
             };
             // files with nothing on one side (added, deleted, or only additions / only deletions) always use a single column
             let split = self.diff_mode == DiffMode::Split && !f.one_sided();
-            self.gutter.insert(fi, perusal_diff::digits(old.lines().count().max(new.lines().count()) as u32).max(3));
+            // line-number columns: as wide as the file's largest number needs, and only the sides that have numbers in the rows shown
+            self.gutter.insert(fi, (perusal_diff::digits(old.lines().count().max(new.lines().count()) as u32).max(3), lines.iter().any(|l| l.old_no.is_some()), lines.iter().any(|l| l.new_no.is_some())));
             if !split {
                 for l in &lines { hunk(&mut rows, l.old_no.unwrap_or(0), l.new_no.unwrap_or(0)); rows.push(Row { fi, kind: RowKind::Uni(rl(l)), ord: None, new_line: l.new_no, marks: vec![] }); }
             } else {
@@ -1294,9 +1295,10 @@ impl View {
     fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(r) = self.rows.get(ix).cloned() else { return div().into_any_element() };
         let p = self.pal; let h = px(20.0 * self.zoom * self.settings.line_height); let fsz_f = 13.0 * self.zoom; let fsz = px(fsz_f); let mono = self.fonts.mono.clone();
-        let fi = r.fi; let st = self.m.vm.files[fi].status; let (f_adds, f_dels) = (self.m.vm.files[fi].additions, self.m.vm.files[fi].deletions);
+        let fi = r.fi;
         // line-number column: wide enough for the file's largest line number at the current zoom, never wrapping
-        let gw = px((self.gutter.get(&fi).copied().unwrap_or(3) as f32 * 0.62 * fsz_f).ceil() + 16.0 * self.zoom);
+        let (gdigits, has_old, has_new) = self.gutter.get(&fi).copied().unwrap_or((3, true, true));
+        let gw = px((gdigits as f32 * 0.62 * fsz_f).ceil() + 16.0 * self.zoom);
         let sw = px(20.0 * self.zoom);
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
         let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).when(!self.settings.ligatures, |d| d.font_features(gpui::FontFeatures::disable_ligatures())).text_size(fsz).text_color(p.fg);
@@ -1360,7 +1362,7 @@ impl View {
                 let l = &rl.line;
                 let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
                 let gut = match l.kind { Kind::Added => p.added_word.opacity(0.55), Kind::Removed => p.removed_word.opacity(0.55), Kind::Context => gpui::transparent_black() };
-                let (show_old, show_new) = (st != Status::Added && !(f_dels == 0 && f_adds > 0), st != Status::Deleted && !(f_adds == 0 && f_dels > 0));
+                let (show_old, show_new) = (has_old, has_new);
                 base.bg(if selected { p.accent.opacity(0.28) } else { bg })
                     .when(show_old, |d| d.child(div().w(gw).flex_none().px_2().text_right().whitespace_nowrap().overflow_hidden().text_color(p.muted).bg(gut).child(l.old_no.map(|n| n.to_string()).unwrap_or_default())))
                     .when(show_new, |d| d.child(div().w(gw).flex_none().px_2().text_right().whitespace_nowrap().overflow_hidden().text_color(p.muted).bg(gut).child(l.new_no.map(|n| n.to_string()).unwrap_or_default())))

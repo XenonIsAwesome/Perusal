@@ -95,8 +95,13 @@ impl Provider for GitLab {
             }
             check(self.req(reqwest::Method::POST, &format!("{base}/draft_notes/bulk_publish")).send().await).await?;
             if s.verdict == Verdict::Approve {
-                // a refused approval is answered with 401 even though the token worked for the notes above
-                check(self.req(reqwest::Method::POST, &format!("{base}/approve")).send().await).await.map_err(|e| match e { Error::Unauthorized => Error::Http(401, "401 Unauthorized".into()), o => o })?;
+                // The comments are published by now. A refused approval is answered with 401 even though the token worked above, so it
+                // is kept as an HTTP error with the host's own body and marked as the approval step (see `explain_submit_error`).
+                let resp = self.req(reqwest::Method::POST, &format!("{base}/approve")).send().await;
+                match resp {
+                    Ok(r) if r.status().as_u16() == 401 => return Err(Error::Http(401, format!("{APPROVAL_STEP}{}", r.text().await.unwrap_or_default().chars().take(300).collect::<String>()))),
+                    other => check(other).await.map(|_| ()).map_err(|e| match e { Error::Http(c, b) => Error::Http(c, format!("{APPROVAL_STEP}{b}")), o => o })?,
+                }
             }
             Ok(())
         }.await;

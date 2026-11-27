@@ -45,10 +45,16 @@ impl GitHub {
             while let Some(r) = set.join_next().await { if let Ok(r) = r { results.push(r); } }
         }
         let (mut out, mut requested, mut first_err, mut ok_any) = (vec![], vec![], None, false);
+        let mut search_err = None;
         // Pull requests that ask for your review in repositories outside the capped list (or where you cannot push) come from search.
-        if matches!(state, StateFilter::Open | StateFilter::All) {
-            let q = format!("/search/issues?q=is:pr+review-requested:@me{}&sort=updated&order=desc&per_page=50", if state == StateFilter::Open { "+is:open" } else { "" });
-            if let Ok(resp) = check(self.req(reqwest::Method::GET, &q).send().await).await { if let Ok(v) = resp.json::<Value>().await { requested.extend(v["items"].as_array().into_iter().flatten().map(|i| search_row(i, host))); } }
+        // (an unreachable search is kept as the error to report when nothing else came back)
+        {
+            let st_q = match state { StateFilter::Open => "+is:open", StateFilter::Merged => "+is:merged", StateFilter::Closed => "+is:closed+is:unmerged", StateFilter::All => "" };
+            let q = format!("/search/issues?q=is:pr+review-requested:@me{st_q}&sort=updated&order=desc&per_page=50");
+            match check(self.req(reqwest::Method::GET, &q).send().await).await {
+                Ok(resp) => match resp.json::<Value>().await { Ok(v) => requested.extend(v["items"].as_array().into_iter().flatten().map(|i| search_row(i, host))), Err(e) => { search_err = Some(Error::Offline(e.to_string())); } },
+                Err(e) => { search_err = Some(e); }
+            }
         }
         for r in results {
             let (project, list) = match r { Ok(v) => v, Err(e) => { first_err.get_or_insert(e); continue } };
@@ -67,7 +73,8 @@ impl GitHub {
         let mut seen = std::collections::HashSet::new();
         out.extend(requested);
         out.retain(|m| seen.insert(m.url.clone()));
-        // every repository failing (rate limit, expired token) is an error, not an empty list
+        // every repository failing (rate limit, expired token) is an error, not an empty list; the repositories' error is the more telling one
+        let first_err = first_err.or(search_err);
         match first_err { Some(e) if !ok_any && out.is_empty() => Err(e), _ => Ok(out) }
     }
     fn graphql_url(&self) -> String { if self.api.ends_with("/api/v3") { self.api.replace("/api/v3", "/api/graphql") } else { format!("{}/graphql", self.api) } }

@@ -139,51 +139,59 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
-/// What the host said, without the JSON noise: GitHub's `message` plus its `errors` strings, GitLab's `message` / `error`; the raw text otherwise.
-fn host_reason(body: &str) -> String {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return body.trim().to_string() };
+/// Prefix of the error body when GitLab refused the approval itself, after the review's comments were already published.
+pub(crate) const APPROVAL_STEP: &str = "approval step: ";
+
+/// The host's reasons as separate lowercase strings: GitHub's `message` and each `errors` entry, GitLab's `message` / `error`; the raw text otherwise.
+fn host_reasons(body: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return vec![body.trim().to_lowercase()] };
     let mut parts: Vec<String> = vec![];
     for k in ["message", "error"] { match &v[k] { serde_json::Value::String(t) => parts.push(t.clone()), o if o.is_object() || o.is_array() => parts.push(o.to_string()), _ => {} } }
     if let Some(a) = v["errors"].as_array() { for e in a { match e { serde_json::Value::String(t) => parts.push(t.clone()), o => if let Some(m) = o["message"].as_str() { parts.push(m.to_string()) } } } }
-    if parts.is_empty() { body.trim().to_string() } else { parts.join("; ") }
+    if parts.is_empty() { parts.push(body.trim().to_string()) }
+    parts.into_iter().map(|p| p.to_lowercase()).collect()
 }
+/// What the host said, for the tail of a message.
+fn host_said(body: &str) -> String { host_reasons(body).join("; ") }
 
 /// Turns a failed review submission into the actual reason, per verdict and host, instead of a bare "http 422".
-/// `Unauthorized` is left to the caller (it usually does mean the token); everything else gets a sentence the user can act on.
+/// `Unauthorized` is left to the caller (it usually does mean the token). Only specific phrases are recognised; anything else gets a
+/// generic sentence that quotes the host.
 pub fn explain_submit_error(kind: &Kind, verdict: Verdict, e: &Error) -> String {
     let what = match verdict { Verdict::Approve => "approve", Verdict::RequestChanges => "request changes on", Verdict::Comment => "comment on" };
-    let (code, raw) = match e {
-        Error::Http(c, b) => (*c, host_reason(b)),
+    let (code, body) = match e {
+        Error::Http(c, b) => (*c, b.as_str()),
         Error::RateLimited(_) | Error::Offline(_) | Error::Unauthorized | Error::Unsupported(_) => return e.to_string(),
     };
-    let low = raw.to_lowercase();
     let host = match kind { Kind::GitHub => "GitHub", Kind::GitLab => "GitLab" };
-    let tail = format!(" ({host} said: {raw})");
-    let own = low.contains("your own") || low.contains("own pull request") || low.contains("own merge request") || low.contains("author");
+    if *kind == Kind::GitLab { if let Some(b) = body.strip_prefix(APPROVAL_STEP) {
+        // the comments went out before the approval call, so resubmitting would post them twice
+        return format!("Your comments were posted, but GitLab refused the approval: you may be the author, may have approved already, or may not be an eligible approver. Do not submit again, it would post the comments twice; delete your local drafts instead. (GitLab said: {})", host_said(b));
+    } }
+    let rs = host_reasons(body);
+    let any = |phrases: &[&str]| rs.iter().any(|r| phrases.iter().any(|p| r.contains(p)));
+    let tail = format!(" ({host} said: {})", rs.join("; "));
     match kind {
         Kind::GitHub => {
-            if own && verdict != Verdict::Comment { return format!("You cannot {what} your own pull request. Choose Comment instead.") }
-            if matches!(code, 404) { return format!("GitHub says this pull request was not found, which for a private repository usually means the token may not review it. Give the token pull-request write access.{tail}") }
+            if verdict != Verdict::Comment && any(&["your own pull request"]) { return format!("You cannot {what} your own pull request. Choose Comment instead.") }
+            if code == 404 { return format!("GitHub says this pull request was not found, which for a private repository usually means the token may not review it. Give the token pull-request write access.{tail}") }
             if code == 403 { return format!("Your token is not allowed to {what} this pull request. It needs write access to pull requests on this repository (a fine-grained token needs \"Pull requests: Read and write\").{tail}") }
-            if low.contains("commit_id") || low.contains("head sha") || low.contains("was not found in the pull request") { return format!("The pull request moved to a newer head than the one under review. Move to the latest commits first, then finish the review again.{tail}") }
-            if low.contains("closed") || low.contains("merged") { return format!("This pull request is closed or merged, so the host no longer accepts a review with {} .{tail}", match verdict { Verdict::Approve => "an approval", Verdict::RequestChanges => "a change request", Verdict::Comment => "comments" }) }
-            if low.contains("blank") || low.contains("body is required") || low.contains("can't be empty") || (verdict == Verdict::RequestChanges && low.contains("body")) {
+            if any(&["commit_id"]) { return format!("The pull request moved to a newer head than the one under review. Move to the latest commits first, then finish the review again.{tail}") }
+            if any(&["closed pull request", "pull request is closed", "merged pull request", "already merged"]) { return format!("This pull request is closed or merged, so GitHub no longer accepts that review.{tail}") }
+            if rs.iter().any(|r| r.contains("body") && (r.contains("can't be blank") || r.contains("is required"))) {
                 return match verdict { Verdict::RequestChanges => format!("GitHub requires a summary when you request changes. Write one in the summary box.{tail}"), _ => format!("GitHub refused an empty review. Add a summary or at least one comment.{tail}") }
             }
-            if low.contains("diff") || low.contains("could not be resolved") || low.contains("line must") || low.contains("position") || low.contains("path") {
+            if any(&["part of the diff", "could not be resolved", "diff hunk"]) {
                 return format!("Some inline comments point at lines that are not part of the pull request's diff on GitHub (the file or lines may have changed). Move to the latest commits or delete the comments that no longer fit.{tail}")
             }
             if code == 422 { return format!("GitHub rejected the review and cannot {what} it right now.{tail}") }
             format!("GitHub could not {what} this pull request (http {code}).{tail}")
         }
         Kind::GitLab => {
-            if verdict == Verdict::Approve && (matches!(code, 401 | 403 | 405 | 409) || own) {
-                return format!("GitLab did not let you approve this merge request. You may be its author, may have approved it already, or may not be an eligible approver; the rules of this project decide. Nothing was posted, so choose Comment to leave the review without approving.{tail}")
-            }
             if code == 403 { return format!("Your token is not allowed to {what} this merge request. It needs the api scope and at least Reporter access to the project.{tail}") }
             if code == 404 { return format!("GitLab says this merge request or project was not found, which usually means the token may not see it.{tail}") }
-            if low.contains("position") || low.contains("line_code") || low.contains("diff") { return format!("Some inline comments point at lines that are not in the merge request's diff on GitLab (the file or lines may have changed). Move to the latest commits or delete the comments that no longer fit.{tail}") }
-            if low.contains("closed") || low.contains("merged") { return format!("This merge request is closed or merged, so GitLab no longer accepts the review.{tail}") }
+            if any(&["line_code", "position is invalid", "not part of the diff"]) { return format!("Some inline comments point at lines that are not in the merge request's diff on GitLab (the file or lines may have changed). Move to the latest commits or delete the comments that no longer fit.{tail}") }
+            if any(&["merge request is closed", "closed merge request", "already merged"]) { return format!("This merge request is closed or merged, so GitLab no longer accepts the review.{tail}") }
             if code == 422 || code == 400 { return format!("GitLab rejected the review and cannot {what} it right now.{tail}") }
             format!("GitLab could not {what} this merge request (http {code}).{tail}")
         }
@@ -261,13 +269,23 @@ mod tests {
         let diff = Error::Http(422, r#"{"message":"Unprocessable Entity","errors":["Pull request review thread line must be part of the diff"]}"#.into());
         assert!(explain_submit_error(&Kind::GitHub, Verdict::Comment, &diff).contains("not part of the pull request's diff"));
         assert!(explain_submit_error(&Kind::GitHub, Verdict::Approve, &Error::Http(403, "{}".into())).contains("Pull requests"));
-        // GitLab answers a refused approval with 401, which is not a bad token
-        let m = explain_submit_error(&Kind::GitLab, Verdict::Approve, &Error::Http(401, r#"{"message":"401 Unauthorized"}"#.into()));
-        assert!(m.contains("approve this merge request") && m.contains("Nothing was posted"), "{m}");
+        // GitLab answers a refused approval with 401 after the comments are already published: say so, keep the host's words, do not advise resubmitting
+        let m = explain_submit_error(&Kind::GitLab, Verdict::Approve, &Error::Http(401, format!(r#"{APPROVAL_STEP}{{"message":"401 Unauthorized: not allowed"}}"#)));
+        assert!(m.contains("comments were posted") && m.contains("Do not submit again") && m.contains("not allowed"), "{m}");
+        assert!(!m.contains("Nothing was posted"));
+        // a 401 from an earlier step (no approval marker) is not that case
+        assert!(!explain_submit_error(&Kind::GitLab, Verdict::Approve, &Error::Http(403, "{}".into())).contains("comments were posted"));
         // unknown failures still carry the host's own words
         let m = explain_submit_error(&Kind::GitLab, Verdict::Comment, &Error::Http(500, r#"{"message":"boom"}"#.into()));
         assert!(m.contains("boom") && m.contains("http 500"), "{m}");
         assert_eq!(explain_submit_error(&Kind::GitHub, Verdict::Comment, &Error::RateLimited(Some(5))), "rate limited, retry in 5s");
+        // unrelated 422s that merely contain loose words are not mistaken for the specific cases
+        for body in [r#"{"message":"Validation Failed","errors":["Issue author association is blocked"]}"#, r#"{"message":"Validation Failed","errors":["file path is too long","closed-source notice","position of the moon"]}"#, r#"{"message":"Validation Failed","errors":["Review body encoding is invalid"]}"#] {
+            let m = explain_submit_error(&Kind::GitHub, Verdict::Approve, &Error::Http(422, body.into()));
+            assert!(m.starts_with("GitHub rejected the review") && !m.contains("your own") && !m.contains("diff") && !m.contains("closed or merged") && !m.contains("summary"), "{m}");
+        }
+        let m = explain_submit_error(&Kind::GitLab, Verdict::Comment, &Error::Http(422, r#"{"message":"author path position diff closed merged"}"#.into()));
+        assert!(m.starts_with("GitLab rejected the review"), "{m}");
     }
 
     use super::*;

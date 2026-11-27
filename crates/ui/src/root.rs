@@ -49,7 +49,7 @@ pub struct Root {
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>, r_search: Input, m_search: Input,
     recent: Vec<RecentRow>, r_remote: Remote, r_state: St,
-    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_gen: u64, recent_busy: bool, close_req: Option<CloseReq>, mine_saved: perusal_app::mine::Saved, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
+    mine: Vec<RemoteMr>, mine_errs: Vec<(String, String)>, mine_loading: bool, mine_role: Role, mine_state: StateFilter, mine_remote: Remote, mine_loaded: bool, mine_gen: u64, recent_busy: bool, recent_checked: Option<std::time::Instant>, close_req: Option<CloseReq>, mine_saved: perusal_app::mine::Saved, mine_sel: Sel, mine_me: std::collections::HashMap<String, String>, mine_dd: Option<Dim>, dd_search: Input,
     mrs: Vec<(u64, String, String)>, busy: bool, token_host: Option<String>, retry_url: Option<String>, msg: Option<(NKind, String)>,
 }
 
@@ -61,7 +61,7 @@ impl Root {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut r = Root { fs_applied: false, fs_confirmed: false, decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None, r_search: Input::new(""), m_search: Input::new(""),
-            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_gen: 0, recent_busy: false, close_req: None, mine_saved: perusal_app::mine::Saved::default(), mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
+            recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, mine_gen: 0, recent_busy: false, recent_checked: None, close_req: None, mine_saved: perusal_app::mine::Saved::default(), mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
         r.restore_mine();
         r.refresh_recent(); r.refresh_recent_states(cx);
@@ -337,10 +337,11 @@ impl Root {
     }
     /// Re-reads the host state (open / merged / closed) of the remote reviews on the Recent page in the background.
     fn refresh_recent_states(&mut self, cx: &mut Context<Self>) {
-        if self.recent_busy { return; }
+        // at most once a minute, so flipping between tabs does not hammer the hosts
+        if self.recent_busy || self.recent_checked.map(|t| t.elapsed() < std::time::Duration::from_secs(60)).unwrap_or(false) { return; }
         let rows: Vec<(i64, String)> = self.recent.iter().filter(|r| r.key.starts_with("remote:") && r.mr_state != "merged").take(40).map(|r| (r.id, r.key.trim_start_matches("remote:").to_string())).collect();
         if rows.is_empty() { return; }
-        self.recent_busy = true;
+        self.recent_busy = true; self.recent_checked = Some(std::time::Instant::now());
         let task = cx.background_executor().spawn(async move { model::refresh_mr_states(rows) });
         cx.spawn(async move |this, cx| { let changed = task.await; let _ = this.update(cx, |t, cx| { t.recent_busy = false; if changed > 0 { t.refresh_recent(); cx.notify(); } }); }).detach();
     }
