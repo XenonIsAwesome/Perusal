@@ -36,7 +36,8 @@ pub const CONTROLS: &[Control] = &[
 ];
 
 /// Controls that belong to the AI features; they are hidden while AI features are switched off.
-pub fn is_ai(id: &str) -> bool { matches!(id, "gen_filter" | "ai_review" | "ask_ai_tab" | "sel_ask_ai") }
+pub const AI_CONTROLS: &[&str] = &["gen_filter", "ai_review", "ask_ai_tab", "sel_ask_ai"];
+pub fn is_ai(id: &str) -> bool { AI_CONTROLS.contains(&id) }
 
 pub fn is_known(id: &str) -> bool { CONTROLS.iter().any(|c| c.id == id) }
 
@@ -50,6 +51,7 @@ pub fn normalize(ids: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests { use super::*;
     #[test] fn ids_are_unique() { for (i, c) in CONTROLS.iter().enumerate() { assert!(!CONTROLS[..i].iter().any(|d| d.id == c.id), "{}", c.id); } }
+    #[test] fn every_ai_control_is_in_the_catalog() { for id in AI_CONTROLS { assert!(is_known(id), "{id} is in AI_CONTROLS but not in CONTROLS"); } }
     #[test] fn normalize_drops_unknown_and_duplicates() {
         assert_eq!(normalize(vec!["sort".into(), "bogus".into(), "sort".into(), "finish".into()]), vec!["sort", "finish"]);
     }
