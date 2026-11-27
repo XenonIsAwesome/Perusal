@@ -91,7 +91,7 @@ pub struct View {
     /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
     panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
-    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, diff_mode: DiffMode, sym_target: Option<usize>,
+    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, md_was: bool, md_jump: bool, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
     sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
@@ -149,7 +149,7 @@ impl View {
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
         let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), md_olds: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
-            shown: None, nav_changed: true, base: vec![], rows: vec![], md_rendered: false, diff_mode: settings.diff_mode, sym_target: None,
+            shown: None, nav_changed: true, base: vec![], rows: vec![], md_rendered: false, md_was: false, md_jump: false, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![],
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
@@ -216,7 +216,11 @@ impl View {
         if batch.is_empty() { self.base.clear(); self.rows.clear(); self.shown = None; self.panes.clear(); return; }
         if self.shown.as_ref() == Some(&batch) { return; }
         self.reset_hx();
+        let new_batch = self.nav_changed;
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink); self.nav_changed = false; }
+        // opening a batch rendered, or switching to the rendered view, starts at the first change instead of the top of the file
+        if self.md_rendered && (new_batch || !self.md_was) { self.md_jump = true; }
+        self.md_was = self.md_rendered;
         self.shown = Some(batch.clone()); self.sym_target = None; self.sym_path = None;
         let p = self.pal;
         self.md_srcs.clear(); self.md_olds.clear();
@@ -273,6 +277,10 @@ impl View {
         }
         let mut ord = 0; for r in &mut rows { if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_)) { r.ord = Some(ord); ord += 1; } }
         self.base = rows; self.rebuild_rows();
+        if std::mem::take(&mut self.md_jump) {
+            let first = self.rows.iter().position(|r| matches!(&r.kind, RowKind::MdBlock(lb) if lb.change != markdown::Change::None));
+            if let Some(row) = first { if let Some(pn) = self.panes.get(self.pane_of(row)) { pn.list.scroll_to(gpui::ListOffset { item_ix: row.saturating_sub(pn.range.start).saturating_sub(1), offset_in_item: px(0.0) }); } }
+        }
     }
 
     /// Comments for a file: (end line it belongs to, card). Remote threads (anyone's) and your own drafts.
