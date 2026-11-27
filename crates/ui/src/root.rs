@@ -44,7 +44,7 @@ struct CloseReq { view: gpui::EntityId, quit: bool }
 struct TabItem { key: String, title: String, ci: String, view: Entity<View>, _sub: Subscription }
 
 pub struct Root {
-    settings: Settings, decor: WindowDecorations, pal: Pal, fonts: Fonts, focus: FocusHandle,
+    settings: Settings, decor: WindowDecorations, fs_applied: bool, pal: Pal, fonts: Fonts, focus: FocusHandle,
     tabs: Vec<TabItem>, active: Option<usize>, settings_view: Option<Entity<SettingsView>>, _ssub: Option<Subscription>, toasts: Toasts,
     htab: HTab, otab: OTab, hf: Option<Hf>,
     url: Input, repo: Input, branch: Input, base: Input, browse: Input, token: Input, rename: Input, renaming: Option<i64>, r_search: Input, m_search: Input,
@@ -59,7 +59,7 @@ impl Root {
     fn new(initial: Initial, fonts: Fonts, cx: &mut Context<Self>) -> Self {
         let settings = model::load_settings();
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
-        let mut r = Root { decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
+        let mut r = Root { fs_applied: false, decor: if settings.custom_titlebar { WindowDecorations::Client } else { WindowDecorations::Server }, pal: Pal::new(&theme), fonts, focus: cx.focus_handle(), tabs: vec![], active: None, settings_view: None, _ssub: None, toasts: Toasts::default(),
             htab: HTab::Recent, otab: OTab::Url, hf: Some(Hf::Url), url: Input::new(""), repo: Input::new(""), branch: Input::new(""), base: Input::new(""), browse: Input::new(""), token: Input::new(""), rename: Input::new(""), renaming: None, r_search: Input::new(""), m_search: Input::new(""),
             recent: vec![], r_remote: Remote::All, r_state: St::All, mine: vec![], mine_errs: vec![], mine_loading: false, mine_role: Role::Reviewable, mine_state: StateFilter::Open, mine_remote: Remote::All, mine_loaded: false, close_req: None, mine_saved: perusal_app::mine::Saved::default(), mine_sel: Sel::default(), mine_me: Default::default(), mine_dd: None, dd_search: Input::new(""),
             mrs: vec![], busy: false, token_host: None, retry_url: None, msg: None, settings };
@@ -191,6 +191,7 @@ impl Root {
     fn subscribe_view(v: &Entity<View>, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe(v, |this, v, ev: &ViewEvent, cx| match ev {
                     ViewEvent::MoveHead { url, old_head } => this.move_review_tab(v.entity_id(), url.clone(), old_head.clone(), cx),
+                    ViewEvent::Fullscreen => cx.notify(),
                     ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
                     ViewEvent::OpenSettings => this.open_settings(false, cx),
                     ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
@@ -645,7 +646,10 @@ impl Render for Root {
         if self.decor != decor { self.decor = decor; w.request_decorations(decor); }
         self.sync_mine_state();
         let resizable = self.settings.custom_titlebar && !w.is_maximized() && !w.is_fullscreen();
-        let strip = self.tab_strip(w, cx);
+        // a review in full screen takes the whole window: no tab strip, and the window itself goes full screen
+        let fs = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.view.read(cx).is_fullscreen()).unwrap_or(false);
+        if fs != self.fs_applied { self.fs_applied = fs; if fs != w.is_fullscreen() { w.toggle_fullscreen(); } }
+        let strip = (!fs).then(|| self.tab_strip(w, cx));
         let body = match self.active.and_then(|i| self.tabs.get(i)) { Some(t) => div().flex().flex_col().flex_1().min_h_0().child(t.view.clone()).into_any_element(), None => self.render_home(cx).into_any_element() };
         let toasts = self.toast_stack(cx);
         let settings = self.settings_view.clone();
@@ -662,7 +666,7 @@ impl Render for Root {
                 if ctrl && ks.key == "w" { if let Some(a) = this.active { this.request_close_tab(a, cx); } return; }
                 if let Some(t) = this.active.and_then(|i| this.tabs.get(i)) { let v = t.view.clone(); v.update(cx, |v, cx| v.key(ev, cx)); } else { this.home_key(ev, cx); }
             }))
-            .child(strip).child(body).children(settings).children(close_modal).children(toasts)
+            .children(strip).child(body).children(settings).children(close_modal).children(toasts)
             .when(resizable, |d| {
                 let edge = |id: &'static str, e: ResizeEdge, c: CursorStyle| div().id(id).absolute().cursor(c).on_mouse_down(MouseButton::Left, move |_, w, cx| { w.start_window_resize(e); cx.stop_propagation(); });
                 let t = px(5.0); let k = px(12.0);

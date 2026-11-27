@@ -9,6 +9,7 @@ use perusal_agents::{CtxDraft, CtxThread, ReviewContext, launch_with, on_path, p
 use perusal_app::events::{self, Snapshot};
 use perusal_app::markdown::{self, Located};
 use perusal_app::notify::Kind as NKind;
+use perusal_app::panes::{Arrangement, BatchView, Corner, DividerId, Layout, Rect};
 use perusal_app::settings::{DiffMode, MdMode, Settings};
 use perusal_app::theme::{self, Theme};
 use perusal_app::tree::{self, TreeRow};
@@ -61,7 +62,13 @@ enum RowKind { FileHeader, /// one block of a rendered Markdown file shown insid
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32>, marks: Vec<Mark> }
 
-pub enum ViewEvent { Home, OpenSettings, MoveHead { url: String, old_head: String }, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
+/// One scrolling diff list. In split-pane mode there is one per file of the batch; stacked, a single one holds every file.
+struct Pane { key: Vec<usize>, range: Range<usize>, list: ListState, all: bool }
+/// What the mouse is dragging in the pane area.
+#[derive(Clone)]
+enum PaneDrag { Divider(DividerId), Corner(Corner) }
+
+pub enum ViewEvent { Fullscreen, Home, OpenSettings, MoveHead { url: String, old_head: String }, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
 impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
@@ -70,12 +77,14 @@ pub struct View {
     new_head: Option<String>, head_dismissed: bool, rev_open: bool, rev_in: Input, me: Option<String>, keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_files: bool, pal_in: Input, pal_idx: usize, help_open: bool,
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
     refreshing: bool, md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
-    focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, list_all: bool, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
-    b_body: FieldBounds, b_composer: FieldBounds,
+    focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
+    b_body: FieldBounds, b_composer: FieldBounds, b_panes: FieldBounds,
+    /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
+    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
-    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, list: ListState, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
+    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<f32>, hx: f32, hb_drag: Option<f32>, hx_text: std::rc::Rc<std::cell::Cell<f32>>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_h: Option<f32>, resizing_cd: Option<(f32, f32)>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
@@ -129,10 +138,10 @@ impl View {
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
-        let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
-            b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
-            shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
-            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
+        let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
+            shown: None, nav_changed: true, base: vec![], rows: vec![], md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
+            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![],
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
@@ -162,12 +171,15 @@ impl View {
         self.fonts = fonts; self.keys = extra::load_keys(s.vim_keys).0;
         let regroup = s.group_related != self.settings.group_related || s.group_rules != self.settings.group_rules || s.files_tree != self.settings.files_tree;
         let diff_changed = s.diff_mode != self.settings.diff_mode;
+        let panes_changed = (s.batch_view != self.settings.batch_view, s.pane_arrangement != self.settings.pane_arrangement);
         self.theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme);
         self.tree = s.files_tree; self.m.vm.dir_order = s.files_tree; self.m.vm.grouping = s.group_related; self.m.vm.rules = s.group_rules.clone();
         if diff_changed { self.diff_mode = s.diff_mode; }
         self.settings.left_width = self.left_w; self.settings.right_width = self.right_w;
         let ws = s.hide_whitespace != self.settings.hide_whitespace;
         self.presets = model::load_presets();
+        if panes_changed.0 { self.batch_panes = s.batch_view == BatchView::Panes; }
+        if panes_changed.1 { self.arrangement = s.pane_arrangement; }
         self.settings = s; self.shown = None;
         if ws { self.m.vm.hide_whitespace = self.settings.hide_whitespace; let _ = self.m.vm.refresh(); }
         if regroup { let keep = self.current_file(); let _ = self.m.vm.refresh(); if let Some(fi) = keep { self.m.vm.select_file(fi); } }
@@ -191,9 +203,9 @@ impl View {
     // ---------- diff rows
     fn load_diff(&mut self) {
         let batch = self.m.vm.current_batch().to_vec();
-        if batch.is_empty() { self.base.clear(); self.rows.clear(); self.md = None; self.shown = None; self.list.reset(0); return; }
+        if batch.is_empty() { self.base.clear(); self.rows.clear(); self.md = None; self.shown = None; self.panes.clear(); return; }
         if self.shown.as_ref() == Some(&batch) { return; }
-        self.hx = 0.0; self.hx_text.set(0.0);
+        self.reset_hx();
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink); self.nav_changed = false; }
         self.shown = Some(batch.clone()); self.md = None; self.sym_target = None; self.sym_path = None;
         let p = self.pal;
@@ -274,7 +286,7 @@ impl View {
     }
     /// Inserts comment cards into the diff rows next to the lines they belong to.
     fn rebuild_rows(&mut self) {
-        let top = self.list.logical_scroll_top();
+        let tops: Vec<(Vec<usize>, gpui::ListOffset)> = self.panes.iter().map(|p| (p.key.clone(), p.list.logical_scroll_top())).collect();
         let mut out: Vec<Row> = Vec::with_capacity(self.base.len() + 8);
         let files: Vec<usize> = { let mut f: Vec<usize> = vec![]; for r in &self.base { if !f.contains(&r.fi) { f.push(r.fi); } } f };
         for fi in files {
@@ -316,11 +328,41 @@ impl View {
         }
         self.rows = out;
         if self.find_open && self.page == Page::Code { self.recompute_find(); }
-        // measure every row up front so the scroll range is exact (otherwise it keeps growing as unseen rows are measured); huge diffs stay lazy
-        let all = self.rows.len() <= 4000;
-        if all != self.list_all { self.list = ListState::new(self.rows.len(), ListAlignment::Top, px(600.0)); if all { self.list = self.list.clone().measure_all(); } self.list_all = all; } else { self.list.reset(self.rows.len()); }
-        self.list.scroll_to(top);
+        self.build_panes(tops);
     }
+    /// True when the shown batch has several files and the user wants them in split panes.
+    fn paned(&self) -> bool { self.batch_panes && self.shown.as_ref().map(|b| b.len() > 1).unwrap_or(false) }
+    /// Splits the rows into one list per file (split panes) or a single list (stacked), keeping scroll positions.
+    fn build_panes(&mut self, tops: Vec<(Vec<usize>, gpui::ListOffset)>) {
+        let mut spans: Vec<(Vec<usize>, Range<usize>)> = vec![];
+        if self.paned() {
+            for (i, r) in self.rows.iter().enumerate() { match spans.last_mut() { Some((k, rg)) if k[0] == r.fi => rg.end = i + 1, _ => spans.push((vec![r.fi], i..i + 1)) } }
+        } else { spans.push((self.shown.clone().unwrap_or_default(), 0..self.rows.len())); }
+        let old = std::mem::take(&mut self.panes);
+        for (key, range) in spans {
+            let len = range.len();
+            // measure every row up front so the scroll range is exact (otherwise it keeps growing as unseen rows are measured); huge diffs stay lazy
+            let all = len <= 4000;
+            let list = match old.iter().find(|o| o.key == key && o.all == all) {
+                Some(o) => { o.list.reset(len); o.list.clone() }
+                None => { let l = ListState::new(len, ListAlignment::Top, px(600.0)); if all { l.clone().measure_all() } else { l } }
+            };
+            if let Some((_, t)) = tops.iter().find(|(k, _)| *k == key) { list.scroll_to(*t); }
+            self.panes.push(Pane { key, range, list, all });
+        }
+        let n = self.panes.len();
+        self.hxs.resize(n, 0.0); self.hx_texts.truncate(n); while self.hx_texts.len() < n { self.hx_texts.push(Default::default()); }
+        if self.paned() && !self.layout.fits(n, self.arrangement) { self.layout = Layout::new(n, self.arrangement); }
+    }
+    fn reset_hx(&mut self) { for x in &mut self.hxs { *x = 0.0; } for c in &self.hx_texts { c.set(0.0); } }
+    /// The pane a row belongs to.
+    fn pane_of(&self, row: usize) -> usize { self.panes.iter().position(|p| p.range.contains(&row)).unwrap_or(0) }
+    /// Pane `k`'s rectangle in unit coordinates of the pane area.
+    fn pane_rect(&self, k: usize) -> Rect { if self.paned() { self.layout.rects().get(k).map(|r| r.1).unwrap_or_default() } else { Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 } } }
+    fn set_batch_panes(&mut self, on: bool) { if self.batch_panes != on { self.batch_panes = on; self.clear_selection(); self.rebuild_rows(); } }
+    fn set_arrangement(&mut self, a: Arrangement) { self.arrangement = a; self.clear_selection(); self.rebuild_rows(); }
+    fn set_fullscreen(&mut self, on: bool, cx: &mut Context<Self>) { if self.fullscreen != on { self.fullscreen = on; cx.emit(ViewEvent::Fullscreen); } }
+    pub fn is_fullscreen(&self) -> bool { self.fullscreen }
     fn toggle_comment(&mut self, key: &str) { if !self.collapsed_c.remove(key) { self.collapsed_c.insert(key.to_string()); } self.rebuild_rows(); }
     /// Collapse (or expand) every comment on the current file(s).
     fn collapse_all_comments(&mut self) {
@@ -744,7 +786,7 @@ impl View {
     }
     fn scroll_to_hit(&mut self) {
         let Some(h) = self.find_hits.get(self.find_cur) else { return };
-        if self.page == Page::Code { self.list.scroll_to(gpui::ListOffset { item_ix: h.row.saturating_sub(3), offset_in_item: px(0.0) }); } else { self.ov_scroll.scroll_to_item(h.row); }
+        if self.page == Page::Code { if let Some(pn) = self.panes.get(self.pane_of(h.row)) { pn.list.scroll_to(gpui::ListOffset { item_ix: h.row.saturating_sub(pn.range.start).saturating_sub(3), offset_in_item: px(0.0) }); } } else { self.ov_scroll.scroll_to_item(h.row); }
     }
     /// The active search text while looking at the diff (empty otherwise); rendered Markdown blocks highlight with it.
     fn find_query(&self) -> String { if self.find_open && self.page == Page::Code { self.find_in.f.text.clone() } else { String::new() } }
@@ -903,7 +945,7 @@ impl View {
         if ctrl && matches!(key, "=" | "+" | "-" | "0") { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), _ => self.zoom = theme::zoom(self.zoom, 0) } cx.notify(); return; }
         if key == "f5" { self.refresh(cx); }
         else if key == "escape" {
-            if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else { cx.emit(ViewEvent::Home); return; }
+            if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else if self.fullscreen { self.set_fullscreen(false, cx); } else { cx.emit(ViewEvent::Home); return; }
         } else {
             let name = perusal_app::keymap::press_name(ctrl, ks.modifiers.alt, ks.modifiers.shift, key, ks.key_char.as_deref());
             if let Some(a) = perusal_app::keymap::action_for(&self.keys, &name).map(str::to_string) {
@@ -929,7 +971,7 @@ impl Render for View {
         self.flush(cx);
         self.load_diff();
         if self.tree { self.trows = tree::build_rows(&self.m.vm.files, &self.m.vm.visible, &self.collapsed); }
-        let p = self.pal; let z = self.zoom;
+        let p = self.pal; let z = self.zoom; let fs = self.fullscreen;
         let (viewed, total) = self.m.vm.progress();
         let frac = if total == 0 { 0.0 } else { viewed as f32 / total as f32 };
         let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
@@ -966,8 +1008,8 @@ impl Render for View {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.blur(cx); cx.notify(); }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.dragging = false; for i in [&mut this.filter, &mut this.sort, &mut this.comment, &mut this.ask, &mut this.summary, &mut this.preset_name, &mut this.rename, &mut this.gen, &mut this.pal_in, &mut this.rev_in] { i.dragging = false; }
-                if this.sb_drag.take().is_some() { this.list.scrollbar_drag_ended(); }
-                this.hb_drag = None;
+                if let Some((k, _)) = this.sb_drag.take() { if let Some(pn) = this.panes.get(k) { pn.list.scrollbar_drag_ended(); } }
+                this.hb_drag = None; this.pane_drag = None; this.pane_snapped = false;
                 if this.resizing.take().is_some() { this.settings.left_width = this.left_w; this.settings.right_width = this.right_w; this.save_settings(); }
                 if this.resizing_cd.take().is_some() { this.settings.commits_height = this.commits_h; this.save_settings(); }
                 cx.notify();
@@ -977,20 +1019,22 @@ impl Render for View {
                 let zoom = this.zoom; let vw: f32 = w.viewport_size().width.into(); let x: f32 = ev.position.x.into(); let y: f32 = ev.position.y.into();
                 if let Some((y0, h0)) = this.resizing_cd { this.commits_h = Some((h0 + (y - y0)).clamp(60.0, 700.0)); cx.notify(); }
                 match this.resizing { Some(Side::Left) => { this.left_w = (x / zoom).clamp(200.0, 700.0); cx.notify(); } Some(Side::Right) => { this.right_w = ((vw - x) / zoom).clamp(220.0, 700.0); cx.notify(); } None => {} }
-                if let (Some(grab), Some((ox, tw, max))) = (this.hb_drag, this.hbar_geom()) {
+                if let Some((k, grab)) = this.hb_drag { if let Some((ox, tw, max)) = this.hbar_geom(k) {
                     let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0);
-                    this.hx = ((x - ox - grab) / travel).clamp(0.0, 1.0) * max; cx.notify();
-                }
-                if let Some(grab) = this.sb_drag {
-                    let vp = this.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let oy: f32 = vp.origin.y.into(); let max: f32 = this.list.max_offset_for_scrollbar().y.into();
+                    if let Some(h) = this.hxs.get_mut(k) { *h = ((x - ox - grab) / travel).clamp(0.0, 1.0) * max; } cx.notify();
+                } }
+                if let Some((k, grab)) = this.sb_drag { if let Some(pn) = this.panes.get(k) {
+                    let vp = pn.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let oy: f32 = vp.origin.y.into(); let max: f32 = pn.list.max_offset_for_scrollbar().y.into();
                     let thumb = (vh * vh / (vh + max)).max(28.0); let travel = (vh - thumb).max(1.0);
-                    let frac = ((y - oy - grab) / travel).clamp(0.0, 1.0); this.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.notify();
-                }
+                    let frac = ((y - oy - grab) / travel).clamp(0.0, 1.0); pn.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.notify();
+                } }
+                if let Some(d) = this.pane_drag.clone() { this.drag_panes(d, x, y, zoom); cx.notify(); }
             }))
-            .child(top).children(self.head_banner(cx)).child(progress).child(filter)
-            .child(div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol))
-            .child(footer)
+            .when(!fs, |d| d.child(top).children(self.head_banner(cx)).child(progress).child(filter))
+            .child(if fs { div().flex().flex_1().min_h_0().child(center) } else { div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol) })
+            .when(!fs, |d| d.child(footer))
             .children(overlay)
+            .child(self.wheel_zoom(cx))
     }
 }
 
@@ -1237,7 +1281,7 @@ impl View {
         let fi = r.fi; let st = self.m.vm.files[fi].status;
         let selected = r.ord.map(|o| self.in_sel(o)).unwrap_or(false);
         let base = div().id(ix).flex().items_center().h(h).w_full().font_family(mono.clone()).when(!self.settings.ligatures, |d| d.font_features(gpui::FontFeatures::disable_ligatures())).text_size(fsz).text_color(p.fg);
-        let hx = self.hx; let hxt = self.hx_text.clone();
+        let pk = self.pane_of(ix); let hx = self.hxs.get(pk).copied().unwrap_or(0.0); let hxt = self.hx_texts.get(pk).cloned().unwrap_or_default();
         let found = self.hits_in_row(ix);
         let code = |rl: &RLine, part: usize| -> gpui::Div {
             let w = rl.line.text.chars().count() as f32 * fsz_f * 0.6; if w > hxt.get() { hxt.set(w); }
@@ -1347,42 +1391,129 @@ impl View {
         ).id(id)
     }
 
-    /// Horizontal scrollbar geometry: (track left x, track width, max offset); None when nothing overflows.
-    fn hbar_geom(&self) -> Option<(f32, f32, f32)> {
-        let b = self.b_body.get(); let (ox, w): (f32, f32) = (b.origin.x.into(), b.size.width.into());
+    /// Horizontal scrollbar geometry of pane `k`: (track left x, track width, max offset); None when nothing overflows.
+    fn hbar_geom(&self, k: usize) -> Option<(f32, f32, f32)> {
+        let b = self.b_panes.get(); let r = self.pane_rect(k); let bw: f32 = b.size.width.into();
+        let (ox, w): (f32, f32) = (f32::from(b.origin.x) + r.x * bw, r.w * bw);
         let cols = if self.diff_mode == DiffMode::Split { 2.0 } else { 1.0 };
-        let max = (self.hx_text.get() - (w - 130.0) / cols).max(0.0);
+        let max = (self.hx_texts.get(k).map(|c| c.get()).unwrap_or(0.0) - (w - 130.0) / cols).max(0.0);
         (max > 1.0 && w > 60.0 && self.md.is_none()).then_some((ox, w - 12.0, max))
     }
 
-    fn hscrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = self.pal; let (ox, tw, max) = self.hbar_geom()?;
-        let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0); let left = (self.hx / max).clamp(0.0, 1.0) * travel;
-        let dragging = self.hb_drag.is_some();
-        Some(div().id("hb-track").absolute().bottom(px(70.0)).left_0().w(px(tw)).h(px(12.0)).cursor_pointer()
+    fn hscrollbar(&mut self, k: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.pal; let (ox, tw, max) = self.hbar_geom(k)?;
+        let hx = self.hxs.get(k).copied().unwrap_or(0.0);
+        let thumb = (tw * tw / (tw + max)).max(28.0); let travel = (tw - thumb).max(1.0); let left = (hx / max).clamp(0.0, 1.0) * travel;
+        let dragging = self.hb_drag.map(|d| d.0) == Some(k);
+        Some(div().id(("hb-track", k)).absolute().bottom_0().left_0().w(px(tw)).h(px(12.0)).cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                 let x: f32 = ev.position.x.into(); let rel = x - ox;
                 let grab = if rel >= left && rel <= left + thumb { rel - left } else { thumb / 2.0 };
-                this.hb_drag = Some(grab); this.hx = ((rel - grab) / travel).clamp(0.0, 1.0) * max; cx.stop_propagation(); cx.notify();
+                this.hb_drag = Some((k, grab)); if let Some(h) = this.hxs.get_mut(k) { *h = ((rel - grab) / travel).clamp(0.0, 1.0) * max; } cx.stop_propagation(); cx.notify();
             }))
             .child(div().absolute().left(px(left)).bottom(px(2.0)).h(px(8.0)).w(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
     }
 
-    fn scrollbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = self.pal;
-        let vp = self.list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let max: f32 = self.list.max_offset_for_scrollbar().y.into();
+    fn scrollbar(&mut self, k: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.pal; let list = self.panes.get(k)?.list.clone();
+        let vp = list.viewport_bounds(); let vh: f32 = vp.size.height.into(); let max: f32 = list.max_offset_for_scrollbar().y.into();
         if max <= 1.0 || vh <= 1.0 { return None; }
-        let off: f32 = (-self.list.scroll_px_offset_for_scrollbar().y).into();
+        let off: f32 = (-list.scroll_px_offset_for_scrollbar().y).into();
         let thumb = (vh * vh / (vh + max)).max(28.0); let travel = (vh - thumb).max(1.0); let top = (off / max).clamp(0.0, 1.0) * travel;
-        let oy: f32 = vp.origin.y.into(); let dragging = self.sb_drag.is_some();
-        Some(div().id("sb-track").absolute().top_0().right_0().w(px(12.0)).h(px(vh)).cursor_pointer()
+        let oy: f32 = vp.origin.y.into(); let dragging = self.sb_drag.map(|d| d.0) == Some(k);
+        Some(div().id(("sb-track", k)).absolute().top_0().right_0().w(px(12.0)).h(px(vh)).cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                 let y: f32 = ev.position.y.into(); let rel = y - oy;
                 let grab = if rel >= top && rel <= top + thumb { rel - top } else { thumb / 2.0 };
-                this.sb_drag = Some(grab); this.list.scrollbar_drag_started();
-                let frac = ((rel - grab) / travel).clamp(0.0, 1.0); this.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.stop_propagation(); cx.notify();
+                let Some(pn) = this.panes.get(k) else { return };
+                this.sb_drag = Some((k, grab)); pn.list.scrollbar_drag_started();
+                let frac = ((rel - grab) / travel).clamp(0.0, 1.0); pn.list.set_offset_from_scrollbar(point(px(0.0), px(-frac * max))); cx.stop_propagation(); cx.notify();
             }))
             .child(div().absolute().top(px(top)).right(px(2.0)).w(px(8.0)).h(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
+    }
+
+    /// Ctrl + mouse wheel zooms like Ctrl + / Ctrl -. Registered for the capture phase so the list underneath does not scroll as well.
+    fn wheel_zoom(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let me = cx.entity().downgrade();
+        gpui::canvas(|b, _, _| b, move |b, _, window, _| {
+            let me = me.clone();
+            window.on_mouse_event(move |ev: &gpui::ScrollWheelEvent, phase, _w, cx| {
+                if phase != gpui::DispatchPhase::Capture || !(ev.modifiers.control || ev.modifiers.platform) || !b.contains(&ev.position) { return; }
+                let dy: f32 = ev.delta.pixel_delta(px(20.0)).y.into();
+                let _ = me.update(cx, |this, cx| {
+                    this.wheel_acc += dy;
+                    let steps = (this.wheel_acc / 20.0).trunc();
+                    if steps != 0.0 { this.wheel_acc -= steps * 20.0; for _ in 0..steps.abs() as i32 { this.zoom = theme::zoom(this.zoom, if steps > 0.0 { 1 } else { -1 }); } }
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            });
+        }).absolute().size_full()
+    }
+
+    /// Moves the dragged divider or corner to the mouse (window coordinates), snapping to halves, thirds, quarters and aligned dividers.
+    fn drag_panes(&mut self, d: PaneDrag, x: f32, y: f32, zoom: f32) {
+        let b = self.b_panes.get(); let (ox, oy): (f32, f32) = (b.origin.x.into(), b.origin.y.into()); let (w, h): (f32, f32) = (b.size.width.into(), b.size.height.into());
+        if w < 1.0 || h < 1.0 { return; }
+        let (tx, ty) = ((x - ox) / w, (y - oy) / h); let min = 140.0 * zoom.min(1.5); let snap = 12.0;
+        self.pane_snapped = match d {
+            PaneDrag::Divider(id) => {
+                let vertical = self.layout.dividers().iter().find(|d| d.id == id).map(|d| d.vertical).unwrap_or(true);
+                let (t, ext) = if vertical { (tx, w) } else { (ty, h) };
+                self.layout.drag(&id, t, ext, min, snap).is_some()
+            }
+            PaneDrag::Corner(c) => {
+                self.layout.drag_corner(&c, tx, ty, (w, h), min, snap);
+                let near = |v: f32| perusal_app::panes::SNAP_FRACTIONS.iter().any(|f| (v - f).abs() < 1e-3);
+                self.layout.corners().iter().any(|k| k.v == c.v && k.h == c.h && near(k.x) && near(k.y))
+            }
+        };
+    }
+
+    /// The diff itself: one list, or one list per file in a tiling of resizable panes with draggable dividers and corners.
+    fn diff_panes(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.pal; let paned = self.paned(); let multi = self.panes.len() > 1;
+        let mut area = div().id("diff-wrap").absolute().top_0().left_0().right_0().bottom(px(70.0)).child(kit::bounds_probe(&self.b_panes));
+        for k in 0..self.panes.len() {
+            let r = self.pane_rect(k); let (start, list_state) = (self.panes[k].range.start, self.panes[k].list.clone());
+            let (sb, hsb) = (self.scrollbar(k, cx), self.hscrollbar(k, cx));
+            let pane = div().id(("pane", k)).absolute().left(relative(r.x)).top(relative(r.y)).w(relative(r.w)).h(relative(r.h)).overflow_hidden()
+                .when(multi, |d| d.border_1().border_color(p.border))
+                .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, _, cx| {
+                    let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
+                    if dx != 0.0 && !ev.modifiers.control {
+                        let max = this.hbar_geom(k).map(|g| g.2).unwrap_or(0.0);
+                        if let Some(h) = this.hxs.get_mut(k) { let n = (*h - dx).clamp(0.0, max); if n != *h { *h = n; cx.notify(); } }
+                    }
+                }))
+                .child(list(list_state, cx.processor(move |this, ix: usize, _w, cx| { let g = start + ix; let el = this.render_row(g, cx); match this.row_tint(g) { Some(c) => div().w_full().bg(c).child(el).into_any_element(), None => el } })).size_full())
+                .children(sb).children(hsb);
+            area = area.child(pane);
+        }
+        if paned {
+            let active = |d: &Option<PaneDrag>, id: &DividerId| matches!(d, Some(PaneDrag::Divider(x)) if x == id);
+            for (i, dv) in self.layout.dividers().into_iter().enumerate() {
+                let on = active(&self.pane_drag, &dv.id); let id = dv.id.clone();
+                let line = if on && self.pane_snapped { p.success } else if on { p.accent } else { p.border };
+                let base = div().id(("dv", i)).absolute().flex().items_center().justify_center().hover(move |s| s.bg(p.accent.opacity(0.25)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        if ev.click_count >= 2 { this.layout.reset(&id); } else { this.pane_drag = Some(PaneDrag::Divider(id.clone())); }
+                        cx.stop_propagation(); cx.notify();
+                    }));
+                area = area.child(if dv.vertical {
+                    base.left(relative(dv.pos)).ml(px(-4.0)).w(px(8.0)).top(relative(dv.span.0)).h(relative(dv.span.1 - dv.span.0)).cursor_col_resize().child(div().w(px(if on { 3.0 } else { 2.0 })).h_full().bg(line))
+                } else {
+                    base.top(relative(dv.pos)).mt(px(-4.0)).h(px(8.0)).left(relative(dv.span.0)).w(relative(dv.span.1 - dv.span.0)).cursor_row_resize().child(div().h(px(if on { 3.0 } else { 2.0 })).w_full().bg(line))
+                });
+            }
+            for (i, c) in self.layout.corners().into_iter().enumerate() {
+                let on = matches!(&self.pane_drag, Some(PaneDrag::Corner(x)) if x.v == c.v && x.h == c.h); let cc = c.clone();
+                area = area.child(div().id(("cn", i)).absolute().left(relative(c.x)).top(relative(c.y)).ml(px(-8.0)).mt(px(-8.0)).size(px(16.0)).rounded_full().cursor(gpui::CursorStyle::ResizeUpLeftDownRight)
+                    .bg(if on { if self.pane_snapped { p.success } else { p.accent } } else { p.border }).border_2().border_color(p.surface).hover(move |s| s.bg(p.accent))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.pane_drag = Some(PaneDrag::Corner(cc.clone())); cx.stop_propagation(); cx.notify(); })));
+            }
+        }
+        div().relative().flex_1().min_h_0().w_full().child(area).into_any_element()
     }
 
     /// Centre pane: a switch between Overview and Changes (remote reviews only), then the chosen page.
@@ -1478,6 +1609,8 @@ impl View {
         let md_on = self.md_rendered; let mode = self.diff_mode;
         let one_sided = !batch.is_empty() && batch.iter().all(|&i| matches!(self.m.vm.files[i].status, Status::Added | Status::Deleted) || self.m.vm.files[i].symlink);
         let ncomments = self.comment_count();
+        let (panes_on, fs) = (self.batch_panes, self.fullscreen);
+        let (arr_icon, arr_tip) = match self.arrangement { Arrangement::Auto => (ic::DASHBOARD, "Pane layout: automatic. Click to change"), Arrangement::Columns => (ic::VIEW_COLUMN, "Pane layout: side by side. Click to change"), Arrangement::Rows => (ic::HORIZONTAL_SPLIT, "Pane layout: stacked rows. Click to change"), Arrangement::Grid => (ic::GRID_VIEW, "Pane layout: grid. Click to change") };
 
         let title = if batch.len() > 1 { div().flex().items_center().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Batch of {} files", batch.len()))).child(div().text_xs().text_color(p.muted).child(if manual { "grouped by you" } else { "related files" })) }
             else if let Some(f) = &first { let (dir, name) = match f.path.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n.to_string()), None => (String::new(), f.path.clone()) };
@@ -1513,18 +1646,8 @@ impl View {
         } else if self.rows.is_empty() {
             div().flex_1().flex().items_center().justify_center().text_color(p.muted).child("Nothing to show for this selection.").into_any_element()
         } else {
-            div().id("diff-wrap").flex_1().min_h_0().w_full().pb(px(70.0))
-                .on_scroll_wheel(cx.listener(|this, ev: &gpui::ScrollWheelEvent, _, cx| {
-                    let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
-                    if dx != 0.0 {
-                        let max = this.hbar_geom().map(|g| g.2).unwrap_or(0.0);
-                        let n = (this.hx - dx).clamp(0.0, max); if n != this.hx { this.hx = n; cx.notify(); }
-                    }
-                }))
-                .child(list(self.list.clone(), cx.processor(move |this, ix: usize, _w, cx| { let el = this.render_row(ix, cx); match this.row_tint(ix) { Some(c) => div().w_full().bg(c).child(el).into_any_element(), None => el } })).size_full()).into_any_element()
+            self.diff_panes(cx)
         };
-        let scrollbar = if self.md.is_none() { self.scrollbar(cx) } else { None };
-        let hscrollbar = self.hscrollbar(cx);
 
         // toolbar that floats above the selected lines
         let sel = self.selection();
@@ -1554,11 +1677,18 @@ impl View {
                     .child(seg_icon("df-split", ic::VERTICAL_SPLIT, "Side-by-side diff (u)", mode == DiffMode::Split, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Split); cx.notify(); })))))
                 .when(is_md, |d| d.child(sep()).child(seg_box(&p).child(seg_icon("md-diff", ic::CODE, "Show the markdown source diff (m)", !md_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.md_rendered { this.md_rendered = false; this.shown = None; this.clear_selection(); } cx.notify(); })))
                     .child(seg_icon("md-prev", ic::VISIBILITY, "Show the rendered markdown (m)", md_on, &p).on_click(cx.listener(|this, _, _, cx| { if !this.md_rendered { this.md_rendered = true; this.shown = None; this.clear_selection(); } cx.notify(); })))))
+                .when(batch.len() > 1, |d| d.child(sep()).child(seg_box(&p)
+                    .child(seg_icon("bv-panes", ic::VIEW_QUILT, "Show the files of this batch in split panes (w)", panes_on, &p).on_click(cx.listener(|this, _, _, cx| { this.set_batch_panes(true); cx.notify(); })))
+                    .child(seg_icon("bv-stack", ic::VIEW_STREAM, "Show the files of this batch one after the other (w)", !panes_on, &p).on_click(cx.listener(|this, _, _, cx| { this.set_batch_panes(false); cx.notify(); }))))
+                    .when(panes_on, |d| d.child(icon_btn("bv-arr", arr_icon, arr_tip, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
+                        let all = Arrangement::ALL; let i = all.iter().position(|a| *a == this.arrangement).unwrap_or(0); this.set_arrangement(all[(i + 1) % all.len()]); cx.notify();
+                    }))).child(icon_btn("bv-reset", ic::RESET_LAYOUT, "Reset the pane sizes (or double-click a divider)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.layout.reset_all(); cx.notify(); })))))
+                .child(icon_btn("fullscreen", if fs { ic::FULLSCREEN_EXIT } else { ic::FULLSCREEN }, if fs { "Leave full screen (F11 or Esc)" } else { "Diff viewer full screen (F11)" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let on = !this.fullscreen; this.set_fullscreen(on, cx); cx.notify(); })))
                 .child(sep())
                 .children((!self.instant()).then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
 
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
-        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(scrollbar).children(hscrollbar).children(toolbar).child(bar);
+        let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(toolbar).child(bar);
         div().relative().flex().flex_col().flex_1().min_w_0().min_h_0().children(header).child(wrap).children(composer)
     }
 
