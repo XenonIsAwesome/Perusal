@@ -142,13 +142,13 @@ impl Layout {
         out
     }
 
-    /// Places where a vertical divider ends on a horizontal one (a T or a cross).
+    /// Every point where a vertical and a horizontal divider meet: crossings, and T or L junctions where one ends on the other.
     pub fn corners(&self) -> Vec<Corner> {
         let ds = self.dividers(); let eps = 1e-3; let mut out = vec![];
         for v in ds.iter().filter(|d| d.vertical) {
             for h in ds.iter().filter(|d| !d.vertical) {
-                let touches = (v.span.0 - h.pos).abs() < eps || (v.span.1 - h.pos).abs() < eps;
-                if touches && v.pos > h.span.0 + eps && v.pos < h.span.1 - eps { out.push(Corner { v: v.id.clone(), h: h.id.clone(), x: v.pos, y: h.pos }); }
+                let meets = v.pos >= h.span.0 - eps && v.pos <= h.span.1 + eps && h.pos >= v.span.0 - eps && h.pos <= v.span.1 + eps;
+                if meets { out.push(Corner { v: v.id.clone(), h: h.id.clone(), x: v.pos, y: h.pos }); }
             }
         }
         out
@@ -305,6 +305,12 @@ mod tests { use super::*;
         assert!(!g.move_pane(1, 1, Edge::Left) && !g.move_pane(9, 0, Edge::Left));
         for n in 2..=7 { for a in Arrangement::ALL { for e in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] { let mut l = Layout::new(n, a); assert!(l.move_pane(n - 1, 0, e)); assert_eq!(l.rects().len(), n); assert!((area(&l) - 1.0).abs() < 1e-3, "{n} {a:?} {e:?}"); } } }
         assert!(g.fits(4, Arrangement::Rows) && !g.fits(3, Arrangement::Grid), "custom layouts survive an arrangement change until reset");
+    }
+    #[test] fn corners_survive_custom_layouts() {
+        // 2x2 grid, pane 3 dropped on top of pane 0: the left column gets its own horizontal divider (y = 0.25 ... ) that ends on the vertical divider at x = 0.5
+        let mut g = Layout::new(4, Arrangement::Grid); g.move_pane(3, 0, Edge::Top);
+        let cs = g.corners(); let has = |x: f32, y: f32| cs.iter().any(|c| (c.x - x).abs() < 1e-3 && (c.y - y).abs() < 1e-3);
+        assert!(has(0.5, 0.25), "T junction where a divider ends on another: {cs:?}"); assert!(has(0.5, 0.5));
     }
     #[test] fn drop_zones() {
         assert_eq!(drop_zone(0.1, 0.5), Drop::Split(Edge::Left)); assert_eq!(drop_zone(0.9, 0.5), Drop::Split(Edge::Right));
