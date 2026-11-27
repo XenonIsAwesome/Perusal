@@ -634,7 +634,7 @@ impl gpui::Render for SettingsView {
                     .child(div().text_xs().text_color(p.muted).child("Presets set a filter and a sort in one click. A project's default wins over the global default when a review opens. Save new ones from the bookmark button in a review, or add them here."))
                     .children(preset_groups).child(preset_form).children(self.msg.clone().map(|(ok, m)| div().flex().items_start().gap_1().text_sm().text_color(if ok { p.success } else { p.danger }).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("preset-err-copy", m, &p))))),
                 5 => div().flex().flex_col().child(section("AI features"))
-                    .child(row("AI features", "Turn off AI review, Ask AI and every Generate with AI button and shortcut, for a review screen without any AI. Nothing else is changed", div().id("sw-ai").cursor_pointer().child(switch(s.ai_enabled, &p)).on_click(cx.listener(|this, _, _, cx| {
+                    .child(row("Disable AI features", "Hide AI review, Ask AI and every Generate with AI button and shortcut, for a review screen without any AI. Nothing else is changed", div().id("sw-ai").cursor_pointer().child(switch(!s.ai_enabled, &p)).on_click(cx.listener(|this, _, _, cx| {
                         let on = !this.settings.ai_enabled; let first_off = this.settings.set_ai(on); this.changed(cx); if first_off { this.egg = true; cx.notify(); } })).into_any_element()))
                     .child(section("AI agent")).child(ai),
                 _ => {
