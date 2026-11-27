@@ -106,7 +106,7 @@ pub struct View {
 
 fn image_format(k: perusal_diff::image::ImageKind) -> gpui::ImageFormat {
     use perusal_diff::image::ImageKind as K;
-    match k { K::Png => gpui::ImageFormat::Png, K::Jpeg => gpui::ImageFormat::Jpeg, K::Gif => gpui::ImageFormat::Gif, K::Webp => gpui::ImageFormat::Webp, K::Bmp => gpui::ImageFormat::Bmp, K::Tiff => gpui::ImageFormat::Tiff, K::Svg => gpui::ImageFormat::Svg }
+    match k { K::Png => gpui::ImageFormat::Png, K::Jpeg => gpui::ImageFormat::Jpeg, K::Gif => gpui::ImageFormat::Gif, K::Webp => gpui::ImageFormat::Webp, K::Bmp => gpui::ImageFormat::Bmp, K::Tiff => gpui::ImageFormat::Tiff, K::Ico => gpui::ImageFormat::Ico, K::Svg => gpui::ImageFormat::Svg }
 }
 fn status_style(s: Status, p: &Pal) -> (&'static str, gpui::Hsla) {
     match s { Status::Added => ("A", p.success), Status::Modified => ("M", p.warn), Status::Deleted => ("D", p.danger), Status::Renamed => ("R", p.accent) }
