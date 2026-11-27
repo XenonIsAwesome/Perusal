@@ -3,6 +3,9 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind { Png, Jpeg, Gif, Webp, Bmp, Tiff, Ico, Svg }
 
+/// Largest picture (per side) the viewer loads; bigger ones keep the binary-file note so a review never stalls on a huge blob.
+pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Extensions worth trying for a path before its bytes are looked at (used to decide whether to load the file at all).
 pub fn looks_like_image(path: &str) -> bool {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -50,6 +53,13 @@ mod tests {
         let mut png = Vec::new(); image::RgbaImage::new(3, 2).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         assert_eq!(sniff("a.png", &png), Some(ImageKind::Png)); assert_eq!(dimensions(&png), Some((3, 2)));
         assert_eq!(dimensions(b"junk"), None); assert_eq!(dimensions(b"<svg/>"), None);
+    }
+    #[test] fn header_only_picture_has_no_size() {
+        // recognised by its magic number but too short to read a size from: the viewer then uses a square placeholder box
+        let mut ico = vec![0, 0, 1, 0, 1, 0]; ico.resize(30, 0);
+        assert_eq!(sniff("a.ico", &ico), Some(ImageKind::Ico)); assert_eq!(dimensions(&ico), None);
+        let mut bmp = b"BM".to_vec(); bmp.resize(30, 0);
+        assert_eq!(sniff("a.bmp", &bmp), Some(ImageKind::Bmp)); assert_eq!(dimensions(&bmp), None);
     }
     #[test] fn extension_hint() { assert!(looks_like_image("x/Y.PNG")); assert!(!looks_like_image("x/y.rs")); }
 }

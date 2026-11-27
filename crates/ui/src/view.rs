@@ -58,7 +58,12 @@ struct Mark { key: String, draft: bool, resolved: bool, range: Option<(u32, u32)
 #[derive(Clone)]
 enum RowKind { FileHeader, /// one block of a rendered Markdown file shown inside a group; selectable and commentable like code lines
     MdBlock(Located), Collapsed(String, bool), /// old and new picture (either side may be missing) and the note shown when one cannot be displayed
-    Image(Option<Arc<gpui::Image>>, Option<Arc<gpui::Image>>, Option<(u32, u32)>, String), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
+    Image(Option<Pic>, Option<Pic>, String), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
+/// The file and (newest, oldest) commit range last written to the store.
+type SavedPos = (Option<String>, Option<(String, String)>);
+/// A decoded-on-demand picture and its pixel size when the header told us.
+#[derive(Clone)]
+struct Pic { img: Arc<gpui::Image>, size: Option<(u32, u32)> }
 #[derive(Clone)]
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32>, marks: Vec<Mark> }
@@ -90,11 +95,11 @@ pub struct View {
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds, b_panes: FieldBounds,
     /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
-    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
+    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32, zoom_at: Option<Instant>,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, md_was: bool, md_jump: bool, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
-    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>, gutter: HashMap<usize, (usize, bool, bool)>,
+    sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>, saved_pos: Option<SavedPos>, gutter: HashMap<usize, (usize, bool, bool)>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
     sug: Vec<Suggestion>, sug_replace: usize, sug_idx: Option<usize>, sug_for: Fid,
     left_open: bool, right_open: bool, left_w: f32, right_w: f32, resizing: Option<Side>, commits_h: Option<f32>, resizing_cd: Option<(f32, f32)>, commits_open: bool, drafts_open: bool, page: Page, info: Option<perusal_providers::MrInfo>, hover_c: Option<(usize, u32, u32)>, auto_c: HashSet<String>,
@@ -158,9 +163,9 @@ impl View {
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
         let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), md_olds: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
-            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
+            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, zoom_at: None, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], md_rendered: false, md_was: false, md_jump: false, diff_mode: settings.diff_mode, sym_target: None,
-            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![], gutter: HashMap::new(),
+            collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![], saved_pos: None, gutter: HashMap::new(),
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
             tab: RightTab::Review, chat, ai_ctx: None, ai_notice: None, ai_job: None, ai_events: Arc::new(Mutex::new(vec![])), ai_cancel: Arc::new(AtomicBool::new(false)), ai_started: None, ai_activity: vec![], ai_partial: String::new(),
@@ -262,13 +267,17 @@ impl View {
             let why_binary = format!("{} is a binary file, so there is no text to show.", f.path);
             if !f.symlink && perusal_diff::image::looks_like_image(&f.path) {
                 // pictures are shown (old next to new, whatever the diff mode) instead of a text diff; anything unreadable keeps the usual note
-                let load = |rev: &str| perusal_gitops::show_bytes(&self.m.repo, rev, &f.path).filter(|b| !b.is_empty());
-                let (ob, nb) = (load(&old_rev), load(&new_rev));
-                let pic = |b: &Option<Vec<u8>>| b.as_ref().map(|b| perusal_diff::image::sniff(&f.path, b).map(|k| (Arc::new(gpui::Image::from_bytes(image_format(k), b.clone())), perusal_diff::image::dimensions(b))));
-                let (oi, ni) = (pic(&ob), pic(&nb));
-                if (ob.is_some() || nb.is_some()) && oi.iter().chain(ni.iter()).all(|x| x.is_some()) {
-                    let size = ni.as_ref().or(oi.as_ref()).and_then(|x| x.as_ref()).and_then(|x| x.1);
-                    rows.push(mk(fi, RowKind::Image(oi.and_then(|x| x).map(|x| x.0), ni.and_then(|x| x).map(|x| x.0), size, why_binary))); continue;
+                // a renamed picture's old side lives at its old path; blobs over the size cap are not loaded (the note is shown instead)
+                let old_path = f.old_path.as_deref().unwrap_or(&f.path);
+                let load = |rev: &str, path: &str| -> Option<Option<Vec<u8>>> {
+                    match perusal_gitops::blob_size(&self.m.repo, rev, path) { None => Some(None), Some(0) => Some(None), Some(n) if n > perusal_diff::image::MAX_BYTES => None, Some(_) => Some(perusal_gitops::show_bytes(&self.m.repo, rev, path)) }
+                };
+                let pic = |b: &Option<Vec<u8>>| b.as_ref().map(|b| perusal_diff::image::sniff(&f.path, b).map(|k| Pic { img: Arc::new(gpui::Image::from_bytes(image_format(k), b.clone())), size: perusal_diff::image::dimensions(b) }));
+                if let (Some(ob), Some(nb)) = (load(&old_rev, old_path), load(&new_rev, &f.path)) {
+                    let (oi, ni) = (pic(&ob), pic(&nb));
+                    if (ob.is_some() || nb.is_some()) && oi.iter().chain(ni.iter()).all(|x| x.is_some()) {
+                        rows.push(mk(fi, RowKind::Image(oi.and_then(|x| x), ni.and_then(|x| x), why_binary))); continue;
+                    }
                 }
             }
             if f.noisy() && !f.symlink && !self.forced.contains(&fi) {
@@ -513,13 +522,16 @@ impl View {
         let (a, b) = (self.m.vm.set_filter(&p.filter), self.m.vm.set_sort(&p.sort));
         self.error = a.err().or(b.err()); self.remember_ui(); self.reload();
     }
-    /// Saves the applied filter and sort with this review so reopening it restores them.
-    /// Saves the open file and the commit range selected in the graph, so reopening the review lands on the same spot.
-    fn remember_position(&self) {
-        let file = self.current_file().and_then(|fi| self.m.vm.files.get(fi)).map(|f| f.path.as_str());
+    /// Saves the open file and the commit range selected in the graph, so reopening the review lands on the same spot (only when they changed).
+    fn remember_position(&mut self) {
+        let file = self.current_file().and_then(|fi| self.m.vm.files.get(fi)).map(|f| f.path.clone());
         let commits = self.m.graph.selected_shas().filter(|_| self.m.vm.commit_scope.is_some());
-        let _ = self.m.store.set_position(self.m.vm.review, file, commits.as_ref().map(|(n, o)| (n.as_str(), o.as_str())));
+        let pos = (file, commits);
+        if self.saved_pos.as_ref() == Some(&pos) { return; }
+        let _ = self.m.store.set_position(self.m.vm.review, pos.0.as_deref(), pos.1.as_ref().map(|(n, o)| (n.as_str(), o.as_str())));
+        self.saved_pos = Some(pos);
     }
+    /// Saves the applied filter and sort with this review so reopening it restores them.
     fn remember_ui(&self) { let _ = self.m.store.set_ui(self.m.vm.review, self.filter.f.text.trim(), self.sort.f.text.trim()); }
     fn save_preset(&mut self, project_scope: bool) {
         let name = self.preset_name.f.text.trim().to_string(); if name.is_empty() { return; }
@@ -991,7 +1003,7 @@ impl View {
             }
             self.flush(cx); cx.notify(); return;
         }
-        if ctrl && matches!(key, "=" | "+" | "-" | "0") { match key { "=" | "+" => self.zoom = theme::zoom(self.zoom, 1), "-" => self.zoom = theme::zoom(self.zoom, -1), _ => self.zoom = theme::zoom(self.zoom, 0) } cx.notify(); return; }
+        if ctrl && matches!(key, "=" | "+" | "-" | "0") { self.step_zoom(match key { "=" | "+" => 1, "-" => -1, _ => 0 }, cx); cx.notify(); return; }
         if key == "f5" { self.refresh(cx); }
         else if key == "escape" {
             if self.has_selection() || !self.multi.is_empty() { self.clear_selection(); self.multi.clear(); } else if self.composer.is_some() { self.composer = None; } else if self.busy() { self.stop_ai(); } else if self.fullscreen { self.set_fullscreen(false, cx); } else { cx.emit(ViewEvent::Home); return; }
@@ -1083,6 +1095,7 @@ impl Render for View {
             .child(if fs { div().flex().flex_1().min_h_0().child(center) } else { div().flex().flex_1().min_h_0().child(lcol).children(lhandle).child(center).children(rhandle).child(rcol) })
             .when(!fs, |d| d.child(footer))
             .children(overlay)
+            .children(self.zoom_pill(cx))
             .child(self.wheel_zoom(cx))
     }
 }
@@ -1378,14 +1391,14 @@ impl View {
             RowKind::Collapsed(t, expandable) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::UNFOLD_MORE, 15.0, p.accent)).child(div().flex_1().min_w_0().truncate().child(t.clone()))
                 .when(*expandable, |d| d.child(div().id(("expand", ix)).px_2().rounded_md().border_1().border_color(p.border).cursor_pointer().hover(move |x| x.bg(p.hover)).text_sm().child("Show anyway")
                     .on_click(cx.listener(move |this, _, _, cx| { this.forced.insert(fi); this.shown = None; this.load_diff(); cx.notify(); })))).into_any_element(),
-            RowKind::Image(old, new, size, note) => {
-                // old and new always side by side; each picture at its natural size, shrunk (never enlarged) to fit its half and a maximum height
+            RowKind::Image(old, new, note) => {
+                // old and new always side by side; each picture sized from its own dimensions, shrunk (never enlarged) to fit its half and a maximum height
                 let maxh = 420.0 * self.zoom; let muted = p.muted; let sides = old.is_some() && new.is_some();
                 let avail = { let b = self.b_panes.get(); let w: f32 = b.size.width.into(); (self.pane_rect(pk).w * w - 40.0).max(120.0) / if sides { 2.0 } else { 1.0 } - 16.0 };
-                let (bw, bh) = match size { Some((w, h)) if *w > 0 && *h > 0 => { let k = (avail / *w as f32).min(maxh / *h as f32).min(1.0); (*w as f32 * k, *h as f32 * k) } _ => (avail.min(maxh), maxh.min(avail)) };
-                let tile = |label: &str, im: &Option<Arc<gpui::Image>>, tint: gpui::Hsla| im.clone().map(|im| { let note = note.clone();
+                let tile = |label: &str, pic: &Option<Pic>, tint: gpui::Hsla| pic.clone().map(|pic| { let note = note.clone();
+                    let (bw, bh) = match pic.size { Some((w, h)) if w > 0 && h > 0 => { let k = (avail / w as f32).min(maxh / h as f32).min(1.0); (w as f32 * k, h as f32 * k) } _ => (avail.min(maxh), maxh.min(avail)) };
                     div().flex_1().min_w_0().flex().flex_col().items_center().gap_1().child(div().text_xs().text_color(tint).font_weight(FontWeight::SEMIBOLD).child(label.to_string()))
-                        .child(div().p_1().border_1().border_color(p.border).rounded_sm().bg(p.bg).child(gpui::img(im).w(px(bw)).h(px(bh)).object_fit(gpui::ObjectFit::Contain)
+                        .child(div().p_1().border_1().border_color(p.border).rounded_sm().bg(p.bg).child(gpui::img(pic.img).w(px(bw)).h(px(bh)).object_fit(gpui::ObjectFit::Contain)
                             .with_fallback(move || div().p_3().text_sm().text_color(muted).child(note.clone()).into_any_element()))).into_any_element() });
                 return div().id(ix).w_full().flex().items_start().gap_4().px_4().py_3().children(tile("Before", old, p.danger)).children(tile("After", new, p.success)).into_any_element();
             }
@@ -1505,6 +1518,18 @@ impl View {
             .child(div().absolute().top(px(top)).right(px(2.0)).w(px(8.0)).h(px(thumb)).rounded_full().bg(if dragging { p.muted } else { p.muted.opacity(0.5) }).hover(move |s| s.bg(p.muted))).into_any_element())
     }
 
+    /// Zooms one step (0 resets) and shows the zoom pill for a few seconds.
+    fn step_zoom(&mut self, step: i32, cx: &mut Context<Self>) {
+        self.zoom = theme::zoom(self.zoom, step); self.zoom_at = Some(Instant::now());
+        cx.spawn(async move |this, cx| { cx.background_executor().timer(std::time::Duration::from_millis(4200)).await; let _ = this.update(cx, |_, cx| cx.notify()); }).detach();
+    }
+    /// The floating zoom level with a reset button, visible shortly after every zoom change.
+    fn zoom_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.pal; self.zoom_at.filter(|t| t.elapsed() < std::time::Duration::from_millis(4000))?;
+        Some(deferred(div().id("zoom-pill").absolute().top(px(56.0)).right(px(16.0)).flex().items_center().gap_1().pl_3().pr_1().py(px(2.0)).rounded_full().bg(p.surface).border_1().border_color(p.border).shadow_md().text_sm().text_color(p.fg)
+            .child(format!("{}%", theme::zoom_percent(self.zoom)))
+            .child(icon_btn("zoom-reset", ic::REFRESH, "Reset zoom (Ctrl+0)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.step_zoom(0, cx); cx.notify(); })))).with_priority(60).into_any_element())
+    }
     /// Ctrl + mouse wheel zooms like Ctrl + / Ctrl -. Registered for the capture phase so the list underneath does not scroll as well.
     fn wheel_zoom(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let me = cx.entity().downgrade();
@@ -1516,7 +1541,7 @@ impl View {
                 let _ = me.update(cx, |this, cx| {
                     this.wheel_acc += dy;
                     let steps = (this.wheel_acc / 20.0).trunc();
-                    if steps != 0.0 { this.wheel_acc -= steps * 20.0; for _ in 0..steps.abs() as i32 { this.zoom = theme::zoom(this.zoom, if steps > 0.0 { 1 } else { -1 }); } }
+                    if steps != 0.0 { this.wheel_acc -= steps * 20.0; for _ in 0..steps.abs() as i32 { this.step_zoom(if steps > 0.0 { 1 } else { -1 }, cx); } }
                     cx.notify();
                 });
                 cx.stop_propagation();

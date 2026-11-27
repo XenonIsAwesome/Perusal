@@ -147,6 +147,13 @@ pub fn show(dir: &Path, rev: &str, path: &str) -> Option<String> {
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
+/// Size in bytes of a file at a revision without reading it, if present.
+pub fn blob_size(dir: &Path, rev: &str, path: &str) -> Option<u64> {
+    let o = Command::new("git").args(["cat-file", "-s", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;
+    if !o.status.success() { return None; }
+    String::from_utf8_lossy(&o.stdout).trim().parse().ok()
+}
+
 /// File content at a revision as raw bytes (images and other binary files), if present.
 pub fn show_bytes(dir: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
     let o = Command::new("git").args(["show", &format!("{rev}:{path}")]).current_dir(dir).output().ok()?;

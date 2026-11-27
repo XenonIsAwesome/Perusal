@@ -66,10 +66,10 @@ impl Root {
         r.restore_mine();
         r.refresh_recent(); r.refresh_recent_states(cx);
         if r.settings.home_tab.start(r.recent.len()) == perusal_app::settings::HomeTab::Mine { r.htab = HTab::Mine; r.load_mine(cx); }
-        // keep the Recent page current: re-read the store (open tabs write the state they observe) and ask the hosts about the rest, every half minute
+        // keep the Recent page current while it is on screen: re-read the store and ask the hosts about the rest (the host check itself runs at most once a minute)
         cx.spawn(async move |this, cx| { loop {
             cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
-            if this.update(cx, |t, cx| { t.refresh_recent(); t.refresh_recent_states(cx); if t.active.is_none() { cx.notify(); } }).is_err() { break; }
+            if this.update(cx, |t, cx| { if t.active.is_none() { t.refresh_recent(); t.refresh_recent_states(cx); cx.notify(); } }).is_err() { break; }
         } }).detach();
         // repaint when a background avatar download finishes
         cx.spawn(async move |this, cx| { let mut seen = crate::avatars::version(); loop { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; let v = crate::avatars::version(); if v != seen { seen = v; if this.update(cx, |_, cx| cx.notify()).is_err() { break; } } } }).detach();
