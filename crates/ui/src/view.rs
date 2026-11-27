@@ -398,15 +398,13 @@ impl View {
         let (a, b) = self.sel?; let fi = self.rows.iter().find(|r| r.ord == Some(a))?.fi;
         let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
         let (mut olo, mut ohi) = (u32::MAX, 0u32);
+        // a rendered Markdown file has only block rows: anchor and quote them from one side (see `markdown::selection_of`)
+        let blocks: Vec<&Located> = self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)).filter_map(|r| if let RowKind::MdBlock(lb) = &r.kind { Some(lb) } else { None }).collect();
+        if !blocks.is_empty() {
+            let (old, new) = (self.md_olds.get(&fi).map(String::as_str).unwrap_or(""), self.md_srcs.get(&fi).map(String::as_str).unwrap_or(""));
+            return markdown::selection_of(&blocks, old, new).map(|m| Selection { file: self.m.vm.files[fi].path.clone(), start: m.start, end: m.end, snippet: m.snippet, old_side: m.old_side });
+        }
         for r in self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)) {
-            if let RowKind::MdBlock(lb) = &r.kind {
-                // removed blocks only exist on the old side; everything else is anchored on its new lines
-                let gone = lb.change == markdown::Change::Removed;
-                if gone { olo = olo.min(lb.first_line); ohi = ohi.max(lb.last_line); } else { lo = lo.min(lb.first_line); hi = hi.max(lb.last_line); }
-                let mark = match lb.change { markdown::Change::Added => '+', markdown::Change::Removed => '-', _ => ' ' };
-                if let Some(src) = if gone { self.md_olds.get(&fi) } else { self.md_srcs.get(&fi) } { for l in src.lines().skip(lb.first_line.saturating_sub(1) as usize).take((lb.last_line + 1 - lb.first_line) as usize) { snippet.push(mark); snippet.push_str(l); snippet.push('\n'); } }
-                continue;
-            }
             let lines: Vec<&Line> = match &r.kind { RowKind::Uni(l) => vec![&l.line], RowKind::Split(l, rr) => l.iter().chain(rr.iter()).map(|x| &x.line).collect(), _ => vec![] };
             for l in lines {
                 if let Some(n) = l.new_no { lo = lo.min(n); hi = hi.max(n); } else if let Some(n) = l.old_no { olo = olo.min(n); ohi = ohi.max(n); }

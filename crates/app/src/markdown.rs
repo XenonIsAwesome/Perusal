@@ -209,15 +209,23 @@ fn word_spans(old: &[Span], new: &[Span], min_sim: f32) -> Option<Vec<Span>> {
     let ch = perusal_diff::text::word_changes(&o, &n);
     let eq: usize = ch.iter().filter(|c| c.0 == Kind::Context).map(|c| c.1.len()).sum();
     if (eq as f32) / (o.len().max(n.len()).max(1) as f32) < min_sim { return None; }
-    let mut flags = vec![false; n.len()]; let mut dels: Vec<(usize, String)> = vec![]; let mut pos = 0usize;
-    for (k, t) in ch { match k { Kind::Context => pos += t.len(), Kind::Added => { for f in &mut flags[pos..pos + t.len()] { *f = true; } pos += t.len(); } Kind::Removed => dels.push((pos, t)) } }
-    let del_span = |t: &str| Span { text: t.to_string(), change: Change::Removed, ..Default::default() };
+    let mut flags = vec![false; n.len()]; let mut dels: Vec<(usize, String, usize)> = vec![]; let (mut pos, mut opos) = (0usize, 0usize);
+    for (k, t) in ch {
+        match k {
+            Kind::Context => { pos += t.len(); opos += t.len(); }
+            Kind::Added => { for f in &mut flags[pos..pos + t.len()] { *f = true; } pos += t.len(); }
+            Kind::Removed => { let l = t.len(); dels.push((pos, t, opos)); opos += l; }
+        }
+    }
+    // a removed word keeps the formatting (bold, code, link ...) of the old span it came from
+    let mut ostarts = Vec::with_capacity(old.len()); let mut acc = 0usize; for sp in old { ostarts.push(acc); acc += sp.text.len(); }
+    let del_span = |t: &str, at: usize| { let i = ostarts.partition_point(|s| *s <= at).saturating_sub(1); Span { text: t.to_string(), change: Change::Removed, ..old.get(i).cloned().unwrap_or_default() } };
     let (mut out, mut off, mut di) = (vec![], 0usize, 0usize);
     for s in new {
         let (start, end) = (off, off + s.text.len()); off = end;
         let mut a = start;
         loop {
-            while di < dels.len() && dels[di].0 <= a { if !dels[di].1.trim().is_empty() { out.push(del_span(&dels[di].1)); } di += 1; }
+            while di < dels.len() && dels[di].0 <= a { if !dels[di].1.trim().is_empty() { out.push(del_span(&dels[di].1, dels[di].2)); } di += 1; }
             if a >= end { break; }
             let mut b = a + 1;
             while b < end && flags[b] == flags[a] && dels.get(di).map(|d| d.0) != Some(b) { b += 1; }
@@ -225,7 +233,7 @@ fn word_spans(old: &[Span], new: &[Span], min_sim: f32) -> Option<Vec<Span>> {
             a = b;
         }
     }
-    for (_, t) in &dels[di..] { if !t.trim().is_empty() { out.push(del_span(t)); } }
+    for (_, t, at) in &dels[di..] { if !t.trim().is_empty() { out.push(del_span(t, *at)); } }
     Some(out)
 }
 
@@ -326,6 +334,25 @@ pub fn parse_diff(old: &str, new: &str) -> Vec<Located> {
     out
 }
 
+/// Where a selection of rendered blocks anchors, and the text it quotes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdSelection { pub start: u32, pub end: u32, pub old_side: bool, pub snippet: String }
+
+/// The anchor and quoted text for a selection of rendered blocks, taken from one side only so they always agree: a selection of only
+/// removed blocks anchors on the old file's lines and quotes them (`-`); otherwise it anchors on the new lines of the blocks that exist
+/// there (added `+`, others ` `) and leaves the removed blocks out of both. `old` and `new` are the two file texts.
+pub fn selection_of(blocks: &[&Located], old: &str, new: &str) -> Option<MdSelection> {
+    let gone = |b: &Located| b.change == Change::Removed;
+    let old_side = !blocks.is_empty() && blocks.iter().all(|b| gone(b));
+    let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
+    for b in blocks.iter().filter(|b| gone(b) == old_side) {
+        lo = lo.min(b.first_line); hi = hi.max(b.last_line);
+        let (src, mark) = if old_side { (old, '-') } else { (new, if b.change == Change::Added { '+' } else { ' ' }) };
+        for l in src.lines().skip(b.first_line.saturating_sub(1) as usize).take((b.last_line + 1 - b.first_line) as usize) { snippet.push(mark); snippet.push_str(l); snippet.push('\n'); }
+    }
+    (hi > 0).then_some(MdSelection { start: lo, end: hi, old_side, snippet })
+}
+
 pub fn is_markdown(path: &str) -> bool { let l = path.to_lowercase(); l.ends_with(".md") || l.ends_with(".markdown") || l.ends_with(".mdx") }
 
 #[cfg(test)]
@@ -390,6 +417,53 @@ mod tests {
         // a paragraph replaced by something unrelated reads as removed + added, not as a word soup
         let d = parse_diff("alpha beta gamma\n", "totally different words here now\n");
         assert_eq!(d.iter().map(|x| x.change).collect::<Vec<_>>(), vec![Change::Removed, Change::Added]);
+    }
+    fn kinds(d: &[Located]) -> Vec<Change> { d.iter().map(|x| x.change).collect() }
+    #[test] fn rich_diff_removal_at_the_end_of_the_file() {
+        let d = parse_diff("a\n\nb\n\nlast\n", "a\n\nb\n");
+        assert_eq!(kinds(&d), vec![Change::None, Change::None, Change::Removed]);
+        assert!(matches!(&d[2].block, Block::Para(s) if plain(s) == "last"));
+    }
+    #[test] fn rich_diff_removal_between_two_edited_paragraphs() {
+        let d = parse_diff("one two\n\ngone block\n\nthree four\n", "one TWO\n\nthree FOUR\n");
+        assert_eq!(kinds(&d), vec![Change::Modified, Change::Removed, Change::Modified]);
+        assert!(matches!(&d[1].block, Block::Para(s) if plain(s) == "gone block"));
+        assert!(matches!(&d[2].block, Block::Para(s) if plain(s).contains("FOUR")));
+    }
+    #[test] fn rich_diff_fenced_code_with_a_blank_line_is_wholly_added_or_removed() {
+        let with = "intro\n\n```\na\n\nb\n```\n";
+        let d = parse_diff("intro\n", with);
+        assert_eq!(kinds(&d), vec![Change::None, Change::Added, Change::Added, Change::Added]);
+        assert!(matches!(&d[2].block, Block::CodeLine { text, change: Change::Added, .. } if text.is_empty()));
+        let d = parse_diff(with, "intro\n");
+        assert_eq!(kinds(&d), vec![Change::None, Change::Removed, Change::Removed, Change::Removed]);
+        assert!(matches!(&d[2].block, Block::CodeLine { text, change: Change::Removed, .. } if text.is_empty()));
+    }
+    #[test] fn rich_diff_adjacent_edited_paragraphs_in_one_change_region() {
+        let d = parse_diff("alpha beta\n\ngamma delta\n", "alpha BETA\n\ngamma DELTA\n");
+        assert_eq!(kinds(&d), vec![Change::Modified, Change::Modified]);
+        let removed = |b: &Block| match b { Block::Para(s) => s.iter().filter(|x| x.change == Change::Removed).map(|x| x.text.trim().to_string()).collect::<Vec<_>>(), _ => vec![] };
+        assert_eq!(removed(&d[0].block), vec!["beta"]); assert_eq!(removed(&d[1].block), vec!["delta"]);
+    }
+    #[test] fn removed_words_keep_their_formatting() {
+        let d = parse_diff("use `foo` and **bold** here\n", "use and here\n");
+        let Block::Para(sp) = &d[0].block else { panic!("{:?}", d[0].block) };
+        assert!(sp.iter().any(|s| s.change == Change::Removed && s.code && s.text == "foo"), "{sp:?}");
+        assert!(sp.iter().any(|s| s.change == Change::Removed && s.bold && s.text == "bold"), "{sp:?}");
+    }
+    #[test] fn selection_quotes_the_side_it_anchors_on() {
+        let (old, new) = ("keep\n\ngone\n\nstay\n", "keep\n\nstay\n\nfresh\n");
+        let d = parse_diff(old, new);
+        assert_eq!(kinds(&d), vec![Change::None, Change::Removed, Change::None, Change::Added]);
+        let all: Vec<&Located> = d.iter().collect();
+        // only removed blocks: old lines, quoted from the old text
+        let s = selection_of(&all[1..2], old, new).unwrap();
+        assert_eq!((s.start, s.end, s.old_side, s.snippet.as_str()), (3, 3, true, "-gone\n"));
+        // a mixed selection anchors on the new lines of the blocks that exist there, and does not quote the removed one
+        let s = selection_of(&all, old, new).unwrap();
+        assert_eq!((s.start, s.end, s.old_side), (1, 5, false));
+        assert_eq!(s.snippet, " keep\n stay\n+fresh\n");
+        assert!(selection_of(&[], old, new).is_none());
     }
     #[test] fn robust_on_garbage() { for s in ["", "***", "```", "| x", "> > >", "[a](", "# \n#"] { let _ = parse(s); } assert!(is_markdown("a/README.MD") && !is_markdown("a.rs")); }
 }
