@@ -103,6 +103,10 @@ pub struct Settings {
     pub vim_keys: bool,
     /// Review-screen buttons the user chose to hide (ids from `controls::CONTROLS`).
     pub hidden_controls: Vec<String>,
+    /// Master switch for the AI features (AI review, Ask AI, generate with AI). Off hides every AI button and shortcut.
+    pub ai_enabled: bool,
+    /// Set once the easter egg shown the first time AI features are switched off has appeared. Has no UI control.
+    pub ai_egg_seen: bool,
 }
 
 /// Agent to preselect at first run: keep `current` if it is installed, otherwise the first installed one in `AGENTS` order
@@ -114,7 +118,7 @@ pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> 
 
 impl Default for Settings {
     fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, batch_view: Default::default(), pane_arrangement: Default::default(), first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
-            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true, ui_font: String::new(), code_font: String::new(), line_height: 1.0, ligatures: true, reduced_motion: false, vim_keys: false, hidden_controls: vec![] } }
+            model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true, ui_font: String::new(), code_font: String::new(), line_height: 1.0, ligatures: true, reduced_motion: false, vim_keys: false, hidden_controls: vec![], ai_enabled: true, ai_egg_seen: false } }
 }
 
 impl Settings {
@@ -138,7 +142,13 @@ impl Settings {
     /// Reduced motion from the setting or the environment.
     pub fn motion_reduced(&self) -> bool { self.reduced_motion || std::env::var("PERUSAL_REDUCED_MOTION").map(|v| !v.is_empty() && v != "0").unwrap_or(false) }
     /// Whether the review-screen control `id` is hidden by the user.
-    pub fn hidden(&self, id: &str) -> bool { self.hidden_controls.iter().any(|h| h == id) }
+    pub fn hidden(&self, id: &str) -> bool { (!self.ai_enabled && crate::controls::is_ai(id)) || self.hidden_controls.iter().any(|h| h == id) }
+    /// Whether the AI features are on.
+    pub fn ai_on(&self) -> bool { self.ai_enabled }
+    /// Switches the AI features on or off; returns true when this is the first time they were turned off (the easter egg moment, shown once).
+    pub fn set_ai(&mut self, on: bool) -> bool {
+        let first_off = !on && self.ai_enabled && !self.ai_egg_seen; self.ai_enabled = on; if first_off { self.ai_egg_seen = true; } first_off
+    }
     /// Hides or shows a control.
     pub fn set_hidden(&mut self, id: &str, hide: bool) {
         self.hidden_controls.retain(|h| h != id);
@@ -192,6 +202,14 @@ mod tests { use super::*;
         let mut s = Settings::default(); assert!(!s.hidden("sort")); s.set_hidden("sort", true); s.set_hidden("nope", true); assert!(s.hidden("sort") && !s.hidden("nope"));
         assert_eq!(Settings::from_toml(&s.to_toml()), s); s.set_hidden("sort", false); assert!(s.hidden_controls.is_empty());
         assert_eq!(Settings::from_toml("hidden_controls = [\"finish\", \"gone\"]\n").hidden_controls, vec!["finish"]);
+    }
+    #[test] fn ai_switch_hides_ai_controls() {
+        let mut s = Settings::default(); assert!(s.ai_on() && !s.hidden("ai_review")); s.ai_enabled = false;
+        assert!(s.hidden("ai_review") && s.hidden("sel_ask_ai") && !s.hidden("sort")); assert!(!Settings::from_toml("ai_enabled = false\n").ai_on());
+    }
+    #[test] fn ai_egg_only_the_first_time() {
+        let mut s = Settings::default(); assert!(!s.set_ai(true)); assert!(s.set_ai(false) && s.ai_egg_seen); assert!(!s.set_ai(true)); assert!(!s.set_ai(false));
+        assert!(Settings::from_toml(&s.to_toml()).ai_egg_seen);
     }
     #[test] fn agent_cycle() { let mut s = Settings::default(); assert_eq!(s.agent_label(), "Claude Code"); for _ in 0..4 { s.next_agent(); } assert_eq!(s.agent, "claude"); s.next_agent(); assert_eq!(s.agent_label(), "Gemini CLI"); }
     #[test] fn first_run_agent_follows_what_is_installed() {

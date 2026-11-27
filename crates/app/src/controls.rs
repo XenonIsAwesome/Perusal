@@ -35,6 +35,9 @@ pub const CONTROLS: &[Control] = &[
     Control { id: "sel_ask_ai", label: "Ask AI about selection", zone: Zone::SelectionBar },
 ];
 
+/// Controls that belong to the AI features; they are hidden while AI features are switched off.
+pub fn is_ai(id: &str) -> bool { matches!(id, "gen_filter" | "ai_review" | "ask_ai_tab" | "sel_ask_ai") }
+
 pub fn is_known(id: &str) -> bool { CONTROLS.iter().any(|c| c.id == id) }
 
 /// Drops ids that no longer exist (renamed or removed in a later version) and duplicates, keeping order.

@@ -1007,7 +1007,7 @@ impl Render for View {
         let (lw, rw) = (self.left_w * z, self.right_w * z);
 
         let footer = div().flex().items_center().gap_4().px_4().py(px(5.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
-            .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("o", "overview"), ("s", "settings"), ("Esc", "home")]
+            .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI")].into_iter().filter(|(k, _)| *k != "a" || self.settings.ai_on()).chain([ ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("o", "overview"), ("s", "settings"), ("Esc", "home")])
                 .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l)));
         let overlay = if self.rev_open { Some(self.reviewers_overlay(cx)) } else if self.help_open { Some(self.help_overlay(cx)) } else if self.palette_open { Some(self.palette_overlay(cx)) } else { self.finish_open.then(|| self.finish_overlay(cx).into_any_element()) };
 
@@ -1169,7 +1169,7 @@ impl View {
                     .child(div().text_xs().text_color(p.muted).child("Or write the whole sort as an expression"))
                     .child(self.winp(Fid::Sort, div().id("sort-expr").flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if on { p.accent } else { p.border }).bg(p.bg).font_family(self.fonts.mono.clone()).child(input_text(&self.sort, on, "additions + deletions desc, name asc", &p, false, 1)), cx))
                     .children(sug_items))
-                .child(self.gen_box(perusal_agents::GenKind::Sort, "e.g. biggest files first, then alphabetical", cx))).with_priority(15)
+                .when(self.settings.ai_on(), |d| d.child(self.gen_box(perusal_agents::GenKind::Sort, "e.g. biggest files first, then alphabetical", cx)))).with_priority(15)
         });
         let filter_pop = (self.gen_for == Some(perusal_agents::GenKind::Filter)).then(|| deferred(div().absolute().top(px(42.0)).left_0().w(px(460.0)).rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_hidden()
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
@@ -1770,9 +1770,9 @@ impl View {
     fn right_panel(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft]) -> impl IntoElement {
         let p = self.pal;
         let tabs = div().flex().items_center().border_b_1().border_color(p.border).px_2()
-            .child(self.tab_btn("tab-review", "Review", ic::COMMIT, RightTab::Review, cx)).when(self.tab == RightTab::Ai || !self.settings.hidden("ask_ai_tab"), |d| d.child(self.tab_btn("tab-ai", "Ask AI", ic::AUTO_AWESOME, RightTab::Ai, cx))).child(div().flex_1())
+            .child(self.tab_btn("tab-review", "Review", ic::COMMIT, RightTab::Review, cx)).when(self.settings.ai_on() && (self.tab == RightTab::Ai || !self.settings.hidden("ask_ai_tab")), |d| d.child(self.tab_btn("tab-ai", "Ask AI", ic::AUTO_AWESOME, RightTab::Ai, cx))).child(div().flex_1())
             .child(icon_btn("close-r", ic::CHEVRON_RIGHT, "Hide this panel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.right_open = false; this.settings.right_open = false; this.save_settings(); cx.notify(); })));
-        let body = if self.tab == RightTab::Review { self.review_tab(cx, drafts).into_any_element() } else { self.ai_tab(cx).into_any_element() };
+        let body = if self.tab == RightTab::Review || !self.settings.ai_on() { self.review_tab(cx, drafts).into_any_element() } else { self.ai_tab(cx).into_any_element() };
         div().flex().flex_col().size_full().child(tabs).child(body)
     }
     fn tab_btn(&self, id: &'static str, label: &'static str, i: ic::Icon, t: RightTab, cx: &mut Context<Self>) -> impl IntoElement {

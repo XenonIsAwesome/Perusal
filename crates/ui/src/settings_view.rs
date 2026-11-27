@@ -37,6 +37,8 @@ pub struct SettingsView {
     pub onboarding: Option<u8>,
     /// The "Customize interface" preview (hide/show review buttons) is open.
     controls_open: bool,
+    /// The AI switch easter egg is showing.
+    egg: bool,
     /// Keyboard tab: the action waiting for its new key, the working keymap and a message.
     rebind: Option<&'static str>, keys: std::collections::BTreeMap<String, String>, key_msg: Option<String>,
 }
@@ -46,7 +48,7 @@ impl SettingsView {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
             model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), dd_query: String::new(), dd_for: None, stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
-            focus: None, controls_open: false, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), rebind: None, keys: model::load_keymap(settings.vim_keys).0, key_msg: None, settings };
+            focus: None, controls_open: false, egg: false, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), rebind: None, keys: model::load_keymap(settings.vim_keys).0, key_msg: None, settings };
         if onboarding {
             let a = perusal_app::settings::pick_installed_agent(&v.settings.agent, |k| on_path(agent_program(k)));
             if a != v.settings.agent { v.settings.agent = a; v.changed(cx); }
@@ -484,12 +486,12 @@ impl gpui::Render for SettingsView {
                     .child(icon(if self.rules_open { ic::EXPAND_MORE } else { ic::CHEVRON_RIGHT }, 18.0, p.muted)).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).flex_1().child("Grouping rules")).child(badge(format!("{enabled} of {} on", s.group_rules.len()), p.muted, p.hover)))
                 .when(self.rules_open, |d| d.child(div().flex().flex_col().px_3().pb_3().child(div().text_xs().text_color(p.muted).pb_2().child("Files that match the same rule with the same name (across folders) are reviewed together. The first matching rule wins; names like main, lib, index are ignored. Built-in rules can be duplicated and then edited.")).children(rules)
                     .child(div().flex().flex_col().gap_2().pt_3().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if editing { "Edit the rule" } else { "Add a rule" }))
-                        .child(div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
+                        .when(s.ai_enabled, |d| d.child(div().flex().flex_col().gap_2().p_3().rounded_md().border_1().border_color(p.border).bg(p.surface)
                             .child(div().flex().items_center().gap_2().text_sm().font_weight(FontWeight::SEMIBOLD).child(icon(ic::AUTO_AWESOME, 16.0, p.ai)).child("Generate with AI"))
                             .child(self.field_box("f-rgen", F::RuleGen, "Describe which files belong together, e.g. SQL migrations with their rollbacks", cx, false))
                             .child(div().flex().items_center().gap_2().when(self.gen_busy, |d| d.child(kit::loading_dots(&p)).child(div().text_xs().text_color(p.muted).child("The agent is writing the rule…"))).child(div().flex_1())
                                 .child(if self.gen_busy { icon_text_btn("rgen-stop", ic::STOP, "Stop", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.gen_cancel.store(true, std::sync::atomic::Ordering::Relaxed); cx.notify(); })).into_any_element() }
-                                    else { icon_text_btn("rgen-go", ic::AUTO_AWESOME, "Generate", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.gen_rule(cx); })).into_any_element() })))
+                                    else { icon_text_btn("rgen-go", ic::AUTO_AWESOME, "Generate", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.gen_rule(cx); })).into_any_element() }))))
                         .child(self.field_box("f-label", F::Label, "Name, for example Docs with images", cx, false))
                         .child(self.field_box("f-pat", F::Pat, r"Pattern with a stem group, e.g. ^docs/(?P<stem>[^/.]+)\.(?:md|png)$", cx, false))
                         .children(self.rule_err.clone().map(|e| div().flex().items_start().gap_1().text_xs().text_color(p.danger).child(div().flex_1().min_w_0().child(e.clone())).child(kit::copy_btn("rule-err-copy", e, &p))))
@@ -631,7 +633,10 @@ impl gpui::Render for SettingsView {
                 4 => div().flex().flex_col().gap_3().child(section("Filter and sort presets"))
                     .child(div().text_xs().text_color(p.muted).child("Presets set a filter and a sort in one click. A project's default wins over the global default when a review opens. Save new ones from the bookmark button in a review, or add them here."))
                     .children(preset_groups).child(preset_form).children(self.msg.clone().map(|(ok, m)| div().flex().items_start().gap_1().text_sm().text_color(if ok { p.success } else { p.danger }).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("preset-err-copy", m, &p))))),
-                5 => div().flex().flex_col().child(section("AI agent")).child(ai),
+                5 => div().flex().flex_col().child(section("AI features"))
+                    .child(row("AI features", "Turn off AI review, Ask AI and every Generate with AI button and shortcut, for a review screen without any AI. Nothing else is changed", div().id("sw-ai").cursor_pointer().child(switch(s.ai_enabled, &p)).on_click(cx.listener(|this, _, _, cx| {
+                        let on = !this.settings.ai_enabled; let first_off = this.settings.set_ai(on); this.changed(cx); if first_off { this.egg = true; cx.notify(); } })).into_any_element()))
+                    .child(section("AI agent")).child(ai),
                 _ => {
                     let defaults = perusal_app::keymap::load("", s.vim_keys).unwrap_or_else(|_| perusal_app::keymap::default_map());
                     let rows: Vec<_> = perusal_app::keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "next_tab").enumerate().map(|(i, &(a, _, label))| {
@@ -666,6 +671,6 @@ impl gpui::Render for SettingsView {
         if self.controls_open { return self.controls_editor(cx); }
         deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.55)).occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { if this.onboarding.is_none() { this.commit_text(cx); cx.emit(SettingsEvent::Close); } }))
-            .child(card)).with_priority(20).into_any_element()
+            .child(card).children(self.egg.then(|| self.egg_overlay(cx)))).with_priority(20).into_any_element()
     }
 }

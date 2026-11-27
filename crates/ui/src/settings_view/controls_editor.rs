@@ -2,10 +2,21 @@
 //! Hidden buttons are grayed out with a dashed border. The list of controls lives in `perusal_app::controls`.
 use super::SettingsView;
 use crate::icons::{self as ic, Icon};
-use crate::kit::{icon, icon_text_btn, tip, Btn};
+use crate::kit::{self, icon, icon_btn, icon_text_btn, tip, Btn};
 use gpui::{deferred, div, prelude::*, px, relative, AnyElement, Context, FontWeight, MouseButton, SharedString};
 
 impl SettingsView {
+    /// Easter egg: shown the first time the AI features are switched off.
+    pub(super) fn egg_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.pal;
+        deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.6)).occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.egg = false; cx.notify(); }))
+            .child(div().id("egg-card").relative().p_2().rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(kit::easter_egg(420.0))
+                .child(div().absolute().top(px(14.0)).right(px(14.0)).child(icon_btn("egg-close", ic::CLOSE, "Close", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.egg = false; cx.notify(); })))))).with_priority(30).into_any_element()
+    }
+
     pub(super) fn controls_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.pal;
         let hidden_n = self.settings.hidden_controls.len();

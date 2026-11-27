@@ -122,6 +122,7 @@ impl View {
         match a {
             "next_file" => self.step(1), "prev_file" => self.step(-1), "toggle_viewed" => self.toggle_viewed(), "next_batch" => self.next(), "prev_batch" => self.back(),
             "comment" => { self.open_composer(self.page == Page::Overview && self.info.is_some(), None); }
+            "ask_ai" if !self.settings.ai_on() => {}
             "ask_ai" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
             "focus_filter" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
             "toggle_grouping" => { self.settings.group_related = !self.settings.group_related; self.save_settings(); self.m.vm.grouping = self.settings.group_related; let _ = self.m.vm.refresh(); self.reload(); }
