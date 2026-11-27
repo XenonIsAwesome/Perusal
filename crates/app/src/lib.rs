@@ -2,6 +2,7 @@
 pub mod avatar;
 pub mod banner;
 pub mod ci;
+pub mod controls;
 pub mod deeplink;
 pub mod desktop;
 pub mod filterbar;

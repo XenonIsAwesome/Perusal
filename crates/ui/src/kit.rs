@@ -83,6 +83,13 @@ pub fn logo(size: f32) -> gpui::Img {
     let im = IMG.get_or_init(|| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, LOGO_PNG.to_vec()))).clone();
     gpui::img(gpui::ImageSource::Image(im)).size(px(size)).flex_none()
 }
+const EGG_JPG: &[u8] = include_bytes!("../assets/easter-egg.jpg");
+/// The easter-egg picture (embedded, so showing it never touches the network), 465x430 scaled to `w` px wide.
+pub fn easter_egg(w: f32) -> gpui::Img {
+    static IMG: std::sync::OnceLock<std::sync::Arc<gpui::Image>> = std::sync::OnceLock::new();
+    let im = IMG.get_or_init(|| std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Jpeg, EGG_JPG.to_vec()))).clone();
+    gpui::img(gpui::ImageSource::Image(im)).w(px(w)).h(px(w * 430.0 / 465.0)).flex_none().rounded_md()
+}
 /// The icon as the window icon (X11 only; Wayland takes it from the desktop entry).
 pub fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
     image::load_from_memory_with_format(LOGO_PNG, image::ImageFormat::Png).ok().map(|i| std::sync::Arc::new(i.to_rgba8()))

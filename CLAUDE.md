@@ -39,6 +39,7 @@ State on disk: settings in `~/.config/perusal/settings.toml`, presets in `preset
 - `DECISIONS.md` records design decisions and known gaps; `docs/PROGRESS.md` records milestone status; `docs/USER.md` is the user-facing behavior doc. Update them when behavior changes.
 - UI work is verified with screenshots on a headless X display (Xvfb + xdotool + ImageMagick `import`), since GPUI cannot be unit tested.
 - `assets/perusal.svg` is the icon; the app embeds a 256 px PNG render of it (`crates/ui/assets/perusal-256.png`) that must be regenerated when the SVG changes.
+- Hideable review buttons (Settings, Appearance, Interface, Customize) are a hand-kept list, not generated. When you add, remove, rename or move a button on the review screen, update all three places: the catalog `crates/app/src/controls.rs` (`CONTROLS`, and `is_ai` for AI buttons), the miniature preview `crates/ui/src/settings_view/controls_editor.rs`, and wrap the real button in `crates/ui/src/view.rs` with `self.settings.hidden("id")`. Settings and Home stay non-hideable.
 - Releases are tag driven (`v1.2.3` builds every package; the version comes from the tag), see `.github/workflows/release.yml`.
 
 ## How the owner wants work done

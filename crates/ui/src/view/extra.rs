@@ -122,6 +122,7 @@ impl View {
         match a {
             "next_file" => self.step(1), "prev_file" => self.step(-1), "toggle_viewed" => self.toggle_viewed(), "next_batch" => self.next(), "prev_batch" => self.back(),
             "comment" => { self.open_composer(self.page == Page::Overview && self.info.is_some(), None); }
+            "ask_ai" if !self.settings.ai_on() => {}
             "ask_ai" => { self.ai_ctx = self.selection(); self.tab = RightTab::Ai; self.right_open = true; self.focus = Some(Fid::Ask); }
             "focus_filter" => { self.focus = Some(Fid::Filter); self.sug_for = Fid::Filter; self.update_suggestions(); }
             "toggle_grouping" => { self.settings.group_related = !self.settings.group_related; self.save_settings(); self.m.vm.grouping = self.settings.group_related; let _ = self.m.vm.refresh(); self.reload(); }
@@ -144,7 +145,7 @@ impl View {
 
     /// Palette matches as (action, label), best first.
     fn palette_hits(&self) -> Vec<(&'static str, &'static str)> {
-        let labels: Vec<&'static str> = keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "palette").map(|(_, _, l)| *l).collect();
+        let labels: Vec<&'static str> = keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "palette" && (*a != "ask_ai" || self.settings.ai_on())).map(|(_, _, l)| *l).collect();
         let q = self.pal_in.f.text.trim();
         let ordered = if q.is_empty() { labels.clone() } else { keymap::palette(&labels, q) };
         ordered.into_iter().filter_map(|l| keymap::ACTIONS.iter().find(|(_, _, x)| *x == l).map(|(a, _, l)| (*a, *l))).collect()
@@ -225,7 +226,7 @@ impl View {
 
     pub(super) fn help_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.pal;
-        let mut rows: Vec<(String, String)> = keymap::ACTIONS.iter().map(|(a, _, l)| (show_key(self.keys.get(*a).map(String::as_str).unwrap_or("")), l.to_string())).collect();
+        let mut rows: Vec<(String, String)> = keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "ask_ai" || self.settings.ai_on()).map(|(a, _, l)| (show_key(self.keys.get(*a).map(String::as_str).unwrap_or("")), l.to_string())).collect();
         rows.extend([("Esc".to_string(), "Back to Home / clear selection / stop the agent".to_string()), ("Ctrl + / Ctrl -".into(), "Zoom in / out (Ctrl+0 resets)".into()), ("Ctrl+W".into(), "Close this tab".into())]);
         let list = div().flex().flex_col().px_4().py_2().gap(px(2.0)).children(rows.into_iter().map(|(k, l)| div().flex().items_center().gap_3().py(px(1.0)).child(div().w(px(120.0)).flex_none().flex().child(kbd_s(&k, &p))).child(div().text_sm().child(l))));
         let head = div().flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(p.border).child(icon(ic::KEYBOARD, 20.0, p.accent)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).flex_1().child("Keyboard shortcuts"))

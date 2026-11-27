@@ -185,6 +185,7 @@ impl View {
         let panes_changed = (s.batch_view != self.settings.batch_view, s.pane_arrangement != self.settings.pane_arrangement);
         self.theme = theme::load(&s.theme, Some(&model::themes_dir())); self.pal = Pal::new(&self.theme);
         self.tree = s.files_tree; self.m.vm.dir_order = s.files_tree; self.m.vm.grouping = s.group_related; self.m.vm.rules = s.group_rules.clone();
+        if !s.ai_on() { if self.tab == RightTab::Ai { self.tab = RightTab::Review; } self.gen_for = None; }
         if diff_changed { self.diff_mode = s.diff_mode; }
         self.settings.left_width = self.left_w; self.settings.right_width = self.right_w;
         let ws = s.hide_whitespace != self.settings.hide_whitespace;
@@ -443,7 +444,7 @@ impl View {
     /// Asks the agent to write the filter or sort described in the generate box.
     fn start_gen(&mut self, cx: &mut Context<Self>) {
         let Some(kind) = self.gen_for else { return };
-        if self.gen_busy { return; }
+        if self.gen_busy || !self.settings.ai_on() { return; }
         let req = self.gen.f.text.trim().to_string();
         if req.is_empty() { self.gen_msg = Some("Describe what you want first.".into()); return; }
         self.gen_busy = true; self.gen_msg = None; self.gen_cancel.store(false, Ordering::Relaxed);
@@ -699,7 +700,7 @@ impl View {
     // ---------- AI
     fn ai_options(&self) -> Options { Options { model: self.settings.model.clone(), effort: self.settings.effort.clone(), path: self.settings.agent_path.clone() } }
     fn start_ai(&mut self, job: Job, question: String, cx: &mut Context<Self>) {
-        if self.busy() { return; }
+        if self.busy() || !self.settings.ai_on() { return; }
         let opts = self.ai_options();
         let Some(probe) = launch_with(&self.settings.agent, &self.settings.agent_command, "x", &opts) else { self.ai_notice = Some("No agent configured. Choose one in Settings.".into()); return };
         if !on_path(&probe.program) { self.ai_notice = Some(format!("`{}` was not found on your PATH. Install it, pick another agent in Settings, or set a custom command.", probe.program)); return; }
@@ -1007,7 +1008,7 @@ impl Render for View {
         let (lw, rw) = (self.left_w * z, self.right_w * z);
 
         let footer = div().flex().items_center().gap_4().px_4().py(px(5.0)).bg(p.surface).border_t_1().border_color(p.border).text_xs().text_color(p.muted)
-            .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI"), ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("o", "overview"), ("s", "settings"), ("Esc", "home")]
+            .children([("n / p", "file"), ("v", "viewed"), ("Enter", "next"), ("/", "filter"), ("c", "comment"), ("a", "ask AI")].into_iter().filter(|(k, _)| *k != "a" || self.settings.ai_on()).chain([ ("f", "finish"), ("u", "split"), ("m", "markdown"), ("t", "tree"), ("g", "group"), ("o", "overview"), ("s", "settings"), ("Esc", "home")])
                 .map(|(k, l)| div().flex().items_center().gap_1().child(kbd(k, &p)).child(l)));
         let overlay = if self.rev_open { Some(self.reviewers_overlay(cx)) } else if self.help_open { Some(self.help_overlay(cx)) } else if self.palette_open { Some(self.palette_overlay(cx)) } else { self.finish_open.then(|| self.finish_overlay(cx).into_any_element()) };
 
@@ -1089,9 +1090,9 @@ impl View {
         } else {
             div().flex().items_center().gap_1().min_w_0().child(div().id("title-text").text_lg().font_weight(FontWeight::SEMIBOLD).truncate().min_w_0().px_2().py(px(2.0)).rounded_md().border_1().border_color(gpui::transparent_black()).cursor_text().hover(move |x| x.bg(p.hover).border_color(p.accent)).child(SharedString::from(self.m.title.clone()))
                 .on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); })))
-                .child(icon_btn("rename", ic::EDIT, "Rename this review", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); }))).into_any_element()
+                .when(!self.settings.hidden("rename"), |d| d.child(icon_btn("rename", ic::EDIT, "Rename this review", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { let t = this.m.title.clone(); this.rename.f.set(&t); this.focus = Some(Fid::Rename); cx.stop_propagation(); cx.notify(); })))).into_any_element()
         };
-        let ci = ci_badge(&self.ci, &p).map(|b| b.on_click(cx.listener(|this, _, _, _| { if let Some(u) = this.ci_url() { let _ = model::open_url(&u); } })));
+        let ci = ci_badge(&self.ci, &p).filter(|_| !self.settings.hidden("ci")).map(|b| b.on_click(cx.listener(|this, _, _, _| { if let Some(u) = this.ci_url() { let _ = model::open_url(&u); } })));
         let local_mr = self.local_mr.clone().map(|u| icon_text_btn("open-mr", ic::OPEN_IN_NEW, "Open the PR", Btn::Secondary, &p).on_click(cx.listener(move |_, _, _, _| { let _ = model::open_url(&u); })));
         div().relative().flex().items_center().gap_3().px_4().h(px(52.0)).bg(p.surface).border_b_1().border_color(p.border)
             .child(icon_btn("home", ic::HOME, "Back to Home (Esc)", Btn::Ghost, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::Home))))
@@ -1101,15 +1102,15 @@ impl View {
             .children(ci).children(local_mr)
             .child(div().flex_1())
             .when(ndrafts > 0, |d| d.child(badge(format!("{ndrafts} draft{}", if ndrafts == 1 { "" } else { "s" }), p.accent, p.accent.opacity(0.15))))
-            .child(if self.refreshing {
+            .when(!self.settings.hidden("refresh"), |d| d.child(if self.refreshing {
                 tip(div().id("refresh-mr").size(px(30.0)).flex().items_center().justify_center().flex_none().rounded_md().border_1().border_color(p.accent).bg(p.surface).child(kit::spinner(&p, 18.0)), "Refreshing…", &p)
             } else {
                 icon_btn("refresh-mr", ic::REFRESH, if self.m.mr.is_some() { "Refresh: fetch new commits, CI and comments (R)" } else { "Refresh: re-read the branch (R)" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.refresh(cx); }))
-            })
+            }))
             .children(self.refreshing.then(|| kit::indeterminate_bar(&p)))
-            .child(if reviewing { icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element() }
-                else { icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element() })
-            .when(self.m.mr.is_some(), |d| d.child(icon_btn("req-review", ic::PERSON_ADD, "Request a review from someone", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.rev_open = true; this.rev_in.f.clear(); this.focus = Some(Fid::Reviewers); cx.stop_propagation(); cx.notify(); }))))
+            .when(reviewing || !self.settings.hidden("ai_review"), |d| d.child(if reviewing { icon_text_btn("ai-review", ic::STOP, "Stop AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.stop_ai(); cx.notify(); })).into_any_element() }
+                else { icon_text_btn("ai-review", ic::AUTO_AWESOME, "AI review", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.tab = RightTab::Ai; this.right_open = true; this.start_ai(Job::Review, String::new(), cx); cx.notify(); })).into_any_element() }))
+            .when(self.m.mr.is_some() && !self.settings.hidden("request_review"), |d| d.child(icon_btn("req-review", ic::PERSON_ADD, "Request a review from someone", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.rev_open = true; this.rev_in.f.clear(); this.focus = Some(Fid::Reviewers); cx.stop_propagation(); cx.notify(); }))))
             .child(icon_btn("settings", ic::SETTINGS, "Settings (s)", Btn::Secondary, &p).on_click(cx.listener(|_, _, _, cx| cx.emit(ViewEvent::OpenSettings))))
     }
 
@@ -1169,7 +1170,7 @@ impl View {
                     .child(div().text_xs().text_color(p.muted).child("Or write the whole sort as an expression"))
                     .child(self.winp(Fid::Sort, div().id("sort-expr").flex().items_center().px_3().py(px(6.0)).rounded_md().border_1().border_color(if on { p.accent } else { p.border }).bg(p.bg).font_family(self.fonts.mono.clone()).child(input_text(&self.sort, on, "additions + deletions desc, name asc", &p, false, 1)), cx))
                     .children(sug_items))
-                .child(self.gen_box(perusal_agents::GenKind::Sort, "e.g. biggest files first, then alphabetical", cx))).with_priority(15)
+                .when(self.settings.ai_on(), |d| d.child(self.gen_box(perusal_agents::GenKind::Sort, "e.g. biggest files first, then alphabetical", cx)))).with_priority(15)
         });
         let filter_pop = (self.gen_for == Some(perusal_agents::GenKind::Filter)).then(|| deferred(div().absolute().top(px(42.0)).left_0().w(px(460.0)).rounded_md().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_hidden()
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation()))
@@ -1222,8 +1223,8 @@ impl View {
         });
         let err = self.error.clone();
         div().flex().flex_col().w_full().px_4().py_2().bg(p.bg).border_b_1().border_color(p.border).gap_1()
-            .child(div().relative().w_full().flex().items_center().gap_2().child(fbox).child(ai_filter).child(ws_btn).child(sort_btn)
-                .child(icon_btn("presets", ic::BOOKMARK, "Filter and sort presets", if self.presets_open { Btn::Secondary } else { Btn::Ghost }, &p).on_click(cx.listener(|this, _, _, cx| { this.presets_open = !this.presets_open; this.sug.clear(); cx.stop_propagation(); cx.notify(); })))
+            .child(div().relative().w_full().flex().items_center().gap_2().child(fbox).when(!self.settings.hidden("gen_filter"), |d| d.child(ai_filter)).when(!self.settings.hidden("whitespace"), |d| d.child(ws_btn)).when(!self.settings.hidden("sort"), |d| d.child(sort_btn))
+                .when(!self.settings.hidden("presets"), |d| d.child(icon_btn("presets", ic::BOOKMARK, "Filter and sort presets", if self.presets_open { Btn::Secondary } else { Btn::Ghost }, &p).on_click(cx.listener(|this, _, _, cx| { this.presets_open = !this.presets_open; this.sug.clear(); cx.stop_propagation(); cx.notify(); }))))
                 .children(dropdown).children(presets_menu).children(sort_pop).children(filter_pop))
             .children((self.tree && !self.m.vm.sort.is_empty()).then(|| div().flex().items_center().gap_2().text_xs().text_color(p.warn).child(icon(ic::WARNING, 14.0, p.warn)).child("Sorting does not apply while files are shown as a directory tree. Switch to the flat list to use it.")))
             .children(err.map(|e| div().flex().items_center().gap_1().text_xs().text_color(p.danger).child(div().min_w_0().truncate().child(e.clone())).child(kit::copy_btn("filter-err-copy", e, &p))))
@@ -1272,11 +1273,11 @@ impl View {
         let tree_on = self.tree;
         let header = div().flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(p.border).bg(p.surface)
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Files")).child(badge(format!("{n_files}"), p.muted, p.hover)).child(div().flex_1())
-            .when(tree_on, |d| d
+            .when(tree_on && !self.settings.hidden("fold_all"), |d| d
                 .child(icon_btn("exp-all", ic::UNFOLD_MORE, "Expand all folders", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.collapsed.clear(); cx.notify(); })))
                 .child(icon_btn("col-all", ic::UNFOLD_LESS, "Collapse all folders", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.collapsed = tree::all_dirs(&this.m.vm.files, &this.m.vm.visible).into_iter().collect(); cx.notify(); }))))
-            .child(seg_box(&p).child(seg_icon("seg-list", ic::VIEW_LIST, "Flat list", !tree_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.tree { this.toggle_tree(); } cx.notify(); })))
-                .child(seg_icon("seg-tree", ic::ACCOUNT_TREE, "Directory tree (t)", tree_on, &p).on_click(cx.listener(|this, _, _, cx| { if !this.tree { this.toggle_tree(); } cx.notify(); }))))
+            .when(!self.settings.hidden("files_view"), |d| d.child(seg_box(&p).child(seg_icon("seg-list", ic::VIEW_LIST, "Flat list", !tree_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.tree { this.toggle_tree(); } cx.notify(); })))
+                .child(seg_icon("seg-tree", ic::ACCOUNT_TREE, "Directory tree (t)", tree_on, &p).on_click(cx.listener(|this, _, _, cx| { if !this.tree { this.toggle_tree(); } cx.notify(); })))))
             .child(icon_btn("close-l", ic::CHEVRON_LEFT, "Hide the files panel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.left_open = false; this.settings.left_open = false; this.save_settings(); cx.notify(); })));
         let n = self.multi.len();
         let bar = (n > 0).then(|| div().flex().items_center().gap_2().px_3().py(px(6.0)).bg(p.warn.opacity(0.12)).border_b_1().border_color(p.border)
@@ -1695,33 +1696,38 @@ impl View {
             let top = (miny - oy - 50.0).max(4.0); let left = (self.sel_x - ox - 30.0).clamp(8.0, (w - 330.0).max(8.0));
             Some(div().absolute().top(px(top)).left(px(left)).flex().items_center().gap_1().px_2().py_1().rounded_lg().bg(p.surface).border_1().border_color(p.accent).shadow_lg().occlude()
                 .child(div().text_xs().text_color(p.muted).px_1().child(format!("{}:{}–{}", s.file.rsplit('/').next().unwrap_or(&s.file), s.start, s.end)))
-                .child(icon_text_btn("sel-comment", ic::ADD_COMMENT, "Comment", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(false, None); cx.stop_propagation(); cx.notify(); })))
-                .child(icon_text_btn("sel-ai", ic::AUTO_AWESOME, "Ask AI", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_ctx = this.selection(); this.tab = RightTab::Ai; this.right_open = true; this.focus = Some(Fid::Ask); cx.stop_propagation(); cx.notify(); })))
+                .when(!self.settings.hidden("sel_comment"), |d| d.child(icon_text_btn("sel-comment", ic::ADD_COMMENT, "Comment", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(false, None); cx.stop_propagation(); cx.notify(); }))))
+                .when(!self.settings.hidden("sel_ask_ai"), |d| d.child(icon_text_btn("sel-ai", ic::AUTO_AWESOME, "Ask AI", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.ai_ctx = this.selection(); this.tab = RightTab::Ai; this.right_open = true; this.focus = Some(Fid::Ask); cx.stop_propagation(); cx.notify(); }))))
                 .child(icon_btn("sel-clear", ic::CLOSE, "Clear the selection (Esc)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.clear_selection(); cx.stop_propagation(); cx.notify(); }))))
         });
 
         // floating action bar
         let sep = || div().w(px(1.0)).h(px(22.0)).bg(p.border).flex_none();
+        // Separators go only between groups that have something visible, so hiding buttons never leaves a stray one.
+        let (h, show_finish) = (|id: &str| self.settings.hidden(id), !self.instant() && !self.settings.hidden("finish"));
+        let g1 = !h("nav") || !h("viewed") || !h("global_comment");
+        let g2 = (!md_on && !one_sided && !h("diff_mode")) || (is_md && !h("md_mode")) || (batch.len() > 1 && !h("batch_view")) || !h("fullscreen");
         let bar = div().absolute().bottom(px(16.0)).left_0().right_0().flex().justify_center().child(
             div().flex().items_center().gap_2().px_3().py_2().rounded_lg().bg(p.surface).border_1().border_color(p.border).shadow_lg()
-                .child(icon_btn("prev", ic::CHEVRON_LEFT, "Previous batch (Backspace)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.back(); cx.notify(); })))
-                .child(icon_btn("next", ic::CHEVRON_RIGHT, "Next batch (Enter)", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.next(); cx.notify(); })))
-                .child(tip(div().id("viewed-box").size(px(30.0)).flex().items_center().justify_center().flex_none().rounded_md().border_1().border_color(if viewed_all { p.success } else { p.border }).bg(if viewed_all { p.success } else { p.surface }).cursor_pointer().hover(move |s| s.bg(if viewed_all { p.success } else { p.hover }))
-                    .on_click(cx.listener(|this, _, _, cx| { this.toggle_viewed(); cx.notify(); })).child(icon(if viewed_all { ic::VISIBILITY } else { ic::VISIBILITY_OFF }, 18.0, if viewed_all { gpui::white() } else { p.muted })), if viewed_all { "Viewed. Click to mark as not viewed (v)" } else { "Mark this file as viewed (v)" }, &p))
-                .child(icon_btn("gcomment", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); })))
-                .when(!md_on && !one_sided, |d| d.child(sep()).child(seg_box(&p).child(seg_icon("df-uni", ic::VIEW_AGENDA, "Unified diff (u)", mode == DiffMode::Unified, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Unified); cx.notify(); })))
+                .when(!self.settings.hidden("nav"), |d| d.child(icon_btn("prev", ic::CHEVRON_LEFT, "Previous batch (Backspace)", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.back(); cx.notify(); }))))
+                .when(!self.settings.hidden("nav"), |d| d.child(icon_btn("next", ic::CHEVRON_RIGHT, "Next batch (Enter)", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.next(); cx.notify(); }))))
+                .when(!self.settings.hidden("viewed"), |d| d.child(tip(div().id("viewed-box").size(px(30.0)).flex().items_center().justify_center().flex_none().rounded_md().border_1().border_color(if viewed_all { p.success } else { p.border }).bg(if viewed_all { p.success } else { p.surface }).cursor_pointer().hover(move |s| s.bg(if viewed_all { p.success } else { p.hover }))
+                    .on_click(cx.listener(|this, _, _, cx| { this.toggle_viewed(); cx.notify(); })).child(icon(if viewed_all { ic::VISIBILITY } else { ic::VISIBILITY_OFF }, 18.0, if viewed_all { gpui::white() } else { p.muted })), if viewed_all { "Viewed. Click to mark as not viewed (v)" } else { "Mark this file as viewed (v)" }, &p)))
+                .when(!self.settings.hidden("global_comment"), |d| d.child(icon_btn("gcomment", ic::ADD_COMMENT, "Comment on the whole merge request", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.open_composer(true, None); cx.notify(); }))))
+                .when(g1 && (g2 || show_finish), |d| d.child(sep()))
+                .when(!md_on && !one_sided && !self.settings.hidden("diff_mode"), |d| d.child(seg_box(&p).child(seg_icon("df-uni", ic::VIEW_AGENDA, "Unified diff (u)", mode == DiffMode::Unified, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Unified); cx.notify(); })))
                     .child(seg_icon("df-split", ic::VERTICAL_SPLIT, "Side-by-side diff (u)", mode == DiffMode::Split, &p).on_click(cx.listener(|this, _, _, cx| { this.set_diff_mode(DiffMode::Split); cx.notify(); })))))
-                .when(is_md, |d| d.child(sep()).child(seg_box(&p).child(seg_icon("md-diff", ic::CODE, "Show the markdown source diff (m)", !md_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.md_rendered { this.md_rendered = false; this.shown = None; this.clear_selection(); } cx.notify(); })))
+                .when(is_md && !self.settings.hidden("md_mode"), |d| d.child(seg_box(&p).child(seg_icon("md-diff", ic::CODE, "Show the markdown source diff (m)", !md_on, &p).on_click(cx.listener(|this, _, _, cx| { if this.md_rendered { this.md_rendered = false; this.shown = None; this.clear_selection(); } cx.notify(); })))
                     .child(seg_icon("md-prev", ic::VISIBILITY, "Show the rendered markdown (m)", md_on, &p).on_click(cx.listener(|this, _, _, cx| { if !this.md_rendered { this.md_rendered = true; this.shown = None; this.clear_selection(); } cx.notify(); })))))
-                .when(batch.len() > 1, |d| d.child(sep()).child(seg_box(&p)
+                .when(batch.len() > 1 && !self.settings.hidden("batch_view"), |d| d.child(seg_box(&p)
                     .child(seg_icon("bv-panes", ic::VIEW_QUILT, "Show the files of this batch in split panes (w)", panes_on, &p).on_click(cx.listener(|this, _, _, cx| { this.set_batch_panes(true); cx.notify(); })))
                     .child(seg_icon("bv-stack", ic::VIEW_STREAM, "Show the files of this batch one after the other (w)", !panes_on, &p).on_click(cx.listener(|this, _, _, cx| { this.set_batch_panes(false); cx.notify(); }))))
                     .when(panes_on, |d| d.child(icon_btn("bv-arr", arr_icon, arr_tip, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| {
                         let all = Arrangement::ALL; let i = all.iter().position(|a| *a == this.arrangement).unwrap_or(0); let next = if this.layout.custom { this.arrangement } else { all[(i + 1) % all.len()] }; this.set_arrangement(next); cx.notify();
                     }))).child(icon_btn("bv-reset", ic::RESET_LAYOUT, "Reset the pane sizes (or double-click a divider)", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.layout = Layout::new(this.panes.len(), this.arrangement); cx.notify(); })))))
-                .child(icon_btn("fullscreen", if fs { ic::FULLSCREEN_EXIT } else { ic::FULLSCREEN }, if fs { "Leave full screen (F11 or Esc)" } else { "Diff viewer full screen (F11)" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let on = !this.fullscreen; this.set_fullscreen(on, cx); cx.notify(); })))
-                .child(sep())
-                .children((!self.instant()).then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
+                .when(!self.settings.hidden("fullscreen"), |d| d.child(icon_btn("fullscreen", if fs { ic::FULLSCREEN_EXIT } else { ic::FULLSCREEN }, if fs { "Leave full screen (F11 or Esc)" } else { "Diff viewer full screen (F11)" }, Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let on = !this.fullscreen; this.set_fullscreen(on, cx); cx.notify(); }))))
+                .when(g2 && show_finish, |d| d.child(sep()))
+                .children(show_finish.then(|| icon_text_btn("finish", ic::RATE_REVIEW, "Finish review", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.finish_open = true; this.focus = Some(Fid::Summary); this.submit_msg = None; cx.notify(); })))));
 
         let composer = self.composer.is_some().then(|| self.composer_panel(cx));
         let wrap = div().relative().flex().flex_col().flex_1().min_h_0().w_full().child(div().absolute().size_full().child(kit::bounds_probe(&self.b_body))).child(body).children(toolbar).child(bar);
@@ -1770,7 +1776,7 @@ impl View {
     fn right_panel(&mut self, cx: &mut Context<Self>, drafts: &[perusal_core::store::Draft]) -> impl IntoElement {
         let p = self.pal;
         let tabs = div().flex().items_center().border_b_1().border_color(p.border).px_2()
-            .child(self.tab_btn("tab-review", "Review", ic::COMMIT, RightTab::Review, cx)).child(self.tab_btn("tab-ai", "Ask AI", ic::AUTO_AWESOME, RightTab::Ai, cx)).child(div().flex_1())
+            .child(self.tab_btn("tab-review", "Review", ic::COMMIT, RightTab::Review, cx)).when(self.settings.ai_on() && (self.tab == RightTab::Ai || !self.settings.hidden("ask_ai_tab")), |d| d.child(self.tab_btn("tab-ai", "Ask AI", ic::AUTO_AWESOME, RightTab::Ai, cx))).child(div().flex_1())
             .child(icon_btn("close-r", ic::CHEVRON_RIGHT, "Hide this panel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.right_open = false; this.settings.right_open = false; this.save_settings(); cx.notify(); })));
         let body = if self.tab == RightTab::Review { self.review_tab(cx, drafts).into_any_element() } else { self.ai_tab(cx).into_any_element() };
         div().flex().flex_col().size_full().child(tabs).child(body)
