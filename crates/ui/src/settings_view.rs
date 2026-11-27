@@ -11,6 +11,8 @@ use perusal_app::theme;
 use perusal_diff::GroupRule;
 use perusal_providers::auth::{DeviceCode, TokenStore};
 
+mod controls_editor;
+
 /// True when dropdown `id` is the open one.
 fn open_or(dd: Option<u8>, id: u8) -> bool { dd == Some(id) }
 
@@ -33,6 +35,8 @@ pub struct SettingsView {
     accounts: Vec<(String, String, Acc)>, token_host: Option<String>, client_host: Option<String>, device: Option<(String, DeviceCode)>, msg: Option<(bool, String)>, busy: bool,
     /// First-run setup: the step shown (0 welcome, 1 accounts, 2 agent, 3 done). `None` is the normal Settings panel.
     pub onboarding: Option<u8>,
+    /// The "Customize interface" preview (hide/show review buttons) is open.
+    controls_open: bool,
     /// Keyboard tab: the action waiting for its new key, the working keymap and a message.
     rebind: Option<&'static str>, keys: std::collections::BTreeMap<String, String>, key_msg: Option<String>,
 }
@@ -42,7 +46,7 @@ impl SettingsView {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
             model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), dd_query: String::new(), dd_for: None, stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
-            focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), rebind: None, keys: model::load_keymap(settings.vim_keys).0, key_msg: None, settings };
+            focus: None, controls_open: false, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), rebind: None, keys: model::load_keymap(settings.vim_keys).0, key_msg: None, settings };
         if onboarding {
             let a = perusal_app::settings::pick_installed_agent(&v.settings.agent, |k| on_path(agent_program(k)));
             if a != v.settings.agent { v.settings.agent = a; v.changed(cx); }
@@ -581,6 +585,8 @@ impl gpui::Render for SettingsView {
                     .child(section("Keyboard"))
                     .child(row("Vim-style keys", "j and k move between files. Individual keys are rebound in keymap.toml; press ? in a review for the list", sw("sw-vim", s.vim_keys, cx, |st| st.vim_keys = !st.vim_keys)))
                     .child(row("Keymap file", "Edit [keys] overrides, for example comment = \"m\"", icon_text_btn("open-keymap", ic::KEYBOARD, "Open folder", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { let d = model::config_dir(); let _ = std::fs::create_dir_all(&d); if let Err(e) = model::open_dir(&d) { this.say(false, e); } cx.notify(); })).into_any_element()))
+                    .child(section("Interface"))
+                    .child(row("Hidden buttons", "Hide review-screen buttons you never use. Opens a preview of the review where you click each button to hide or show it", icon_text_btn("open-controls", ic::TUNE, "Customize", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.commit_text(cx); this.controls_open = true; cx.notify(); })).into_any_element()))
                     .child(section("Window"))
                     .child(row("Built-in title bar", "Draw the minimize, maximize and close buttons inside the app. Turn off to use the system title bar and borders", sw("sw-tb", s.custom_titlebar, cx, |st| st.custom_titlebar = !st.custom_titlebar)))
                     .child(section("Links"))
@@ -657,8 +663,9 @@ impl gpui::Render for SettingsView {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.commit_text(cx); this.blur(); cx.notify(); }))
             .child(div().flex().items_center().px_5().py_3().border_b_1().border_color(p.border).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title)))
             .child(body).child(footer);
+        if self.controls_open { return self.controls_editor(cx); }
         deferred(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.55)).occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { if this.onboarding.is_none() { this.commit_text(cx); cx.emit(SettingsEvent::Close); } }))
-            .child(card)).with_priority(20)
+            .child(card)).with_priority(20).into_any_element()
     }
 }
