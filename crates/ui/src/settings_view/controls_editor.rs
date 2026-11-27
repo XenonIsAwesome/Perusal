@@ -35,15 +35,18 @@ impl SettingsView {
         let locked = move |v: gpui::Div| v.opacity(0.9);
         // A clickable, hide/show-able control. Hidden: grayed out, dashed border.
         let slot = |id: &'static str, visual: AnyElement, cx: &mut Context<Self>| {
-            let hidden = self.settings.hidden(id);
+            // AI controls are forced hidden by the "Disable AI features" switch: shown as hidden and locked, clicks ignored.
+            let ai_locked = !self.settings.ai_on() && perusal_app::controls::is_ai(id);
+            let hidden = ai_locked || self.settings.hidden_controls.iter().any(|h| h == id);
             let label = perusal_app::controls::CONTROLS.iter().find(|c| c.id == id).map(|c| c.label).unwrap_or(id);
-            let el = div().id(SharedString::from(format!("ctl-{id}"))).flex().items_center().p(px(2.0)).rounded_md().border_1().flex_none().cursor_pointer()
+            let el = div().id(SharedString::from(format!("ctl-{id}"))).flex().items_center().p(px(2.0)).rounded_md().border_1().flex_none()
                 .border_color(if hidden { p.muted } else { gpui::transparent_black() })
                 .when(hidden, |d| d.border_dashed().opacity(0.4))
-                .hover(move |d| if hidden { d.opacity(0.7) } else { d.border_color(p.accent) })
-                .child(visual)
-                .on_click(cx.listener(move |this, _, _, cx| { let now = this.settings.hidden(id); this.settings.set_hidden(id, !now); this.changed(cx); }));
-            tip(el, format!("{label}: {}", if hidden { "hidden. Click to show it" } else { "shown. Click to hide it" }), &p)
+                .when(!ai_locked, |d| d.cursor_pointer().hover(move |d| if hidden { d.opacity(0.7) } else { d.border_color(p.accent) })
+                    .on_click(cx.listener(move |this, _, _, cx| { let now = this.settings.hidden_controls.iter().any(|h| h == id); this.settings.set_hidden(id, !now); this.changed(cx); })))
+                .child(visual);
+            let note = if ai_locked { "hidden because AI features are disabled (AI tab)" } else if hidden { "hidden. Click to show it" } else { "shown. Click to hide it" };
+            tip(el, format!("{label}: {note}"), &p)
         };
 
         // ---- tab strip
