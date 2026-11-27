@@ -137,4 +137,4 @@ Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak
 ## Keyboard, search and reactions (v5.1)
 - **Go to file:** `Ctrl+Shift+P` opens a file search (file-name matches first); Enter jumps to the batch that holds the file. Files hidden by the current filter say so.
 - **Rebinding in the app:** Settings > Keyboard lists every shortcut; click one and press the new key (Esc cancels, conflicts and keys the app keeps for itself are refused). Changes apply at once and are written to `keymap.toml`, which then holds only your overrides.
-- **Removing a 👍:** thread cards have a button next to the 👍 that removes your own reaction.
+- **👍 toggle:** the 👍 button on a thread card is highlighted when you already liked that comment and then removes your reaction; otherwise it adds one.

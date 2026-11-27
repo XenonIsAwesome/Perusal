@@ -282,6 +282,13 @@ pub enum HostAct {
 /// The reaction used by the quick 👍 button on each host.
 pub fn thumbs_up(kind: perusal_providers::Kind) -> &'static str { match kind { perusal_providers::Kind::GitHub => "+1", perusal_providers::Kind::GitLab => "thumbsup" } }
 
+/// Which of `ids` you have 👍-ed on the host.
+pub fn fetch_likes(mr: &MrRef, ids: &[String]) -> Result<std::collections::HashSet<String>, String> {
+    let token = token_for(&mr.host).ok_or("no token")?;
+    let p = provider(mr, token)?;
+    rt()?.block_on(p.my_reactions(mr, ids, thumbs_up(mr.kind))).map(|v| v.into_iter().collect()).map_err(|e| e.to_string())
+}
+
 pub fn host_action(mr: &MrRef, a: HostAct) -> Result<(), String> {
     let token = token_for(&mr.host).ok_or_else(|| format!("No access token for {}. Open the review from Home to enter one.", mr.host))?;
     let p = provider(mr, token)?; let rt = rt()?;

@@ -122,6 +122,20 @@ impl Provider for GitLab {
     async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
         check(self.req(reqwest::Method::POST, &format!("{}/notes/{comment}/award_emoji", Self::mr(r))).json(&json!({"name": emoji})).send().await).await.map(|_| ())
     }
+    async fn my_reactions(&self, r: &MrRef, comments: &[String], emoji: &str) -> Result<Vec<String>> {
+        let me = self.current_user().await?;
+        let mut set = tokio::task::JoinSet::new();
+        for c in comments.iter().take(100) {
+            let (g, url, c, emoji, me) = (GitLab { http: self.http.clone(), api: self.api.clone(), token: self.token.clone() }, format!("{}/notes/{c}/award_emoji?per_page=100", Self::mr(r)), c.clone(), emoji.to_string(), me.clone());
+            set.spawn(async move {
+                let list: Vec<Value> = check(g.req(reqwest::Method::GET, &url).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+                Ok::<_, Error>(list.iter().any(|x| x["name"].as_str() == Some(emoji.as_str()) && x.pointer("/user/username").and_then(|l| l.as_str()) == Some(me.as_str())).then_some(c))
+            });
+        }
+        let mut out = vec![];
+        while let Some(res) = set.join_next().await { if let Ok(Ok(Some(c))) = res { out.push(c); } }
+        Ok(out)
+    }
     async fn unreact(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
         let me = self.current_user().await?;
         let list: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("{}/notes/{comment}/award_emoji?per_page=100", Self::mr(r))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;

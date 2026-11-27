@@ -303,3 +303,16 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     Mock::given(method("DELETE")).and(path(format!("{b}/notes/5/award_emoji/7"))).respond_with(ResponseTemplate::new(204)).expect(1).mount(&g).await;
     gl(&g).unreact(&glref(), "d", "5", "thumbsup").await.unwrap();
 }
+
+#[tokio::test] async fn which_comments_i_reacted_to() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"login":"me","username":"me"}))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/comments/1/reactions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"content":"+1","user":{"login":"me"}}]))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/comments/2/reactions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":2,"content":"+1","user":{"login":"other"}},{"id":3,"content":"heart","user":{"login":"me"}}]))).mount(&s).await;
+    let got = gh(&s).my_reactions(&ghref(), &["1".into(), "2".into()], "+1").await.unwrap(); assert_eq!(got, vec!["1".to_string()]);
+    let g = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"username":"me"}))).mount(&g).await;
+    Mock::given(method("GET")).and(path(format!("{b}/notes/5/award_emoji"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7,"name":"thumbsup","user":{"username":"me"}}]))).mount(&g).await;
+    Mock::given(method("GET")).and(path(format!("{b}/notes/6/award_emoji"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&g).await;
+    let got = gl(&g).my_reactions(&glref(), &["5".into(), "6".into()], "thumbsup").await.unwrap(); assert_eq!(got, vec!["5".to_string()]);
+}

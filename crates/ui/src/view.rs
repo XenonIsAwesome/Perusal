@@ -65,6 +65,8 @@ pub enum ViewEvent { Home, OpenSettings, MoveHead { url: String, old_head: Strin
 impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
+    /// Comment ids you have 👍-ed on the host, and the ids that set was fetched for.
+    liked: HashSet<String>, likes_for: Vec<String>,
     new_head: Option<String>, head_dismissed: bool, rev_open: bool, rev_in: Input, me: Option<String>, keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_files: bool, pal_in: Input, pal_idx: usize, help_open: bool,
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
     refreshing: bool, md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
@@ -127,7 +129,7 @@ impl View {
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
-        let mut v = View { new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, list_all: false, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], list: ListState::new(0, ListAlignment::Top, px(600.0)), md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hx: 0.0, hb_drag: None, hx_text: Default::default(),
@@ -631,6 +633,7 @@ impl View {
         self.snap = now; self.info = Some(s.info.clone());
         if s.me.is_some() { self.me = s.me.clone(); }
         if s.threads != self.threads { self.threads = s.threads; self.rebuild_rows(); } else { self.threads = s.threads; }
+        self.refresh_likes(false, cx);
     }
     fn ci_url(&self) -> Option<String> { let w = self.m.web_url.clone()?; Some(perusal_providers::ci_page(&self.m.mr.as_ref()?.kind, &w)) }
 

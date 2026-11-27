@@ -24,11 +24,21 @@ impl View {
         let Some(mr) = self.m.mr.clone() else { return };
         let ok = match &a { model::HostAct::Reply { .. } => "Reply posted.", model::HostAct::Resolve { resolved: true, .. } => "Thread resolved.", model::HostAct::Resolve { .. } => "Thread reopened.",
             model::HostAct::React { .. } => "Reaction added.", model::HostAct::Unreact { .. } => "Reaction removed.", model::HostAct::Edit { .. } => "Comment updated.", model::HostAct::Delete { .. } => "Comment deleted.", model::HostAct::RequestReview(_) => "Review requested." };
+        let like_change = match &a { model::HostAct::React { comment, .. } => Some((comment.clone(), true)), model::HostAct::Unreact { comment, .. } => Some((comment.clone(), false)), _ => None };
         let task = cx.background_executor().spawn(async move { model::host_action(&mr, a) });
         cx.spawn(async move |this, cx| {
             let r = task.await;
-            let _ = this.update(cx, |t, cx| { match r { Ok(()) => { t.note(NKind::Success, ok, None); t.refresh_now(cx); } Err(e) => t.note(NKind::Error, format!("The host refused that: {e}"), None) } t.flush(cx); cx.notify(); });
+            let _ = this.update(cx, |t, cx| { match r { Ok(()) => { if let Some((c, on)) = like_change { if on { t.liked.insert(c); } else { t.liked.remove(&c); } } t.note(NKind::Success, ok, None); t.refresh_now(cx); } Err(e) => t.note(NKind::Error, format!("The host refused that: {e}"), None) } t.flush(cx); cx.notify(); });
         }).detach();
+    }
+    /// Looks up which comments you have 👍-ed, when the set of comments changed (or `force`).
+    pub(super) fn refresh_likes(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(mr) = self.m.mr.clone() else { return };
+        let mut ids: Vec<String> = self.threads.iter().filter_map(|t| t.comment_ids.first().cloned()).collect(); ids.sort();
+        if ids.is_empty() || (!force && ids == self.likes_for) { return; }
+        self.likes_for = ids.clone();
+        let task = cx.background_executor().spawn(async move { model::fetch_likes(&mr, &ids) });
+        cx.spawn(async move |this, cx| { if let Ok(l) = task.await { let _ = this.update(cx, |t, cx| { t.liked = l; cx.notify(); }); } }).detach();
     }
     /// One immediate fetch of threads/CI/state (after a thread action).
     pub(super) fn refresh_now(&mut self, cx: &mut Context<Self>) {
@@ -45,14 +55,13 @@ impl View {
                 .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Resolve { thread: rid.clone(), resolved: !resolved }, cx); cx.stop_propagation(); })));
         }
         if let Some(cid) = first.clone() {
-            let tid = tid.clone();
-            row = row.child(icon_btn(SharedString::from(format!("re-{key}")), ic::THUMB_UP, "React with 👍", Btn::Ghost, &p)
-                .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::React { thread: tid.clone(), comment: cid.clone(), emoji: model::thumbs_up(kind).to_string() }, cx); cx.stop_propagation(); })));
-        }
-        if let Some(cid) = first.clone() {
-            let tid = tid.clone();
-            row = row.child(icon_btn(SharedString::from(format!("ru-{key}")), ic::REMOVE_CIRCLE_OUTLINE, "Remove your 👍", Btn::Ghost, &p)
-                .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Unreact { thread: tid.clone(), comment: cid.clone(), emoji: model::thumbs_up(kind).to_string() }, cx); cx.stop_propagation(); })));
+            // one button: adds your 👍, or removes it when you already gave one
+            let tid = tid.clone(); let liked = self.liked.contains(&cid);
+            let emoji = model::thumbs_up(kind).to_string();
+            row = row.child(icon_btn(SharedString::from(format!("re-{key}")), ic::THUMB_UP, if liked { "You liked this. Click to remove your 👍" } else { "React with 👍" }, if liked { Btn::Secondary } else { Btn::Ghost }, &p)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let act = if liked { model::HostAct::Unreact { thread: tid.clone(), comment: cid.clone(), emoji: emoji.clone() } } else { model::HostAct::React { thread: tid.clone(), comment: cid.clone(), emoji: emoji.clone() } };
+                    this.host_act(act, cx); cx.stop_propagation(); })));
         }
         if mine { if let Some(cid) = first {
             let (t1, c1, t2, c2) = (tid.clone(), cid.clone(), tid, cid);

@@ -170,6 +170,8 @@ pub trait Provider: Send + Sync {
     async fn reply(&self, _r: &MrRef, _thread: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("reply")) }
     async fn resolve(&self, _r: &MrRef, _thread: &str, _resolved: bool) -> Result<()> { Err(Error::Unsupported("resolve")) }
     async fn react(&self, _r: &MrRef, _thread: &str, _comment: &str, _emoji: &str) -> Result<()> { Err(Error::Unsupported("reactions")) }
+    /// Which of `comments` you have reacted to with `emoji` (ids as in `Thread::comment_ids`). Capped at 100 comments.
+    async fn my_reactions(&self, _r: &MrRef, _comments: &[String], _emoji: &str) -> Result<Vec<String>> { Err(Error::Unsupported("reactions")) }
     /// Removes your own reaction `emoji` from a comment.
     async fn unreact(&self, _r: &MrRef, _thread: &str, _comment: &str, _emoji: &str) -> Result<()> { Err(Error::Unsupported("remove reaction")) }
     async fn edit_comment(&self, _r: &MrRef, _thread: &str, _comment: &str, _body: &str) -> Result<()> { Err(Error::Unsupported("edit")) }
