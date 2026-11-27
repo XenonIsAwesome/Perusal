@@ -57,7 +57,8 @@ enum HostTarget { Reply(String), Edit(String, String) }
 struct Mark { key: String, draft: bool, resolved: bool, range: Option<(u32, u32)> }
 #[derive(Clone)]
 enum RowKind { FileHeader, /// one block of a rendered Markdown file shown inside a group; selectable and commentable like code lines
-    MdBlock(Located), Collapsed(String, bool), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
+    MdBlock(Located), Collapsed(String, bool), /// old and new picture (either side may be missing) and the note shown when one cannot be displayed
+    Image(Option<Arc<gpui::Image>>, Option<Arc<gpui::Image>>, Option<(u32, u32)>, String), Note(String), Hunk(String), Uni(RLine), Split(Option<RLine>, Option<RLine>), Comment(CItem) }
 #[derive(Clone)]
 struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
     ord: Option<usize>, new_line: Option<u32>, marks: Vec<Mark> }
@@ -77,7 +78,7 @@ impl Render for DragPaneView {
 #[derive(Clone)]
 enum PaneDrag { Divider(DividerId), Corner(Corner) }
 
-pub enum ViewEvent { Fullscreen, Home, OpenSettings, MoveHead { url: String, old_head: String }, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String) }
+pub enum ViewEvent { Fullscreen, Home, OpenSettings, MoveHead { url: String, old_head: String }, Notice(NKind, String, Option<&'static str>), Renamed(String), Ci(String), State }
 impl gpui::EventEmitter<ViewEvent> for View {}
 
 pub struct View {
@@ -103,6 +104,10 @@ pub struct View {
     threads: Vec<Thread>, ci: String, snap: Snapshot, local_mr: Option<String>, notices: Vec<(NKind, String, Option<&'static str>)>, presets: Presets, project: String,
 }
 
+fn image_format(k: perusal_diff::image::ImageKind) -> gpui::ImageFormat {
+    use perusal_diff::image::ImageKind as K;
+    match k { K::Png => gpui::ImageFormat::Png, K::Jpeg => gpui::ImageFormat::Jpeg, K::Gif => gpui::ImageFormat::Gif, K::Webp => gpui::ImageFormat::Webp, K::Bmp => gpui::ImageFormat::Bmp, K::Tiff => gpui::ImageFormat::Tiff, K::Svg => gpui::ImageFormat::Svg }
+}
 fn status_style(s: Status, p: &Pal) -> (&'static str, gpui::Hsla) {
     match s { Status::Added => ("A", p.success), Status::Modified => ("M", p.warn), Status::Deleted => ("D", p.danger), Status::Renamed => ("R", p.accent) }
 }
@@ -144,6 +149,11 @@ impl View {
         // what the user last typed in this review wins over the preset default (even when they cleared it)
         if let Ok(Some((f, s))) = m.store.ui(m.vm.review) { f0 = f; s0 = s; let _ = m.vm.set_filter(&f0); let _ = m.vm.set_sort(&s0); }
         m.vm.sync_review_state(&m.store); if let Ok(g) = m.store.load_groups(m.vm.review) { m.vm.set_manual_paths(g); } let _ = m.vm.refresh();
+        // back where the reviewer left off: the same commit range and file (each only if it still exists)
+        if let Ok(Some((file, commits))) = m.store.position(m.vm.review) {
+            if let Some((n, o)) = commits { if m.graph.restore(&n, &o) { m.vm.commit_scope = m.graph.scope(&m.repo).ok().flatten(); let _ = m.vm.refresh(); } }
+            if let Some(f) = file { m.vm.select_path(&f); }
+        }
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
@@ -225,6 +235,7 @@ impl View {
         if self.md_rendered && (new_batch || !self.md_was) { self.md_jump = true; }
         self.md_was = self.md_rendered;
         self.shown = Some(batch.clone()); self.sym_target = None; self.sym_path = None;
+        self.remember_position();
         let p = self.pal;
         self.md_srcs.clear(); self.md_olds.clear();
         let mut rows: Vec<Row> = Vec::new();
@@ -247,6 +258,18 @@ impl View {
                 let lbs = if old.is_empty() || new.is_empty() { markdown::parse_located(if new.is_empty() { &old } else { &new }) } else { markdown::parse_diff(&old, &new) };
                 for lb in lbs { let (last, gone) = (lb.last_line, lb.change == markdown::Change::Removed); rows.push(Row { fi, kind: RowKind::MdBlock(lb), ord: None, new_line: (!gone).then_some(last), marks: vec![] }); }
                 self.md_srcs.insert(fi, if new.is_empty() { old.clone() } else { new.clone() }); self.md_olds.insert(fi, old.clone()); continue;
+            }
+            let why_binary = format!("{} is a binary file, so there is no text to show.", f.path);
+            if !f.symlink && perusal_diff::image::looks_like_image(&f.path) {
+                // pictures are shown (old next to new, whatever the diff mode) instead of a text diff; anything unreadable keeps the usual note
+                let load = |rev: &str| perusal_gitops::show_bytes(&self.m.repo, rev, &f.path).filter(|b| !b.is_empty());
+                let (ob, nb) = (load(&old_rev), load(&new_rev));
+                let pic = |b: &Option<Vec<u8>>| b.as_ref().map(|b| perusal_diff::image::sniff(&f.path, b).map(|k| (Arc::new(gpui::Image::from_bytes(image_format(k), b.clone())), perusal_diff::image::dimensions(b))));
+                let (oi, ni) = (pic(&ob), pic(&nb));
+                if (ob.is_some() || nb.is_some()) && oi.iter().chain(ni.iter()).all(|x| x.is_some()) {
+                    let size = ni.as_ref().or(oi.as_ref()).and_then(|x| x.as_ref()).and_then(|x| x.1);
+                    rows.push(mk(fi, RowKind::Image(oi.and_then(|x| x).map(|x| x.0), ni.and_then(|x| x).map(|x| x.0), size, why_binary))); continue;
+                }
             }
             if f.noisy() && !f.symlink && !self.forced.contains(&fi) {
                 let why = if f.binary { "is a binary file, so there is no text to show" } else if f.generated { "is collapsed because it looks generated or vendored" } else { "is collapsed because it is very large" };
@@ -491,6 +514,12 @@ impl View {
         self.error = a.err().or(b.err()); self.remember_ui(); self.reload();
     }
     /// Saves the applied filter and sort with this review so reopening it restores them.
+    /// Saves the open file and the commit range selected in the graph, so reopening the review lands on the same spot.
+    fn remember_position(&self) {
+        let file = self.current_file().and_then(|fi| self.m.vm.files.get(fi)).map(|f| f.path.as_str());
+        let commits = self.m.graph.selected_shas().filter(|_| self.m.vm.commit_scope.is_some());
+        let _ = self.m.store.set_position(self.m.vm.review, file, commits.as_ref().map(|(n, o)| (n.as_str(), o.as_str())));
+    }
     fn remember_ui(&self) { let _ = self.m.store.set_ui(self.m.vm.review, self.filter.f.text.trim(), self.sort.f.text.trim()); }
     fn save_preset(&mut self, project_scope: bool) {
         let name = self.preset_name.f.text.trim().to_string(); if name.is_empty() { return; }
@@ -687,6 +716,7 @@ impl View {
         if now.head != self.m.branch && prev.head == self.m.branch { /* surfaced once as a notice above; the review stays pinned */ }
         let nh = (self.m.mr.is_some() && !now.head.is_empty() && now.head != self.m.branch).then(|| now.head.clone());
         if nh != self.new_head { self.head_dismissed = false; self.new_head = nh; }
+        if self.m.mr_state != now.state { cx.emit(ViewEvent::State); } // the Recent page lists this state too
         self.m.mr_state = now.state.clone(); let _ = self.m.store.set_mr_state(self.m.vm.review, &now.state);
         let ci = now.ci.clone().unwrap_or_default();
         if ci != self.ci { self.ci = ci.clone(); cx.emit(ViewEvent::Ci(ci)); }
@@ -785,6 +815,7 @@ impl View {
             RowKind::FileHeader => vec![self.m.vm.files[r.fi].path.clone()],
             RowKind::Hunk(t) | RowKind::Note(t) | RowKind::Collapsed(t, _) => vec![t.clone()],
             RowKind::Comment(c) => { let mut v = vec![format!("{} {}", c.author, c.body)]; v.extend(c.replies.iter().map(|(a, t)| format!("{a} {t}"))); v }
+            RowKind::Image(..) => vec![],
             RowKind::MdBlock(lb) => markdown::block_texts(std::slice::from_ref(&lb.block)),
         }
     }
@@ -1347,6 +1378,17 @@ impl View {
             RowKind::Collapsed(t, expandable) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::UNFOLD_MORE, 15.0, p.accent)).child(div().flex_1().min_w_0().truncate().child(t.clone()))
                 .when(*expandable, |d| d.child(div().id(("expand", ix)).px_2().rounded_md().border_1().border_color(p.border).cursor_pointer().hover(move |x| x.bg(p.hover)).text_sm().child("Show anyway")
                     .on_click(cx.listener(move |this, _, _, cx| { this.forced.insert(fi); this.shown = None; this.load_diff(); cx.notify(); })))).into_any_element(),
+            RowKind::Image(old, new, size, note) => {
+                // old and new always side by side; each picture at its natural size, shrunk (never enlarged) to fit its half and a maximum height
+                let maxh = 420.0 * self.zoom; let muted = p.muted; let sides = old.is_some() && new.is_some();
+                let avail = { let b = self.b_panes.get(); let w: f32 = b.size.width.into(); (self.pane_rect(pk).w * w - 40.0).max(120.0) / if sides { 2.0 } else { 1.0 } - 16.0 };
+                let (bw, bh) = match size { Some((w, h)) if *w > 0 && *h > 0 => { let k = (avail / *w as f32).min(maxh / *h as f32).min(1.0); (*w as f32 * k, *h as f32 * k) } _ => (avail.min(maxh), maxh.min(avail)) };
+                let tile = |label: &str, im: &Option<Arc<gpui::Image>>, tint: gpui::Hsla| im.clone().map(|im| { let note = note.clone();
+                    div().flex_1().min_w_0().flex().flex_col().items_center().gap_1().child(div().text_xs().text_color(tint).font_weight(FontWeight::SEMIBOLD).child(label.to_string()))
+                        .child(div().p_1().border_1().border_color(p.border).rounded_sm().bg(p.bg).child(gpui::img(im).w(px(bw)).h(px(bh)).object_fit(gpui::ObjectFit::Contain)
+                            .with_fallback(move || div().p_3().text_sm().text_color(muted).child(note.clone()).into_any_element()))).into_any_element() });
+                return div().id(ix).w_full().flex().items_start().gap_4().px_4().py_3().children(tile("Before", old, p.danger)).children(tile("After", new, p.success)).into_any_element();
+            }
             RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
             RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(gw + sw).flex_none()).child(t.clone()).into_any_element(),
             RowKind::Comment(c) => return self.comment_card(fi, &c.clone(), cx).into_any_element(),
@@ -1511,6 +1553,13 @@ impl View {
             let (sb, hsb) = (self.scrollbar(k, cx), self.hscrollbar(k, cx));
             let title: SharedString = self.panes[k].key.first().and_then(|&fi| self.m.vm.files.get(fi)).map(|f| f.path.clone()).unwrap_or_default().into();
             let pane = div().id(("pane", k)).absolute().left(relative(r.x)).top(relative(r.y)).w(relative(r.w)).h(relative(r.h)).overflow_hidden()
+                // horizontal wheel (and Shift + wheel, which GPUI turns into a horizontal delta) pans the long lines of this pane
+                .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, _, cx| {
+                    let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
+                    if dx == 0.0 || ev.modifiers.control || ev.modifiers.platform { return; }
+                    let Some((_, _, max)) = this.hbar_geom(k) else { return };
+                    if let Some(h) = this.hxs.get_mut(k) { let n = (*h - dx).clamp(0.0, max); if n != *h { *h = n; cx.notify(); } }
+                }))
                 .when(multi, |d| d.border_1().border_color(p.border)
                     .on_drag_move(cx.listener(move |this, ev: &gpui::DragMoveEvent<DraggedPane>, _, cx| {
                         let (b, pos) = (ev.bounds, ev.event.position);

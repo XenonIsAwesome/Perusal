@@ -66,6 +66,11 @@ impl Root {
         r.restore_mine();
         r.refresh_recent(); r.refresh_recent_states(cx);
         if r.settings.home_tab.start(r.recent.len()) == perusal_app::settings::HomeTab::Mine { r.htab = HTab::Mine; r.load_mine(cx); }
+        // keep the Recent page current: re-read the store (open tabs write the state they observe) and ask the hosts about the rest, every half minute
+        cx.spawn(async move |this, cx| { loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+            if this.update(cx, |t, cx| { t.refresh_recent(); t.refresh_recent_states(cx); if t.active.is_none() { cx.notify(); } }).is_err() { break; }
+        } }).detach();
         // repaint when a background avatar download finishes
         cx.spawn(async move |this, cx| { let mut seen = crate::avatars::version(); loop { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; let v = crate::avatars::version(); if v != seen { seen = v; if this.update(cx, |_, cx| cx.notify()).is_err() { break; } } } }).detach();
         match initial {
@@ -192,6 +197,7 @@ impl Root {
         cx.subscribe(v, |this, v, ev: &ViewEvent, cx| match ev {
                     ViewEvent::MoveHead { url, old_head } => this.move_review_tab(v.entity_id(), url.clone(), old_head.clone(), cx),
                     ViewEvent::Fullscreen => cx.notify(),
+                    ViewEvent::State => { this.refresh_recent(); cx.notify(); }
                     ViewEvent::Home => { this.active = None; this.refresh_recent(); cx.notify(); }
                     ViewEvent::OpenSettings => this.open_settings(false, cx),
                     ViewEvent::Notice(k, t, key) => { this.toast(*k, t.clone(), cx); if key.map(|k| this.settings.desktop_event_on(k)).unwrap_or(false) { model::desktop_notify("Update", t); } }
@@ -407,7 +413,7 @@ impl Root {
         let p = self.pal;
         let home_on = self.active.is_none();
         let home = div().id("tab-home").flex().items_center().gap_2().px_3().h(px(36.0)).cursor_pointer().border_b_2().border_color(if home_on { p.accent } else { gpui::transparent_black() }).bg(if home_on { p.bg } else { gpui::transparent_black() }).hover(move |s| s.bg(p.hover))
-            .child(icon(ic::HOME, 17.0, if home_on { p.accent } else { p.muted })).child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(if home_on { p.fg } else { p.muted }).child("Home")).on_click(cx.listener(|this, _, _, cx| { this.active = None; cx.notify(); }));
+            .child(icon(ic::HOME, 17.0, if home_on { p.accent } else { p.muted })).child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(if home_on { p.fg } else { p.muted }).child("Home")).on_click(cx.listener(|this, _, _, cx| { this.active = None; this.refresh_recent(); this.refresh_recent_states(cx); cx.notify(); }));
         let tabs: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
             let on = self.active == Some(i);
             let ci = kit::ci_badge(&t.ci, &p).map(|_| { let c = match t.ci.as_str() { "passed" => p.success, "failed" => p.danger, "running" => p.warn, _ => p.muted }; div().size(px(8.0)).rounded_full().bg(c) });
