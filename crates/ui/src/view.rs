@@ -1334,9 +1334,10 @@ impl View {
             RowKind::FileHeader => {
                 let paned = self.paned(); let closed = self.file_collapsed(fi); let f = &self.m.vm.files[fi];
                 return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).when(!paned, |d| d.cursor_pointer().hover(move |x| x.bg(p.hover))).when(paned && self.panes.len() > 1, |d| d.pl(px(36.0)))
-                    .when(!paned, |d| d.child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted))).child(div().flex_1().min_w_0().truncate().child(f.path.clone()))
-                    .children(marks)
+                    .when(!paned, |d| d.child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted))).child(div().min_w_0().truncate().child(f.path.clone()))
                     .child({ let path = f.path.clone(); icon_btn(("copy-path", ix), ic::CONTENT_COPY, "Copy the file path", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.copy_path(&path, cx); cx.stop_propagation(); cx.notify(); })) })
+                    .child(div().flex_1())
+                    .children(marks)
                     .child(div().flex().gap_2().text_xs().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
                     .when(!paned, |d| d.on_click(cx.listener(move |this, _, _, cx| { if !this.collapsed_files.remove(&fi) { this.collapsed_files.insert(fi); } this.shown = None; this.load_diff(); cx.notify(); }))).into_any_element();
             }
@@ -1666,14 +1667,11 @@ impl View {
         let sym = self.sym_path.clone().filter(|_| batch.len() == 1).map(|path| { let known = self.sym_target.is_some();
             icon_text_btn("sym-go", ic::ARROW_FORWARD, "Go to the original", Btn::Secondary, &p).on_click(cx.listener(move |this, _, _, cx| { this.goto_symlink_target(cx); cx.notify(); }))
                 .tooltip_text(if known { format!("Open {path}") } else { format!("{path} is not changed in this merge request") }, &p) });
+        let copy = match (batch.len(), &first) { (1, Some(f)) => { let path = f.path.clone(); Some(icon_btn("copy-path", ic::CONTENT_COPY, "Copy the file path", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.copy_path(&path, cx); cx.stop_propagation(); cx.notify(); }))) } _ => None };
         let header = (!batch.is_empty()).then(|| {
-            let mut h = div().flex().items_center().gap_3().px_4().py_2().border_b_1().border_color(p.border).bg(p.surface).child(div().flex_1().min_w_0().child(title))
+            let mut h = div().flex().items_center().gap_3().px_4().py_2().border_b_1().border_color(p.border).bg(p.surface).child(div().flex_1().min_w_0().flex().items_center().gap_1().child(title).children(copy))
                 .child(div().flex().items_center().gap_2().text_xs().font_family(mono.clone()).child(div().text_color(p.success).child(format!("+{adds}"))).child(div().text_color(p.danger).child(format!("−{dels}"))).child(diff_squares(adds, dels, &p, 10.0)));
             if let Some(s) = sym { h = h.child(s); }
-            if let (1, Some(f)) = (batch.len(), &first) {
-                let path = f.path.clone();
-                h = h.child(icon_btn("copy-path", ic::CONTENT_COPY, "Copy the file path", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.copy_path(&path, cx); cx.stop_propagation(); cx.notify(); })));
-            }
             if ncomments > 0 { h = h.child(icon_btn("collapse-c", ic::UNFOLD_LESS, "Collapse or expand all comments in this file", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.collapse_all_comments(); cx.notify(); }))); }
             if manual { h = h.child(icon_btn("ungroup", ic::LINK_OFF, "Ungroup these files", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { if let Some(fi) = this.current_file() { this.m.vm.ungroup(fi); this.save_groups(); this.reload(); } cx.notify(); }))); }
             h
