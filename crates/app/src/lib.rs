@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod movehead;
 pub mod mine;
 pub mod notify;
+pub mod panes;
 pub mod search;
 pub mod settings;
 pub mod keymap;

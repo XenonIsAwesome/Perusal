@@ -40,6 +40,10 @@ pub struct Settings {
     pub files_tree: bool,
     /// Default diff layout for every file.
     pub diff_mode: DiffMode,
+    /// Files of a batch (grouped by rule or by hand) open in split panes (default) or one after the other in a single column.
+    pub batch_view: crate::panes::BatchView,
+    /// How split panes are arranged.
+    pub pane_arrangement: crate::panes::Arrangement,
     /// Screen a pull/merge request review opens on (local branch reviews have no overview and always open on the code).
     pub first_view: FirstView,
     pub home_tab: HomeTab,
@@ -107,7 +111,7 @@ pub fn pick_installed_agent(current: &str, installed: impl Fn(&str) -> bool) -> 
 }
 
 impl Default for Settings {
-    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
+    fn default() -> Self { Settings { group_related: false, files_tree: false, diff_mode: DiffMode::Unified, batch_view: Default::default(), pane_arrangement: Default::default(), first_view: FirstView::Overview, home_tab: HomeTab::Recent, markdown: MdMode::Source, agent: "claude".into(), agent_command: String::new(), agent_path: String::new(), theme: "dark".into(), follow_os: false, theme_light: "github-light".into(), theme_dark: "dark".into(),
             model: String::new(), effort: String::new(), agent_timeout_mins: 15, hosts: default_hosts(), oauth_client_ids: Default::default(), onboarded: false, desktop_notifications: true, desktop_events: Default::default(), hide_whitespace: false, publish_instantly: false, custom_titlebar: true, group_rules: perusal_diff::rules::builtin_rules(), commits_height: None, left_width: 380.0, right_width: 340.0, left_open: true, right_open: true, ui_font: String::new(), code_font: String::new(), line_height: 1.0, ligatures: true, reduced_motion: false, vim_keys: false } }
 }
 

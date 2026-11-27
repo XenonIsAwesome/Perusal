@@ -128,6 +128,8 @@ impl View {
             "toggle_tree" => self.toggle_tree(),
             "toggle_split" => { let m = if self.diff_mode == DiffMode::Unified { DiffMode::Split } else { DiffMode::Unified }; self.set_diff_mode(m); }
             "toggle_markdown" => { if self.m.vm.current_batch().iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path)) { self.md_rendered = !self.md_rendered; self.shown = None; self.clear_selection(); } }
+            "toggle_panes" => { let on = !self.batch_panes; self.set_batch_panes(on); }
+            "fullscreen" => { let on = !self.fullscreen; self.set_fullscreen(on, cx); }
             "clear_scope" => self.clear_scope(),
             "finish" => { if !self.instant() { self.finish_open = true; self.focus = Some(Fid::Summary); self.submit_msg = None; } }
             "overview" => { if self.info.is_some() { self.page = if self.page == Page::Overview { Page::Code } else { Page::Overview }; cx.notify(); } }

@@ -6,7 +6,7 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("next_file", "n", "Next file in the filtered order"), ("prev_file", "p", "Previous file"), ("toggle_viewed", "v", "Mark the current batch viewed / not viewed"),
     ("next_batch", "Enter", "Next batch"), ("prev_batch", "Backspace", "Back to the previous batch"), ("comment", "c", "Comment on the selected lines"),
     ("ask_ai", "a", "Ask AI about the selection"), ("focus_filter", "/", "Focus the filter box"), ("toggle_grouping", "g", "Toggle grouping of related files"),
-    ("toggle_tree", "t", "Files panel: tree / list"), ("toggle_split", "u", "Unified / split diff"), ("toggle_markdown", "m", "Markdown rendered / source"),
+    ("toggle_tree", "t", "Files panel: tree / list"), ("toggle_split", "u", "Unified / split diff"), ("toggle_markdown", "m", "Markdown rendered / source"), ("toggle_panes", "w", "Batched files in split panes / one column"), ("fullscreen", "F11", "Diff viewer full screen"),
     ("clear_scope", "x", "Clear the commit scope"), ("overview", "o", "Switch between the overview and the code"), ("refresh", "r", "Refresh commits, files, CI and comments"), ("finish", "f", "Finish review"), ("settings", "s", "Open settings"),
     ("palette", "Ctrl+p", "Command palette"), ("quick_open", "Ctrl+Shift+p", "Go to file…"), ("help", "?", "Show keyboard shortcuts"), ("next_tab", "Ctrl+Tab", "Next tab"),
 ];

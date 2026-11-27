@@ -5,6 +5,7 @@ use crate::model;
 use gpui::{deferred, div, prelude::*, px, relative, Context, EventEmitter, FontWeight, MouseButton, SharedString};
 use perusal_agents::{effort_suggestions, model_suggestions, on_path, supports_effort};
 use perusal_app::hosts;
+use perusal_app::panes::{Arrangement, BatchView};
 use perusal_app::settings::{DiffMode, FirstView, HomeTab, HostCfg, MdMode, Settings, AGENTS};
 use perusal_app::theme;
 use perusal_diff::GroupRule;
@@ -612,6 +613,13 @@ impl gpui::Render for SettingsView {
                     .child(section("Diff"))
                     .child(row("Default diff view", "How diffs open; switch per file with the floating bar", seg_box(&p).child(seg_icon("dm-uni", ic::VIEW_AGENDA, "Unified", s.diff_mode == DiffMode::Unified, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.diff_mode = DiffMode::Unified; this.changed(cx); })))
                         .child(seg_icon("dm-split", ic::VERTICAL_SPLIT, "Side by side", s.diff_mode == DiffMode::Split, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.diff_mode = DiffMode::Split; this.changed(cx); }))).into_any_element()))
+                    .child(row("Batched files", "Files of a batch (grouped by rule or by hand) open in split panes, or one after the other in a single column. Override per batch with the floating bar", seg_box(&p).child(seg_icon("bv-panes", ic::VIEW_QUILT, "Split panes", s.batch_view == BatchView::Panes, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.batch_view = BatchView::Panes; this.changed(cx); })))
+                        .child(seg_icon("bv-stack", ic::VIEW_STREAM, "One column", s.batch_view == BatchView::Stacked, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.batch_view = BatchView::Stacked; this.changed(cx); }))).into_any_element()))
+                    .child(row("Pane layout", "How split panes are arranged. Drag a divider or a corner to resize; they snap to halves, thirds and quarters", seg_box(&p)
+                        .child(seg_icon("pa-auto", ic::DASHBOARD, "Automatic: side by side for two files, a grid for more", s.pane_arrangement == Arrangement::Auto, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.pane_arrangement = Arrangement::Auto; this.changed(cx); })))
+                        .child(seg_icon("pa-col", ic::VIEW_COLUMN, "Side by side", s.pane_arrangement == Arrangement::Columns, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.pane_arrangement = Arrangement::Columns; this.changed(cx); })))
+                        .child(seg_icon("pa-row", ic::HORIZONTAL_SPLIT, "Stacked rows", s.pane_arrangement == Arrangement::Rows, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.pane_arrangement = Arrangement::Rows; this.changed(cx); })))
+                        .child(seg_icon("pa-grid", ic::GRID_VIEW, "Grid", s.pane_arrangement == Arrangement::Grid, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.pane_arrangement = Arrangement::Grid; this.changed(cx); }))).into_any_element()))
                     .child(row("Markdown files", "Open .md files as a source diff or as rendered text", seg_box(&p).child(seg_icon("md-src", ic::CODE, "Source diff", s.markdown == MdMode::Source, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.markdown = MdMode::Source; this.changed(cx); })))
                         .child(seg_icon("md-rnd", ic::VISIBILITY, "Rendered", s.markdown == MdMode::Rendered, &p).on_click(cx.listener(|this, _, _, cx| { this.settings.markdown = MdMode::Rendered; this.changed(cx); }))).into_any_element())),
                 4 => div().flex().flex_col().gap_3().child(section("Filter and sort presets"))
