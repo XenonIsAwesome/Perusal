@@ -3,6 +3,8 @@ runtime: org.freedesktop.Platform
 runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: perusal
+# the 25.08 SDK no longer ships appstream-compose, so the build fails when it runs; the metainfo is still installed as is
+appstream-compose: false
 finish-args:
   - --share=network
   - --socket=wayland
