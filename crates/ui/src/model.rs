@@ -42,6 +42,21 @@ pub fn data_dir() -> PathBuf {
 pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("perusal")).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/perusal"))).unwrap_or_else(|| PathBuf::from("."))
 }
+pub fn keymap_path() -> PathBuf { config_dir().join("keymap.toml") }
+/// The effective keymap (defaults, vim preset, keymap.toml overrides). A broken file falls back to the defaults and says why.
+pub fn load_keymap(vim: bool) -> (std::collections::BTreeMap<String, String>, Option<String>) {
+    let txt = std::fs::read_to_string(keymap_path()).unwrap_or_default();
+    match perusal_app::keymap::load(&txt, vim) {
+        Ok(m) => (m, None),
+        Err(e) => (perusal_app::keymap::load("", vim).unwrap_or_else(|_| perusal_app::keymap::default_map()), Some(format!("keymap.toml ignored: {e}"))),
+    }
+}
+/// Writes the overrides of `map` (keys differing from the defaults) to keymap.toml; no overrides removes the file.
+pub fn save_keymap(map: &std::collections::BTreeMap<String, String>, vim: bool) -> Result<(), String> {
+    let text = perusal_app::keymap::overrides_toml(map, vim);
+    if text.is_empty() { let _ = std::fs::remove_file(keymap_path()); return Ok(()); }
+    std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?; std::fs::write(keymap_path(), text).map_err(|e| e.to_string())
+}
 pub fn themes_dir() -> PathBuf { config_dir().join("themes") }
 /// Editable prompt templates (`~/.config/perusal/prompts`); the defaults and an AGENTS.md are written there on first use.
 pub fn prompts_dir() -> PathBuf { config_dir().join("prompts") }
@@ -261,7 +276,7 @@ pub struct RemoteState { pub info: perusal_providers::MrInfo, pub ci: Ci, pub th
 /// A change to an existing thread or to the reviewer list; these go to the host immediately, outside the pending review.
 #[derive(Clone, Debug)]
 pub enum HostAct {
-    Reply { thread: String, body: String }, Resolve { thread: String, resolved: bool }, React { thread: String, comment: String, emoji: String },
+    Reply { thread: String, body: String }, Resolve { thread: String, resolved: bool }, React { thread: String, comment: String, emoji: String }, Unreact { thread: String, comment: String, emoji: String },
     Edit { thread: String, comment: String, body: String }, Delete { thread: String, comment: String }, RequestReview(Vec<String>),
 }
 /// The reaction used by the quick 👍 button on each host.
@@ -274,6 +289,7 @@ pub fn host_action(mr: &MrRef, a: HostAct) -> Result<(), String> {
         HostAct::Reply { thread, body } => rt.block_on(p.reply(mr, &thread, &body)),
         HostAct::Resolve { thread, resolved } => rt.block_on(p.resolve(mr, &thread, resolved)),
         HostAct::React { thread, comment, emoji } => rt.block_on(p.react(mr, &thread, &comment, &emoji)),
+        HostAct::Unreact { thread, comment, emoji } => rt.block_on(p.unreact(mr, &thread, &comment, &emoji)),
         HostAct::Edit { thread, comment, body } => rt.block_on(p.edit_comment(mr, &thread, &comment, &body)),
         HostAct::Delete { thread, comment } => rt.block_on(p.delete_comment(mr, &thread, &comment)),
         HostAct::RequestReview(users) => rt.block_on(p.request_review(mr, &users)),

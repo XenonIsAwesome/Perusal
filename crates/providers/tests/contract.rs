@@ -288,3 +288,18 @@ fn sub(v: Verdict) -> Submission { Submission { head_sha: "abc".into(), summary:
     for id in [7, 8] { Mock::given(method("GET")).and(path(format!("/projects/{id}/merge_requests"))).respond_with(ResponseTemplate::new(401)).mount(&s).await; }
     assert!(matches!(gl(&s).my_reviews("h", Role::Reviewable, StateFilter::Open).await, Err(Error::Unauthorized)));
 }
+
+#[tokio::test] async fn remove_own_reaction() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"login":"me","username":"me"}))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/repos/o/r/pulls/comments/9/reactions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        {"id":1,"content":"+1","user":{"login":"other"}},{"id":2,"content":"+1","user":{"login":"me"}}]))).mount(&s).await;
+    Mock::given(method("DELETE")).and(path("/repos/o/r/pulls/comments/9/reactions/2")).respond_with(ResponseTemplate::new(204)).expect(1).mount(&s).await;
+    gh(&s).unreact(&ghref(), "9", "9", "+1").await.unwrap();
+    assert!(matches!(gh(&s).unreact(&ghref(), "9", "9", "heart").await, Err(Error::Http(404, _))));
+    let g = MockServer::start().await; let b = "/projects/g%2Fp/merge_requests/4";
+    Mock::given(method("GET")).and(path("/user")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"username":"me"}))).mount(&g).await;
+    Mock::given(method("GET")).and(path(format!("{b}/notes/5/award_emoji"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":7,"name":"thumbsup","user":{"username":"me"}}]))).mount(&g).await;
+    Mock::given(method("DELETE")).and(path(format!("{b}/notes/5/award_emoji/7"))).respond_with(ResponseTemplate::new(204)).expect(1).mount(&g).await;
+    gl(&g).unreact(&glref(), "d", "5", "thumbsup").await.unwrap();
+}

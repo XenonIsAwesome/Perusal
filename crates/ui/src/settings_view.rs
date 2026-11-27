@@ -32,6 +32,8 @@ pub struct SettingsView {
     accounts: Vec<(String, String, Acc)>, token_host: Option<String>, client_host: Option<String>, device: Option<(String, DeviceCode)>, msg: Option<(bool, String)>, busy: bool,
     /// First-run setup: the step shown (0 welcome, 1 accounts, 2 agent, 3 done). `None` is the normal Settings panel.
     pub onboarding: Option<u8>,
+    /// Keyboard tab: the action waiting for its new key, the working keymap and a message.
+    rebind: Option<&'static str>, keys: std::collections::BTreeMap<String, String>, key_msg: Option<String>,
 }
 
 impl SettingsView {
@@ -39,7 +41,7 @@ impl SettingsView {
         let theme = theme::load(&settings.theme, Some(&model::themes_dir()));
         let mut v = SettingsView { pal: Pal::new(&theme), fonts, agent_path: Input::new(&settings.agent_path), cmd: Input::new(&settings.agent_command), model: Input::new(&settings.model), label: Input::new(""), pat: Input::new(""), host_in: Input::new(""), token: Input::new(""), client: Input::new(""), rule_gen: Input::new(""), pname: Input::new(""), pfilter: Input::new(""), psort: Input::new(""), effort_in: Input::new(&settings.effort),
             model_custom: !settings.model.is_empty() && !model_suggestions(&settings.agent).contains(&settings.model.as_str()), effort_custom: !settings.effort.is_empty() && !effort_suggestions(&settings.agent).contains(&settings.effort.as_str()), agent_models: vec![], models_for: String::new(), dd_query: String::new(), dd_for: None, stab: 0, editing_rule: None, presets: model::load_presets(), pscope: None, pedit: false, gen_busy: false, gen_cancel: Default::default(),
-            focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), settings };
+            focus: None, rules_open: false, dd: None, rule_err: None, new_kind: "github", accounts: vec![], token_host: None, client_host: None, device: None, msg: None, busy: false, onboarding: onboarding.then_some(0), rebind: None, keys: model::load_keymap(settings.vim_keys).0, key_msg: None, settings };
         if onboarding {
             let a = perusal_app::settings::pick_installed_agent(&v.settings.agent, |k| on_path(agent_program(k)));
             if a != v.settings.agent { v.settings.agent = a; v.changed(cx); }
@@ -154,8 +156,31 @@ impl SettingsView {
         match f { F::AgentPath => &mut self.agent_path, F::Cmd => &mut self.cmd, F::Model => &mut self.model, F::Label => &mut self.label, F::Pat => &mut self.pat, F::Host => &mut self.host_in, F::Token => &mut self.token, F::Client => &mut self.client,
             F::RuleGen => &mut self.rule_gen, F::PName => &mut self.pname, F::PFilter => &mut self.pfilter, F::PSort => &mut self.psort, F::Effort => &mut self.effort_in }
     }
+    /// Keyboard tab: the next key press becomes the binding of `action`.
+    fn capture_key(&mut self, action: &'static str, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke; let k = ks.key.as_str();
+        if k == "escape" { self.rebind = None; self.key_msg = None; cx.notify(); return; }
+        if matches!(k, "shift" | "control" | "alt" | "platform" | "function" | "meta" | "super") { return; } // wait for the real key
+        let name = perusal_app::keymap::press_name(ks.modifiers.control || ks.modifiers.platform, ks.modifiers.alt, ks.modifiers.shift, k, ks.key_char.as_deref());
+        self.rebind = None;
+        if perusal_app::keymap::is_reserved(&name) { self.key_msg = Some(format!("{} is used by the app itself and cannot be bound.", crate::view::show_key_name(&name))); }
+        else if let Some((other, _)) = self.keys.iter().find(|(o, v)| o.as_str() != action && v.eq_ignore_ascii_case(&name)) {
+            self.key_msg = Some(format!("{} is already used by \"{}\".", crate::view::show_key_name(&name), perusal_app::keymap::label(other)));
+        } else {
+            self.keys.insert(action.to_string(), name);
+            match model::save_keymap(&self.keys, self.settings.vim_keys) { Ok(()) => { self.key_msg = None; cx.emit(SettingsEvent::Changed); } Err(e) => self.key_msg = Some(e) }
+        }
+        cx.notify();
+    }
+    fn reset_keys(&mut self, only: Option<&'static str>, cx: &mut Context<Self>) {
+        let base = perusal_app::keymap::load("", self.settings.vim_keys).unwrap_or_else(|_| perusal_app::keymap::default_map());
+        match only { Some(a) => { if let Some(k) = base.get(a) { self.keys.insert(a.to_string(), k.clone()); } } None => self.keys = base }
+        match model::save_keymap(&self.keys, self.settings.vim_keys) { Ok(()) => { self.key_msg = None; cx.emit(SettingsEvent::Changed); } Err(e) => self.key_msg = Some(e) }
+        cx.notify();
+    }
     pub fn key(&mut self, ev: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         let key = ev.keystroke.key.as_str();
+        if let Some(action) = self.rebind { self.capture_key(action, ev, cx); return; }
         if key == "escape" { if self.focus.is_some() || self.dd.is_some() { self.commit_text(cx); self.blur(); } else if self.onboarding.is_none() { cx.emit(SettingsEvent::Close); } cx.notify(); return; }
         if self.focus.is_none() && self.dd.is_some() {
             // typing while a dropdown is open searches its options
@@ -524,11 +549,12 @@ impl gpui::Render for SettingsView {
                     .when(self.pedit, |d| d.child(icon_text_btn("pe-cancel", ic::CLOSE, "Cancel", Btn::Ghost, &p).on_click(cx.listener(|this, _, _, cx| { this.pedit = false; this.pname.f.clear(); this.pfilter.f.clear(); this.psort.f.clear(); cx.notify(); }))))
                     .child(icon_text_btn("pe-save", ic::SAVE, "Save preset", Btn::Primary, &p).on_click(cx.listener(|this, _, _, cx| { this.save_preset(cx); }))));
             // ---- tabs
-            let tabs = ["Appearance", "Accounts", "Notifications", "Review", "Presets", "AI"];
+            let tabs = ["Appearance", "Accounts", "Notifications", "Review", "Presets", "AI", "Keyboard"];
             let tab_bar = div().flex().items_center().gap_1().px_5().border_b_1().border_color(p.border).children(tabs.iter().enumerate().map(|(i, t)| {
                 let on = self.stab as usize == i;
                 div().id(("stab", i)).px_3().py(px(8.0)).cursor_pointer().text_sm().font_weight(FontWeight::MEDIUM).text_color(if on { p.fg } else { p.muted }).border_b_2().border_color(if on { p.accent } else { gpui::transparent_black() }).hover(move |x| x.text_color(p.fg)).child(*t)
-                    .on_click(cx.listener(move |this, _, _, cx| { this.stab = i as u8; this.dd = None; this.msg = None; if i == 4 { this.presets = model::load_presets(); } cx.notify(); }))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.stab = i as u8; this.dd = None; this.msg = None; if i == 4 { this.presets = model::load_presets(); }
+                        if i == 6 { this.keys = model::load_keymap(this.settings.vim_keys).0; this.rebind = None; this.key_msg = None; } cx.notify(); }))
             }).collect::<Vec<_>>());
             let content: gpui::Div = match self.stab {
                 0 => div().flex().flex_col()
@@ -591,7 +617,24 @@ impl gpui::Render for SettingsView {
                 4 => div().flex().flex_col().gap_3().child(section("Filter and sort presets"))
                     .child(div().text_xs().text_color(p.muted).child("Presets set a filter and a sort in one click. A project's default wins over the global default when a review opens. Save new ones from the bookmark button in a review, or add them here."))
                     .children(preset_groups).child(preset_form).children(self.msg.clone().map(|(ok, m)| div().flex().items_start().gap_1().text_sm().text_color(if ok { p.success } else { p.danger }).child(div().flex_1().min_w_0().child(m.clone())).children((!ok).then(|| kit::copy_btn("preset-err-copy", m, &p))))),
-                _ => div().flex().flex_col().child(section("AI agent")).child(ai),
+                5 => div().flex().flex_col().child(section("AI agent")).child(ai),
+                _ => {
+                    let defaults = perusal_app::keymap::load("", s.vim_keys).unwrap_or_else(|_| perusal_app::keymap::default_map());
+                    let rows: Vec<_> = perusal_app::keymap::ACTIONS.iter().filter(|(a, _, _)| *a != "next_tab").enumerate().map(|(i, &(a, _, label))| {
+                        let cur = self.keys.get(a).cloned().unwrap_or_default(); let changed = defaults.get(a) != Some(&cur); let capturing = self.rebind == Some(a);
+                        let btn = div().id(("kb", i)).min_w(px(110.0)).flex().justify_center().px_3().py(px(5.0)).rounded_md().border_1().border_color(if capturing { p.accent } else { p.border }).bg(p.bg).cursor_pointer().text_sm().font_family(self.fonts.mono.clone())
+                            .text_color(if capturing { p.accent } else { p.fg }).child(if capturing { "Press a key…".to_string() } else { crate::view::show_key_name(&cur) })
+                            .on_click(cx.listener(move |this, _, _, cx| { this.rebind = Some(a); this.key_msg = None; cx.notify(); }));
+                        div().flex().items_center().justify_between().gap_3().py(px(4.0)).child(div().flex_1().min_w_0().text_sm().child(label))
+                            .child(div().flex().items_center().gap_1().child(btn)
+                                .child(if changed { icon_btn(("kbr", i), ic::UNDO, "Back to the default", Btn::Ghost, &p).on_click(cx.listener(move |this, _, _, cx| { this.reset_keys(Some(a), cx); })).into_any_element() } else { div().w(px(32.0)).into_any_element() }))
+                    }).collect();
+                    div().flex().flex_col().child(section("Shortcuts"))
+                        .child(div().pt_2().text_xs().text_color(p.muted).child("Click a shortcut, then press the new key (Esc cancels). Changes apply at once and are saved in keymap.toml."))
+                        .children(self.key_msg.clone().map(|m| div().pt_2().text_sm().text_color(p.danger).child(m)))
+                        .child(div().flex().flex_col().pt_2().children(rows))
+                        .child(div().flex().justify_end().pt_3().child(icon_text_btn("kb-reset-all", ic::UNDO, "Reset all", Btn::Secondary, &p).on_click(cx.listener(|this, _, _, cx| { this.reset_keys(None, cx); }))))
+                }
             };
             let scroll = div().flex().flex_col().flex_1().min_h_0().child(tab_bar)
                 .child(div().id("settings-scroll").flex_1().min_h_0().overflow_y_scroll().px_5().pb_4().child(content));

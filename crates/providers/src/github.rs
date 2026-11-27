@@ -159,6 +159,13 @@ impl Provider for GitHub {
     async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
         check(self.req(reqwest::Method::POST, &format!("/repos/{}/pulls/comments/{comment}/reactions", r.project)).json(&json!({"content": emoji})).send().await).await.map(|_| ())
     }
+    async fn unreact(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        let me = self.current_user().await?;
+        let list: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("/repos/{}/pulls/comments/{comment}/reactions?per_page=100", r.project)).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let mine = list.iter().find(|x| x["content"].as_str() == Some(emoji) && x.pointer("/user/login").and_then(|l| l.as_str()) == Some(me.as_str())).and_then(|x| x["id"].as_u64());
+        let Some(id) = mine else { return Err(Error::Http(404, "you have not reacted with that".into())) };
+        check(self.req(reqwest::Method::DELETE, &format!("/repos/{}/pulls/comments/{comment}/reactions/{id}", r.project)).send().await).await.map(|_| ())
+    }
     async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
         check(self.req(reqwest::Method::PATCH, &format!("/repos/{}/pulls/comments/{comment}", r.project)).json(&json!({"body": body})).send().await).await.map(|_| ())
     }

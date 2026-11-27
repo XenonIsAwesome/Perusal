@@ -5,16 +5,12 @@ use std::collections::BTreeMap;
 
 /// Loads `keymap.toml` from the config dir (with the vim preset when asked). A broken file falls back to the
 /// defaults and the problem text is returned so it can be shown once.
-pub(super) fn load_keys(vim: bool) -> (BTreeMap<String, String>, Option<String>) {
-    let txt = std::fs::read_to_string(model::config_dir().join("keymap.toml")).unwrap_or_default();
-    match keymap::load(&txt, vim) {
-        Ok(m) => (m, None),
-        Err(e) => (keymap::load("", vim).unwrap_or_else(|_| keymap::default_map()), Some(format!("keymap.toml ignored: {e}"))),
-    }
-}
+pub(super) fn load_keys(vim: bool) -> (BTreeMap<String, String>, Option<String>) { model::load_keymap(vim) }
 
 /// Key text for display ("Ctrl+p" -> "Ctrl+P", "Enter" stays).
-fn show_key(k: &str) -> String { k.replace("Ctrl+p", "Ctrl+P") }
+pub(super) fn show_key(k: &str) -> String {
+    match k.rsplit_once('+') { Some((pre, last)) if last.chars().count() == 1 && !pre.is_empty() => format!("{pre}+{}", last.to_uppercase()), _ => k.to_string() }
+}
 
 impl View {
     pub fn tab_title(&self) -> String { self.m.title.clone() }
@@ -27,7 +23,7 @@ impl View {
     pub(super) fn host_act(&mut self, a: model::HostAct, cx: &mut Context<Self>) {
         let Some(mr) = self.m.mr.clone() else { return };
         let ok = match &a { model::HostAct::Reply { .. } => "Reply posted.", model::HostAct::Resolve { resolved: true, .. } => "Thread resolved.", model::HostAct::Resolve { .. } => "Thread reopened.",
-            model::HostAct::React { .. } => "Reaction added.", model::HostAct::Edit { .. } => "Comment updated.", model::HostAct::Delete { .. } => "Comment deleted.", model::HostAct::RequestReview(_) => "Review requested." };
+            model::HostAct::React { .. } => "Reaction added.", model::HostAct::Unreact { .. } => "Reaction removed.", model::HostAct::Edit { .. } => "Comment updated.", model::HostAct::Delete { .. } => "Comment deleted.", model::HostAct::RequestReview(_) => "Review requested." };
         let task = cx.background_executor().spawn(async move { model::host_action(&mr, a) });
         cx.spawn(async move |this, cx| {
             let r = task.await;
@@ -52,6 +48,11 @@ impl View {
             let tid = tid.clone();
             row = row.child(icon_btn(SharedString::from(format!("re-{key}")), ic::THUMB_UP, "React with 👍", Btn::Ghost, &p)
                 .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::React { thread: tid.clone(), comment: cid.clone(), emoji: model::thumbs_up(kind).to_string() }, cx); cx.stop_propagation(); })));
+        }
+        if let Some(cid) = first.clone() {
+            let tid = tid.clone();
+            row = row.child(icon_btn(SharedString::from(format!("ru-{key}")), ic::REMOVE_CIRCLE_OUTLINE, "Remove your 👍", Btn::Ghost, &p)
+                .on_click(cx.listener(move |this, _, _, cx| { this.host_act(model::HostAct::Unreact { thread: tid.clone(), comment: cid.clone(), emoji: model::thumbs_up(kind).to_string() }, cx); cx.stop_propagation(); })));
         }
         if mine { if let Some(cid) = first {
             let (t1, c1, t2, c2) = (tid.clone(), cid.clone(), tid, cid);
@@ -123,7 +124,8 @@ impl View {
             "overview" => { if self.info.is_some() { self.page = if self.page == Page::Overview { Page::Code } else { Page::Overview }; cx.notify(); } }
             "refresh" => self.refresh(cx),
             "settings" => cx.emit(ViewEvent::OpenSettings),
-            "palette" => { self.palette_open = true; self.pal_in.f.clear(); self.pal_idx = 0; self.focus = Some(Fid::Palette); }
+            "palette" => { self.palette_open = true; self.pal_files = false; self.pal_in.f.clear(); self.pal_idx = 0; self.focus = Some(Fid::Palette); }
+            "quick_open" => { self.palette_open = true; self.pal_files = true; self.pal_in.f.clear(); self.pal_idx = 0; self.focus = Some(Fid::Palette); }
             "help" => { self.help_open = true; }
             _ => {}
         }
@@ -136,7 +138,28 @@ impl View {
         let ordered = if q.is_empty() { labels.clone() } else { keymap::palette(&labels, q) };
         ordered.into_iter().filter_map(|l| keymap::ACTIONS.iter().find(|(_, _, x)| *x == l).map(|(a, _, l)| (*a, *l))).collect()
     }
+    /// Files matching the Go to file query (indices into the review's files), at most 60.
+    fn file_hits(&self) -> Vec<usize> {
+        let paths: Vec<&str> = self.m.vm.files.iter().map(|f| f.path.as_str()).collect();
+        let mut v = keymap::fuzzy_files(&paths, self.pal_in.f.text.as_str()); v.truncate(60); v
+    }
+    /// Jumps to the batch that holds file `fi`.
+    pub(super) fn goto_file(&mut self, fi: usize, cx: &mut Context<Self>) {
+        if !self.m.vm.visible.contains(&fi) { self.note(NKind::Info, format!("{} is hidden by the current filter. Clear the filter to open it.", self.m.vm.files[fi].path), None); self.flush(cx); return; }
+        self.page = Page::Code; self.m.vm.select_file(fi); self.reload();
+    }
     pub(super) fn palette_key(&mut self, key: &str, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        if self.pal_files {
+            let hits = self.file_hits();
+            match key {
+                "escape" => { self.palette_open = false; self.focus = None; }
+                "down" => { if !hits.is_empty() { self.pal_idx = (self.pal_idx + 1) % hits.len(); } }
+                "up" => { if !hits.is_empty() { self.pal_idx = (self.pal_idx + hits.len() - 1) % hits.len(); } }
+                "enter" => { let pick = hits.get(self.pal_idx).copied(); self.palette_open = false; self.focus = None; if let Some(fi) = pick { self.goto_file(fi, cx); } }
+                _ => { if field_key(&mut self.pal_in.f, ks, cx) { self.pal_idx = 0; } }
+            }
+            return;
+        }
         let hits = self.palette_hits();
         match key {
             "escape" => { self.palette_open = false; self.focus = None; }
@@ -149,13 +172,32 @@ impl View {
 
     fn modal(&self, id: &'static str, w: f32, body: gpui::Div, cx: &mut Context<Self>, on_close: fn(&mut Self)) -> AnyElement {
         let p = self.pal;
-        let card = div().id(id).flex().flex_col().w(px(w)).max_h(px(640.0)).rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_y_scroll()
+        let card = div().id(id).flex().flex_col().w(px(w)).max_h(px(820.0)).rounded_lg().border_1().border_color(p.border).bg(p.surface).shadow_lg().occlude().overflow_y_scroll()
             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.stop_propagation())).child(body);
-        deferred(div().absolute().top_0().left_0().size_full().flex().items_start().justify_center().pt(px(90.0)).bg(gpui::black().opacity(0.45)).occlude()
+        deferred(div().absolute().top_0().left_0().size_full().flex().items_start().justify_center().pt(px(40.0)).bg(gpui::black().opacity(0.45)).occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { on_close(this); cx.notify(); })).child(card)).with_priority(25).into_any_element()
     }
 
+    fn files_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.pal; let hits = self.file_hits(); let sel = self.pal_idx.min(hits.len().saturating_sub(1));
+        let input = self.winp(Fid::Palette, div().id("palette-in").flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(p.border)
+            .child(icon(ic::SEARCH, 18.0, p.muted)).child(div().flex_1().min_w_0().child(input_text(&self.pal_in, true, "Go to file… (type part of a name or path)", &p, false, 1))), cx);
+        let rows: Vec<_> = hits.iter().enumerate().map(|(i, &fi)| {
+            let path = self.m.vm.files[fi].path.clone();
+            let (dir, name) = match path.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n.to_string()), None => (String::new(), path.clone()) };
+            let hidden = !self.m.vm.visible.contains(&fi);
+            div().id(("file-row", i)).flex().items_center().gap_2().px_4().py(px(6.0)).cursor_pointer().text_sm().when(i == sel, |d| d.bg(p.accent.opacity(0.16))).hover(move |x| x.bg(p.hover))
+                .child(div().font_weight(FontWeight::MEDIUM).child(name)).child(div().flex_1().min_w_0().truncate().text_xs().text_color(p.muted).child(dir))
+                .when(hidden, |d| d.child(div().text_xs().text_color(p.muted).child("filtered out")))
+                .on_click(cx.listener(move |this, _, _, cx| { this.palette_open = false; this.focus = None; this.goto_file(fi, cx); cx.notify(); }))
+        }).collect();
+        let body = div().flex().flex_col().child(input).child(div().flex().flex_col().max_h(px(460.0)).overflow_hidden().py_1().children(rows)
+            .when(hits.is_empty(), |d| d.child(div().px_4().py_3().text_sm().text_color(p.muted).child("No matching file"))));
+        self.modal("files-card", 620.0, body, cx, |t| { t.palette_open = false; t.focus = None; })
+    }
+
     pub(super) fn palette_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.pal_files { return self.files_overlay(cx); }
         let p = self.pal; let hits = self.palette_hits(); let sel = self.pal_idx.min(hits.len().saturating_sub(1));
         let input = self.winp(Fid::Palette, div().id("palette-in").flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(p.border)
             .child(icon(ic::SEARCH, 18.0, p.muted)).child(div().flex_1().min_w_0().child(input_text(&self.pal_in, true, "Type a command…", &p, false, 1))), cx);
@@ -176,8 +218,8 @@ impl View {
         rows.extend([("Esc".to_string(), "Back to Home / clear selection / stop the agent".to_string()), ("Ctrl + / Ctrl -".into(), "Zoom in / out (Ctrl+0 resets)".into()), ("Ctrl+W".into(), "Close this tab".into())]);
         let list = div().flex().flex_col().px_4().py_2().gap(px(2.0)).children(rows.into_iter().map(|(k, l)| div().flex().items_center().gap_3().py(px(1.0)).child(div().w(px(120.0)).flex_none().flex().child(kbd_s(&k, &p))).child(div().text_sm().child(l))));
         let head = div().flex().items_center().gap_2().px_4().py_3().border_b_1().border_color(p.border).child(icon(ic::KEYBOARD, 20.0, p.accent)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).flex_1().child("Keyboard shortcuts"))
-            .child(div().text_xs().text_color(p.muted).child("Rebind in keymap.toml"));
-        self.modal("help-card", 560.0, div().flex().flex_col().child(head).child(list), cx, |t| t.help_open = false)
+            .child(div().text_xs().text_color(p.muted).child("Rebind in Settings > Keyboard"));
+        self.modal("help-card", 620.0, div().flex().flex_col().child(head).child(list), cx, |t| t.help_open = false)
     }
 }
 

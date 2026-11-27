@@ -133,3 +133,8 @@ Push a tag like `v1.2.3` to build and publish: `.deb`, `.rpm`, AppImage, Flatpak
 - **Refresh:** the circular arrow in the review header (or R / F5) fetches new commits, CI and comments and brings the review up to date, keeping drafts, filter and sort; a spinner and a progress bar show it is working. Files you had marked viewed that changed in the update are unmarked (also when you reopen a review whose request has new commits).
 - **Tabs:** middle-click a review tab to close it. **Whole-request comments** (the overview Comment button) are drafts like any other and are posted as separate conversation threads when you finish the review.
 - **Search on Home:** Recent reviews and My reviews each have a search box above the filters. Every word you type must match (case-insensitive) the title, repository/branch or host, project, number, author or state, and it combines with the Remote and State chips. The clear button empties it.
+
+## Keyboard, search and reactions (v5.1)
+- **Go to file:** `Ctrl+Shift+P` opens a file search (file-name matches first); Enter jumps to the batch that holds the file. Files hidden by the current filter say so.
+- **Rebinding in the app:** Settings > Keyboard lists every shortcut; click one and press the new key (Esc cancels, conflicts and keys the app keeps for itself are refused). Changes apply at once and are written to `keymap.toml`, which then holds only your overrides.
+- **Removing a 👍:** thread cards have a button next to the 👍 that removes your own reaction.

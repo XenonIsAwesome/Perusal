@@ -122,6 +122,13 @@ impl Provider for GitLab {
     async fn react(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
         check(self.req(reqwest::Method::POST, &format!("{}/notes/{comment}/award_emoji", Self::mr(r))).json(&json!({"name": emoji})).send().await).await.map(|_| ())
     }
+    async fn unreact(&self, r: &MrRef, _thread: &str, comment: &str, emoji: &str) -> Result<()> {
+        let me = self.current_user().await?;
+        let list: Vec<Value> = check(self.req(reqwest::Method::GET, &format!("{}/notes/{comment}/award_emoji?per_page=100", Self::mr(r))).send().await).await?.json().await.map_err(|e| Error::Offline(e.to_string()))?;
+        let mine = list.iter().find(|x| x["name"].as_str() == Some(emoji) && x.pointer("/user/username").and_then(|l| l.as_str()) == Some(me.as_str())).and_then(|x| x["id"].as_u64());
+        let Some(id) = mine else { return Err(Error::Http(404, "you have not reacted with that".into())) };
+        check(self.req(reqwest::Method::DELETE, &format!("{}/notes/{comment}/award_emoji/{id}", Self::mr(r))).send().await).await.map(|_| ())
+    }
     async fn edit_comment(&self, r: &MrRef, _thread: &str, comment: &str, body: &str) -> Result<()> {
         check(self.req(reqwest::Method::PUT, &format!("{}/notes/{comment}", Self::mr(r))).json(&json!({"body": body})).send().await).await.map(|_| ())
     }

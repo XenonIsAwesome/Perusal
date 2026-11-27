@@ -122,3 +122,4 @@ pub const PERSON_ADD: Icon = Icon('\u{e7fe}');
 pub const HELP_OUTLINE: Icon = Icon('\u{e8fd}');
 pub const THUMB_UP: Icon = Icon('\u{e8dc}');
 pub const MOOD: Icon = Icon('\u{e7f2}');
+pub const REMOVE_CIRCLE_OUTLINE: Icon = Icon('\u{e15d}');
