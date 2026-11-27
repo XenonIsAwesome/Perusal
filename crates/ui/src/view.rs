@@ -230,7 +230,7 @@ impl View {
             if batch.len() == 1 && self.md_rendered && !f.symlink {
                 let src = if new.is_empty() { old } else { new }; self.md = Some(markdown::parse_located(&src)); self.md_src = src; self.base.clear(); self.rows.clear(); return;
             }
-            if batch.len() > 1 { rows.push(mk(fi, RowKind::FileHeader)); if self.collapsed_files.contains(&fi) { continue; } }
+            if batch.len() > 1 { rows.push(mk(fi, RowKind::FileHeader)); if self.file_collapsed(fi) { continue; } }
             if f.symlink {
                 let t = |s: &str| s.trim().to_string();
                 rows.push(mk(fi, RowKind::Note(match (old.is_empty(), new.is_empty()) { (true, false) => format!("Symbolic link to {}", t(&new)), (false, true) => format!("Symbolic link to {} was removed", t(&old)), _ => format!("Symbolic link retargeted: {} → {}", t(&old), t(&new)) })));
@@ -303,7 +303,7 @@ impl View {
             // resolved threads start collapsed (once; expanding one by hand sticks)
             for (_, c) in &pending { if c.resolved && self.auto_c.insert(c.key.clone()) { self.collapsed_c.insert(c.key.clone()); } }
             let group: Vec<&Row> = self.base.iter().filter(|r| r.fi == fi).collect();
-            if self.collapsed_files.contains(&fi) { out.extend(group.into_iter().cloned()); continue; }
+            if self.file_collapsed(fi) { out.extend(group.into_iter().cloned()); continue; }
             let mut placed_top = false; let mut anchor = out.len();
             let card = |c: CItem| Row { fi, kind: RowKind::Comment(c), ord: None, new_line: None, marks: vec![] };
             for r in group {
@@ -363,12 +363,14 @@ impl View {
         self.hxs.resize(n, 0.0); self.hx_texts.truncate(n); while self.hx_texts.len() < n { self.hx_texts.push(Default::default()); }
         if self.paned() && !self.layout.fits(n, self.arrangement) { self.layout = Layout::new(n, self.arrangement); }
     }
+    /// A file folded away by its header. Split panes always show their whole file (they scroll instead), so folding only exists stacked.
+    fn file_collapsed(&self, fi: usize) -> bool { !self.paned() && self.collapsed_files.contains(&fi) }
     fn reset_hx(&mut self) { self.hxs.fill(0.0); for c in &self.hx_texts { c.set(0.0); } }
     /// The pane a row belongs to.
     fn pane_of(&self, row: usize) -> usize { self.panes.iter().position(|p| p.range.contains(&row)).unwrap_or(0) }
     /// Pane `k`'s rectangle in unit coordinates of the pane area.
     fn pane_rect(&self, k: usize) -> Rect { if self.paned() { self.layout.rects().get(k).map(|r| r.1).unwrap_or_default() } else { Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 } } }
-    fn set_batch_panes(&mut self, on: bool) { if self.batch_panes != on { self.batch_panes = on; self.clear_selection(); self.rebuild_rows(); } }
+    fn set_batch_panes(&mut self, on: bool) { if self.batch_panes != on { self.batch_panes = on; self.clear_selection(); self.shown = None; } }
     fn set_arrangement(&mut self, a: Arrangement) { self.arrangement = a; self.clear_selection(); self.rebuild_rows(); }
     fn set_fullscreen(&mut self, on: bool, cx: &mut Context<Self>) { if self.fullscreen != on { self.fullscreen = on; cx.emit(ViewEvent::Fullscreen); } }
     pub fn is_fullscreen(&self) -> bool { self.fullscreen }
@@ -1322,12 +1324,12 @@ impl View {
         }).collect();
         let inner = match &r.kind {
             RowKind::FileHeader => {
-                let closed = self.collapsed_files.contains(&fi); let f = &self.m.vm.files[fi];
-                return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).cursor_pointer().hover(move |x| x.bg(p.hover))
-                    .child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted)).child(div().flex_1().min_w_0().truncate().child(f.path.clone()))
+                let paned = self.paned(); let closed = self.file_collapsed(fi); let f = &self.m.vm.files[fi];
+                return base.bg(p.surface).border_t_1().border_color(p.border).px_2().gap_2().font_weight(FontWeight::SEMIBOLD).when(!paned, |d| d.cursor_pointer().hover(move |x| x.bg(p.hover)))
+                    .when(!paned, |d| d.child(icon(if closed { ic::CHEVRON_RIGHT } else { ic::EXPAND_MORE }, 17.0, p.muted))).child(div().flex_1().min_w_0().truncate().child(f.path.clone()))
                     .children(marks)
                     .child(div().flex().gap_2().text_xs().child(div().text_color(p.success).child(format!("+{}", f.additions))).child(div().text_color(p.danger).child(format!("−{}", f.deletions))))
-                    .on_click(cx.listener(move |this, _, _, cx| { if !this.collapsed_files.remove(&fi) { this.collapsed_files.insert(fi); } this.shown = None; this.load_diff(); cx.notify(); })).into_any_element();
+                    .when(!paned, |d| d.on_click(cx.listener(move |this, _, _, cx| { if !this.collapsed_files.remove(&fi) { this.collapsed_files.insert(fi); } this.shown = None; this.load_diff(); cx.notify(); }))).into_any_element();
             }
             RowKind::Collapsed(t, expandable) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::UNFOLD_MORE, 15.0, p.accent)).child(div().flex_1().min_w_0().truncate().child(t.clone()))
                 .when(*expandable, |d| d.child(div().id(("expand", ix)).px_2().rounded_md().border_1().border_color(p.border).cursor_pointer().hover(move |x| x.bg(p.hover)).text_sm().child("Show anyway")
