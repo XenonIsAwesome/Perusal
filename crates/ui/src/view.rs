@@ -64,6 +64,15 @@ struct Row { fi: usize, kind: RowKind, /// ordinal among selectable rows
 
 /// One scrolling diff list. In split-pane mode there is one per file of the batch; stacked, a single one holds every file.
 struct Pane { key: Vec<usize>, range: Range<usize>, list: ListState, all: bool }
+/// A pane being dragged by its grip to swap places with another pane.
+#[derive(Clone)]
+struct DraggedPane { from: usize, title: SharedString, pal: Pal }
+struct DragPaneView(DraggedPane);
+impl Render for DragPaneView {
+    fn render(&mut self, _w: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.0.pal; div().px_3().py_1().rounded_md().bg(p.surface).border_1().border_color(p.accent).shadow_lg().text_sm().text_color(p.fg).child(self.0.title.clone())
+    }
+}
 /// What the mouse is dragging in the pane area.
 #[derive(Clone)]
 enum PaneDrag { Divider(DividerId), Corner(Corner) }
@@ -1477,8 +1486,10 @@ impl View {
         for k in 0..self.panes.len() {
             let r = self.pane_rect(k); let (start, list_state) = (self.panes[k].range.start, self.panes[k].list.clone());
             let (sb, hsb) = (self.scrollbar(k, cx), self.hscrollbar(k, cx));
+            let title: SharedString = self.panes[k].key.first().and_then(|&fi| self.m.vm.files.get(fi)).map(|f| f.path.clone()).unwrap_or_default().into();
             let pane = div().id(("pane", k)).absolute().left(relative(r.x)).top(relative(r.y)).w(relative(r.w)).h(relative(r.h)).overflow_hidden()
-                .when(multi, |d| d.border_1().border_color(p.border))
+                .when(multi, |d| d.border_1().border_color(p.border).drag_over::<DraggedPane>(move |s, _, _, _| s.border_color(p.accent).bg(p.accent.opacity(0.12)))
+                    .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| { if this.layout.swap(d.from, k) { this.clear_selection(); } cx.notify(); })))
                 .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, _, cx| {
                     let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
                     if dx != 0.0 && !ev.modifiers.control {
@@ -1487,7 +1498,10 @@ impl View {
                     }
                 }))
                 .child(list(list_state, cx.processor(move |this, ix: usize, _w, cx| { let g = start + ix; let el = this.render_row(g, cx); match this.row_tint(g) { Some(c) => div().w_full().bg(c).child(el).into_any_element(), None => el } })).size_full())
-                .children(sb).children(hsb);
+                .children(sb).children(hsb)
+                .when(paned && multi, |d| d.child(div().id(("grip", k)).absolute().top(px(3.0)).left(relative(0.5)).ml(px(-14.0)).w(px(28.0)).h(px(20.0)).flex().items_center().justify_center().rounded_md().cursor_grab().text_color(p.muted).hover(move |s| s.bg(p.hover))
+                    .on_drag(DraggedPane { from: k, title: title.clone(), pal: p }, |d, _, _, cx| cx.new(|_| DragPaneView(d.clone())))
+                    .tooltip_text("Drag onto another pane to swap them".to_string(), &p).child(icon(ic::DRAG_INDICATOR, 16.0, p.muted))));
             area = area.child(pane);
         }
         if paned {

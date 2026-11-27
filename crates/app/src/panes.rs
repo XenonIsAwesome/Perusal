@@ -173,6 +173,12 @@ impl Layout {
         self.drag(&c.v, x, size_px.0, min_px, snap_px); self.drag(&c.h, y, size_px.1, min_px, snap_px);
     }
 
+    /// Exchanges the places of panes `a` and `b` (sizes of the places stay); false when either is not in the layout.
+    pub fn swap(&mut self, a: usize, b: usize) -> bool {
+        fn go(n: &mut Node, a: usize, b: usize) { match n { Node::Leaf(i) => { if *i == a { *i = b } else if *i == b { *i = a } } Node::Split { kids, .. } => kids.iter_mut().for_each(|k| go(k, a, b)) } }
+        if a == b || a >= self.n || b >= self.n { return false; }
+        go(&mut self.root, a, b); true
+    }
     /// Equal sizes again for the split containing `id` (double-click on a divider).
     pub fn reset(&mut self, id: &DividerId) {
         if let Some(Node::Split { fracs, .. }) = node_at_mut(&mut self.root, &id.path) { let n = fracs.len(); *fracs = equal(n); }
@@ -227,6 +233,12 @@ mod tests { use super::*;
         let mut l = Layout::new(3, Arrangement::Rows); let d = l.dividers()[0].id.clone();
         l.drag(&d, 0.2, 1000.0, 50.0, 0.0); l.reset(&d); assert!(l.rects().iter().all(|(_, r)| (r.h - 1.0 / 3.0).abs() < 1e-5));
         l.drag(&d, 0.2, 1000.0, 50.0, 0.0); l.reset_all(); assert!(l.fits(3, Arrangement::Rows));
+    }
+    #[test] fn swapping_exchanges_places() {
+        let mut l = Layout::new(3, Arrangement::Auto); let before = l.rects();
+        assert!(l.swap(0, 2)); let after = l.rects();
+        assert_eq!(after[0].1, before[2].1); assert_eq!(after[2].1, before[0].1); assert_eq!(after[1].1, before[1].1);
+        assert!(!l.swap(1, 1) && !l.swap(0, 9)); assert!((area(&l) - 1.0).abs() < 1e-4);
     }
     #[test] fn arrangement_serde() { #[derive(Serialize, Deserialize)] struct T { a: Arrangement, b: BatchView } let t: T = toml::from_str("a = \"grid\"\nb = \"stacked\"").unwrap(); assert_eq!((t.a, t.b), (Arrangement::Grid, BatchView::Stacked)); }
 }
