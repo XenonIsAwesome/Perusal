@@ -80,6 +80,8 @@ pub fn available(themes_dir: Option<&std::path::Path>) -> Vec<String> {
 /// Picks the light or dark theme name from the OS appearance.
 pub fn follow_os(os_dark: bool, light: &str, dark: &str) -> String { if os_dark { dark.into() } else { light.into() } }
 
+/// The zoom factor as a whole percentage for display (1.2 -> 120).
+pub fn zoom_percent(z: f32) -> u32 { (z * 100.0).round().max(0.0) as u32 }
 pub fn zoom(current: f32, step: i32) -> f32 { if step == 0 { 1.0 } else { (current + step as f32 * 0.1).clamp(0.5, 3.0) } }
 
 #[cfg(test)]
@@ -98,5 +100,6 @@ mod tests { use super::*;
         assert_eq!(load("warm", Some(&d)).name, "Warm"); assert_eq!(load("missing", Some(&d)).name, "Perusal Dark"); assert_eq!(load("light", None).name, "Perusal Light");
         let _ = std::fs::remove_dir_all(&d);
     }
+    #[test] fn zoom_percent_rounds() { assert_eq!(zoom_percent(1.0), 100); assert_eq!(zoom_percent(zoom(1.0, 2)), 120); assert_eq!(zoom_percent(zoom(1.0, -5)), 50); }
     #[test] fn zoom_and_os() { assert_eq!(zoom(1.0, 0), 1.0); assert!((zoom(1.0, 2) - 1.2).abs() < 1e-6); assert_eq!(zoom(3.0, 5), 3.0); assert_eq!(follow_os(true, "light", "dark"), "dark"); }
 }

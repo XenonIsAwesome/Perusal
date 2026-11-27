@@ -4228,6 +4228,7 @@ dependencies = [
 name = "perusal-diff"
 version = "0.1.0"
 dependencies = [
+ "image",
  "regex",
  "serde",
  "similar",

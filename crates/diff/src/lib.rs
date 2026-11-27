@@ -1,5 +1,6 @@
 //! Per-file stats index, noisy-file rules and grouping. UI-free.
 pub mod text;
+pub mod image;
 use std::process::Command;
 use std::path::Path;
 
@@ -15,6 +16,8 @@ impl Status {
 #[derive(Debug, Clone)]
 pub struct FileStat {
     pub path: String,
+    /// Where a renamed file came from (`None` otherwise); reading the old side of a rename needs it.
+    pub old_path: Option<String>,
     pub status: Status,
     pub additions: u32,
     pub deletions: u32,
@@ -33,7 +36,7 @@ pub struct FileStat {
 
 impl FileStat {
     pub fn new(path: &str, status: Status, additions: u32, deletions: u32) -> Self {
-        FileStat { path: path.into(), status, additions, deletions, hunks: 1, size: 0, binary: false, symlink: false,
+        FileStat { path: path.into(), old_path: None, status, additions, deletions, hunks: 1, size: 0, binary: false, symlink: false,
             generated: is_noisy_path(path), viewed: false, comments: 0, unresolved: 0, ai_flagged: false, meaningful: additions + deletions }
     }
     /// True when one side of a side-by-side view would be empty or a mere copy of the other: added and deleted files, and files
@@ -89,9 +92,11 @@ pub fn parse_diff_z(raw: &str, numstat: &str) -> Vec<FileStat> {
         let t = toks[i]; i += 1;
         let p: Vec<&str> = t.splitn(3, '\t').collect();
         if p.len() < 3 { continue; }
-        let path = if p[2].is_empty() { i += 1; let n = toks.get(i).copied().unwrap_or(""); i += 1; n.to_string() } else { p[2].to_string() };
+        let mut old_path = None;
+        let path = if p[2].is_empty() { old_path = toks.get(i).map(|s| s.to_string()); i += 1; let n = toks.get(i).copied().unwrap_or(""); i += 1; n.to_string() } else { p[2].to_string() };
         let m = meta.get(&path);
         let mut f = FileStat::new(&path, m.map(|m| m.status).unwrap_or(Status::Modified), p[0].parse().unwrap_or(0), p[1].parse().unwrap_or(0));
+        f.old_path = old_path.filter(|o| !o.is_empty() && *o != path);
         f.binary = p[0] == "-"; f.symlink = m.map(|m| m.symlink).unwrap_or(false);
         out.push(f);
     }
