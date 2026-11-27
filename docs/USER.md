@@ -65,7 +65,7 @@ Agents run headless in a read-only snapshot of the reviewed head, with a minimal
 - **Sidebars** collapse with their chevron buttons and resize by dragging the divider; the right panel's Commits and Drafts sections collapse too. Layout is remembered.
 - **Commit scope:** click a commit to review only that commit. A chip above the file list shows it; click it again or the close button to show everything.
 - **Symlinks** are shown in italics with a link icon and a note about the old and new target.
-- **Markdown preview** supports commenting: click a block (Shift+click to extend) and press `c`. The comment anchors to the block's source lines.
+- **Markdown preview** is a rich diff like GitHub's: added text is green, removed text is red and struck through, and edited words inside a paragraph, heading, list item or table row are marked word by word. It supports commenting at the finest grain: click a paragraph, list item, table row or single code line (Shift+click to extend) and press `c`. The comment anchors to the source lines. Added and deleted files show plain. Switching to the preview (or opening a file rendered) scrolls to the first change instead of the top of the file.
 - **Filters:** `ai` lists files with AI drafts and `comments > 0` files with any draft.
 - **Text fields** support mouse selection: click to place the caret, drag to select, double-click for a word, triple-click for all.
 - **AI:** while an agent works you see a loading indicator, the elapsed time and what it is doing (for Claude Code: files read, searches, web lookups). **Stop** ends it immediately. Settings has the agent, model, effort/variant and the response timeout (15 minutes by default, or No limit).

@@ -36,6 +36,11 @@ pub fn diff_lines(old: &str, new: &str, context: usize) -> Vec<Line> {
     out
 }
 
+/// Word-level changes between two strings, in order: unchanged, added and removed pieces (whitespace is kept as its own pieces).
+pub fn word_changes(old: &str, new: &str) -> Vec<(Kind, String)> {
+    TextDiff::from_words(old, new).iter_all_changes().map(|c| (match c.tag() { ChangeTag::Equal => Kind::Context, ChangeTag::Insert => Kind::Added, ChangeTag::Delete => Kind::Removed }, c.value().to_string())).collect()
+}
+
 /// Old-side line number GitLab pairs with new-side line `new_line` when it builds a line code: the old line of an
 /// unchanged line, or for an added line the next old line number (one past the last old line before it).
 pub fn old_line_for_new(old: &str, new: &str, new_line: u32) -> u32 {

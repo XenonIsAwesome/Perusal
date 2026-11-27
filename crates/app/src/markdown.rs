@@ -1,14 +1,23 @@
 //! Markdown to a small block model that the UI renders. UI-free.
+use perusal_diff::text::{Class, Kind};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::ops::Range;
+
+/// How a piece of rendered Markdown differs from the other side of a change (rich diff).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Change { #[default] None, Added, Removed, Modified }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Span { pub text: String, pub bold: bool, pub italic: bool, pub strike: bool, pub code: bool, pub link: Option<String> }
+pub struct Span { pub text: String, pub bold: bool, pub italic: bool, pub strike: bool, pub code: bool, pub link: Option<String>, pub change: Change }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Heading(u8, Vec<Span>), Para(Vec<Span>), Code { lang: String, text: String },
     List { ordered: bool, start: u64, items: Vec<Vec<Block>> }, Quote(Vec<Block>), Rule,
+    /// A table, or when commenting is per row (`parse_located`) one piece of it: the header alone, or a single body row with an empty `head`.
     Table { head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
+    /// One line of a code block, highlighted once at parse time; `first`/`last` round the block's corners.
+    CodeLine { text: String, runs: Vec<(Range<usize>, Class)>, first: bool, last: bool, change: Change },
 }
 
 /// The text runs of rendered blocks, in the order they are drawn: one per heading/paragraph/table cell (its spans joined) and one per
@@ -23,6 +32,7 @@ pub fn block_texts(blocks: &[Block]) -> Vec<String> {
             Block::List { items, .. } => for it in items { out.extend(block_texts(it)); },
             Block::Quote(inner) => out.extend(block_texts(inner)),
             Block::Rule => {}
+            Block::CodeLine { text, .. } => out.push(text.clone()),
             Block::Table { head, rows } => { for c in head { out.push(join(c)); } for r in rows { for c in r { out.push(join(c)); } } }
         }
     }
@@ -37,7 +47,7 @@ pub fn parse(src: &str) -> Vec<Block> {
     let mut lists: Vec<(bool, u64, Vec<Vec<Block>>)> = vec![];
     let mut head: Vec<Vec<Span>> = vec![]; let mut rows: Vec<Vec<Vec<Span>>> = vec![]; let mut cur_row: Vec<Vec<Span>> = vec![]; let mut in_head = false;
     let push_text = |spans: &mut Vec<Span>, t: &str, code: bool, bold: u32, italic: u32, strike: u32, link: &Option<String>| {
-        spans.push(Span { text: t.to_string(), bold: bold > 0, italic: italic > 0, strike: strike > 0, code, link: link.clone() });
+        spans.push(Span { text: t.to_string(), bold: bold > 0, italic: italic > 0, strike: strike > 0, code, link: link.clone(), change: Change::None });
     };
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     for ev in Parser::new_ext(src, opts) {
@@ -87,14 +97,45 @@ pub fn parse(src: &str) -> Vec<Block> {
 
 /// A top-level block with the 1-based source lines it covers (for commenting on rendered markdown).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Located { pub block: Block, pub first_line: u32, pub last_line: u32 }
+pub struct Located { pub block: Block, pub first_line: u32, pub last_line: u32, pub change: Change }
+
+fn line_starts(src: &str) -> Vec<usize> { let mut v = vec![0usize]; for (i, b) in src.bytes().enumerate() { if b == b'\n' { v.push(i + 1); } } v }
+
+/// Highlight classes per line of `text` (highlighted as a whole so multi-line comments and strings work): byte ranges within each line.
+pub fn line_classes(lang: &str, text: &str) -> Vec<Vec<(Range<usize>, Class)>> {
+    let starts = line_starts(text); let n = starts.len();
+    let mut out: Vec<Vec<(Range<usize>, Class)>> = vec![vec![]; n];
+    if lang.is_empty() { return out; }
+    let mut spans = perusal_diff::text::highlight(lang, text); spans.sort_by_key(|s| s.0);
+    let mut last_end = 0usize;
+    for (a, b, c) in spans {
+        if a < last_end { continue; } last_end = b;
+        let mut li = starts.partition_point(|s| *s <= a).saturating_sub(1);
+        while li < n && starts[li] < b {
+            let ls = starts[li]; let le = if li + 1 < n { starts[li + 1] - 1 } else { text.len() };
+            let (sa, sb) = (a.max(ls), b.min(le));
+            if sa < sb && text.is_char_boundary(sa) && text.is_char_boundary(sb) { out[li].push((sa - ls..sb - ls, c)); }
+            li += 1;
+        }
+    }
+    out
+}
+
+/// Language for a Markdown fence label (```rust, ```js, ```sh ...); empty for none, "generic" for labels we do not know.
+pub fn fence_language(label: &str) -> &'static str {
+    let l = label.split(|c: char| c.is_whitespace() || c == ',' || c == '{').next().unwrap_or("").to_lowercase();
+    if l.is_empty() || l == "text" || l == "txt" || l == "plain" || l == "diff" { return ""; }
+    let ext = match l.as_str() { "rust" => "rs", "python" | "python3" => "py", "javascript" | "node" => "js", "typescript" => "ts", "shell" | "console" | "sh" | "zsh" | "bash" => "sh", "golang" => "go", "c++" | "cplusplus" => "cpp", "markup" | "xml" | "svg" => "html", "yml" | "toml" | "yaml" => "generic", o => o };
+    match perusal_diff::text::language_for_ext(ext) { "" => "generic", o => o }
+}
 
 fn is_block_tag(t: &Tag) -> bool { matches!(t, Tag::Paragraph | Tag::Heading { .. } | Tag::BlockQuote(_) | Tag::CodeBlock(_) | Tag::List(_) | Tag::Table(_) | Tag::HtmlBlock) }
 fn is_block_end(t: &TagEnd) -> bool { matches!(t, TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::BlockQuote(_) | TagEnd::CodeBlock | TagEnd::List(_) | TagEnd::Table | TagEnd::HtmlBlock) }
 
 pub fn parse_located(src: &str) -> Vec<Located> {
     let blocks = parse(src);
-    let line_of = |off: usize| src[..off.min(src.len())].bytes().filter(|b| *b == b'\n').count() as u32 + 1;
+    let starts = line_starts(src);
+    let line_of = |off: usize| starts.partition_point(|s| *s <= off.min(src.len())) as u32;
     let mut ranges: Vec<(u32, u32)> = vec![]; let mut depth = 0usize; let mut ldepth = 0usize;
     // source lines of each item of a top-level list, by block index
     let mut items: std::collections::HashMap<usize, Vec<(u32, u32)>> = Default::default();
@@ -114,12 +155,202 @@ pub fn parse_located(src: &str) -> Vec<Located> {
             // each bullet or numbered item can be commented on by itself
             Block::List { ordered, start, items: its } if items.get(&i).map(|r| r.len() == its.len() && its.len() > 1).unwrap_or(false) => {
                 let rs = &items[&i];
-                for (k, it) in its.into_iter().enumerate() { out.push(Located { block: Block::List { ordered, start: start + k as u64, items: vec![it] }, first_line: rs[k].0, last_line: rs[k].1.max(rs[k].0) }); }
+                for (k, it) in its.into_iter().enumerate() { out.push(Located { block: Block::List { ordered, start: start + k as u64, items: vec![it] }, first_line: rs[k].0, last_line: rs[k].1.max(rs[k].0), change: Change::None }); }
             }
-            block => out.push(Located { block, first_line: a, last_line: b.max(a) }),
+            // a table is commented on row by row: the header (with its delimiter line), then one piece per body row
+            Block::Table { head, rows } if a > 0 => {
+                out.push(Located { block: Block::Table { head, rows: vec![] }, first_line: a, last_line: (a + 1).min(b.max(a)), change: Change::None });
+                let n = rows.len();
+                for (k, r) in rows.into_iter().enumerate() { let l = (a + 2 + k as u32).min(b.max(a)); out.push(Located { block: Block::Table { head: vec![], rows: vec![r] }, first_line: l, last_line: if k + 1 == n { b.max(l) } else { l }, change: Change::None }); }
+            }
+            // and a code block line by line (suggestions stay whole: they are drawn as a diff); the fences belong to the first and last line
+            Block::Code { lang, text } if a > 0 && !text.is_empty() && !lang.trim().starts_with("suggestion") => {
+                let fenced = src[starts[a as usize - 1]..].lines().next().map(|l| { let t = l.trim_start(); t.starts_with("```") || t.starts_with("~~~") }).unwrap_or(false);
+                let classes = line_classes(fence_language(&lang), &text);
+                let lines: Vec<&str> = text.split('\n').collect(); let n = lines.len();
+                for (k, l) in lines.into_iter().enumerate() {
+                    let ln = (if fenced { a + 1 + k as u32 } else { a + k as u32 }).min(b.max(a));
+                    let (first, last) = (k == 0, k + 1 == n);
+                    out.push(Located { block: Block::CodeLine { text: l.to_string(), runs: classes.get(k).cloned().unwrap_or_default(), first, last, change: Change::None }, first_line: if first { a } else { ln }, last_line: if last { b.max(ln) } else { ln }, change: Change::None });
+                }
+            }
+            block => out.push(Located { block, first_line: a, last_line: b.max(a), change: Change::None }),
         }
     }
     out
+}
+
+// ---- rich diff: rendered Markdown with additions, deletions and word-level changes marked
+
+fn inline_of(b: &Block) -> Option<&Vec<Span>> {
+    match b { Block::Heading(_, s) | Block::Para(s) => Some(s), Block::List { items, .. } if items.len() == 1 => items[0].first().and_then(inline_of), Block::Quote(i) => i.first().and_then(inline_of), _ => None }
+}
+fn inline_of_mut(b: &mut Block) -> Option<&mut Vec<Span>> {
+    match b { Block::Heading(_, s) | Block::Para(s) => Some(s), Block::List { items, .. } if items.len() == 1 => items[0].first_mut().and_then(inline_of_mut), Block::Quote(i) => i.first_mut().and_then(inline_of_mut), _ => None }
+}
+
+/// Marks every piece of text in a block as added or removed.
+pub fn mark_block(b: &mut Block, c: Change) {
+    match b {
+        Block::Heading(_, s) | Block::Para(s) => for x in s { x.change = c; },
+        Block::CodeLine { change, .. } => *change = c,
+        Block::List { items, .. } => for it in items { for x in it { mark_block(x, c); } },
+        Block::Quote(i) => for x in i { mark_block(x, c); },
+        Block::Table { head, rows } => for cell in head.iter_mut().chain(rows.iter_mut().flatten()) { for x in cell { x.change = c; } },
+        Block::Code { .. } | Block::Rule => {}
+    }
+}
+
+/// The new spans with the word-level changes against `old` marked: added words flagged, removed words inserted as removed spans.
+/// None when the two share too little to be read as the same text edited (fraction of unchanged text below `min_sim`).
+fn word_spans(old: &[Span], new: &[Span], min_sim: f32) -> Option<Vec<Span>> {
+    let join = |s: &[Span]| s.iter().map(|x| x.text.as_str()).collect::<String>();
+    let (o, n) = (join(old), join(new));
+    let ch = perusal_diff::text::word_changes(&o, &n);
+    let eq: usize = ch.iter().filter(|c| c.0 == Kind::Context).map(|c| c.1.len()).sum();
+    if (eq as f32) / (o.len().max(n.len()).max(1) as f32) < min_sim { return None; }
+    let mut flags = vec![false; n.len()]; let mut dels: Vec<(usize, String, usize)> = vec![]; let (mut pos, mut opos) = (0usize, 0usize);
+    for (k, t) in ch {
+        match k {
+            Kind::Context => { pos += t.len(); opos += t.len(); }
+            Kind::Added => { for f in &mut flags[pos..pos + t.len()] { *f = true; } pos += t.len(); }
+            Kind::Removed => { let l = t.len(); dels.push((pos, t, opos)); opos += l; }
+        }
+    }
+    // a removed word keeps the formatting (bold, code, link ...) of the old span it came from
+    let mut ostarts = Vec::with_capacity(old.len()); let mut acc = 0usize; for sp in old { ostarts.push(acc); acc += sp.text.len(); }
+    let del_span = |t: &str, at: usize| { let i = ostarts.partition_point(|s| *s <= at).saturating_sub(1); Span { text: t.to_string(), change: Change::Removed, ..old.get(i).cloned().unwrap_or_default() } };
+    let (mut out, mut off, mut di) = (vec![], 0usize, 0usize);
+    for s in new {
+        let (start, end) = (off, off + s.text.len()); off = end;
+        let mut a = start;
+        loop {
+            while di < dels.len() && dels[di].0 <= a { if !dels[di].1.trim().is_empty() { out.push(del_span(&dels[di].1, dels[di].2)); } di += 1; }
+            if a >= end { break; }
+            let mut b = a + 1;
+            while b < end && flags[b] == flags[a] && dels.get(di).map(|d| d.0) != Some(b) { b += 1; }
+            out.push(Span { text: s.text[a - start..b - start].to_string(), change: if flags[a] { Change::Added } else { Change::None }, ..s.clone() });
+            a = b;
+        }
+    }
+    for (_, t, at) in &dels[di..] { if !t.trim().is_empty() { out.push(del_span(t, *at)); } }
+    Some(out)
+}
+
+/// Marks `new` against the block `old` it replaces, when both are the same kind of text block. True when it did.
+fn try_pair(new: &mut Block, old: &Block) -> bool {
+    if let (Some(ns), Some(os)) = (inline_of(new), inline_of(old)) {
+        if std::mem::discriminant(new) != std::mem::discriminant(old) { return false; }
+        let Some(r) = word_spans(os, ns, 0.35) else { return false };
+        *inline_of_mut(new).unwrap() = r; return true;
+    }
+    // a table row piece: cell by cell
+    if let (Block::Table { head: h1, rows: r1 }, Block::Table { head: h2, rows: r2 }) = (&mut *new, old) {
+        if h1.is_empty() && h2.is_empty() && r1.len() == 1 && r2.len() == 1 && r1[0].len() == r2[0].len() {
+            for (nc, oc) in r1[0].iter_mut().zip(&r2[0]) { if let Some(sp) = word_spans(oc, nc, 0.0) { *nc = sp; } }
+            return true;
+        }
+    }
+    false
+}
+
+/// The rendered blocks of `new` with its changes against `old` marked: added blocks, edited blocks (changed words flagged),
+/// and blocks only the old text had, inserted where they were as removed blocks. Blank lines do not count as changes.
+pub fn parse_diff(old: &str, new: &str) -> Vec<Located> {
+    let mut nb = parse_located(new);
+    if old == new { return nb; }
+    let ob = parse_located(old);
+    // diff the non-blank lines only, so blank lines cannot pull the alignment onto the wrong paragraph
+    let compact = |s: &str| -> (String, Vec<u32>) {
+        let (mut t, mut map) = (String::new(), vec![]);
+        for (i, l) in s.lines().enumerate() { if !l.trim().is_empty() { t.push_str(l); t.push('\n'); map.push(i as u32 + 1); } }
+        (t, map)
+    };
+    let ((oc, omap), (nc, nmap)) = (compact(old), compact(new));
+    let lines = perusal_diff::text::diff_lines(&oc, &nc, usize::MAX / 2);
+    let (nn, on) = (new.lines().count() + 2, old.lines().count() + 2);
+    let (mut added, mut removed, mut nblank, mut oblank) = (vec![false; nn], vec![false; on], vec![true; nn], vec![true; on]);
+    for &n in &nmap { nblank[n as usize] = false; } for &o in &omap { oblank[o as usize] = false; }
+    let (mut nreg, mut oreg) = (vec![0u32; nn], vec![0u32; on]);
+    let mut anchor = vec![u32::MAX; on]; let mut pending: Vec<usize> = vec![];
+    let (mut region, mut in_change) = (0u32, false);
+    for l in &lines {
+        let (o, n) = (l.old_no.map(|o| omap[o as usize - 1] as usize), l.new_no.map(|n| nmap[n as usize - 1]));
+        match l.kind {
+            Kind::Context => in_change = false,
+            Kind::Added => {
+                if !in_change { region += 1; in_change = true; }
+                if let Some(n) = n { added[n as usize] = true; nreg[n as usize] = region; }
+            }
+            Kind::Removed => {
+                if !in_change { region += 1; in_change = true; }
+                if let Some(o) = o { removed[o] = true; oreg[o] = region; pending.push(o); }
+            }
+        }
+        if let (Some(n), false) = (n, pending.is_empty()) { for o in pending.drain(..) { anchor[o] = n; } }
+    }
+    // a range counts as wholly changed when it has text and every non-blank line in it changed
+    let whole = |flags: &[bool], blank: &[bool], a: u32, b: u32| { let mut any = false; for i in a as usize..=(b as usize).min(flags.len() - 1) { if !blank[i] { if !flags[i] { return false; } any = true; } } any };
+    // the old blocks that lost lines, by change region
+    let mut by_region: std::collections::HashMap<u32, Vec<usize>> = Default::default();
+    for (j, b) in ob.iter().enumerate() {
+        let mut seen: Vec<u32> = vec![];
+        for o in b.first_line..=b.last_line { if (o as usize) < on && removed[o as usize] && !seen.contains(&oreg[o as usize]) { seen.push(oreg[o as usize]); by_region.entry(oreg[o as usize]).or_default().push(j); } }
+    }
+    let mut consumed = vec![false; ob.len()]; let mut paired_at = vec![usize::MAX; ob.len()];
+    for (i, lb) in nb.iter_mut().enumerate() {
+        if lb.first_line == 0 { continue; }
+        let range = lb.first_line as usize..=(lb.last_line as usize).min(nn - 1);
+        let Some(first_added) = range.clone().find(|&n| added[n]) else { continue };
+        let paired = by_region.get(&nreg[first_added]).and_then(|js| js.iter().copied().find(|&j| !consumed[j] && try_pair(&mut lb.block, &ob[j].block)));
+        if let Some(j) = paired { consumed[j] = true; paired_at[j] = i; lb.change = Change::Modified; continue; }
+        if whole(&added, &nblank, lb.first_line, lb.last_line) { mark_block(&mut lb.block, Change::Added); lb.change = Change::Added; } else { lb.change = Change::Modified; }
+    }
+    // an empty line inside a code block that is wholly added (or removed) is part of it
+    let blank_code = |b: &Block| matches!(b, Block::CodeLine { text, .. } if text.is_empty());
+    for i in 1..nb.len().saturating_sub(1) {
+        if nb[i].change == Change::None && blank_code(&nb[i].block) && nb[i - 1].change == Change::Added && nb[i + 1].change == Change::Added { mark_block(&mut nb[i].block, Change::Added); nb[i].change = Change::Added; }
+    }
+    // blocks that only the old text had
+    let gone_ok: Vec<bool> = ob.iter().enumerate().map(|(j, b)| !consumed[j] && b.first_line != 0 && whole(&removed, &oblank, b.first_line, b.last_line)).collect();
+    let mut gone: Vec<(usize, Located)> = vec![];
+    let mut after: Option<usize> = None; // removed blocks that follow an edited block stay right after it
+    for (j, b) in ob.iter().enumerate() {
+        let inner = j > 0 && j + 1 < ob.len() && blank_code(&b.block) && !consumed[j] && gone_ok[j - 1] && gone_ok[j + 1];
+        if consumed[j] { after = Some(paired_at[j] + 1); continue; }
+        if !gone_ok[j] && !inner { after = None; continue; }
+        let mut lb = b.clone(); mark_block(&mut lb.block, Change::Removed); lb.change = Change::Removed;
+        let at = anchor[b.first_line as usize];
+        let pos = after.unwrap_or_else(|| nb.partition_point(|x| x.last_line < at)); after = Some(pos);
+        gone.push((pos, lb));
+    }
+    gone.sort_by_key(|g| g.0); // stable: removed blocks keep their order
+    let mut out = Vec::with_capacity(nb.len() + gone.len()); let mut gi = 0;
+    for (i, lb) in nb.into_iter().enumerate() {
+        while gi < gone.len() && gone[gi].0 <= i { out.push(gone[gi].1.clone()); gi += 1; }
+        out.push(lb);
+    }
+    for (_, lb) in &gone[gi..] { out.push(lb.clone()); }
+    out
+}
+
+/// Where a selection of rendered blocks anchors, and the text it quotes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdSelection { pub start: u32, pub end: u32, pub old_side: bool, pub snippet: String }
+
+/// The anchor and quoted text for a selection of rendered blocks, taken from one side only so they always agree: a selection of only
+/// removed blocks anchors on the old file's lines and quotes them (`-`); otherwise it anchors on the new lines of the blocks that exist
+/// there (added `+`, others ` `) and leaves the removed blocks out of both. `old` and `new` are the two file texts.
+pub fn selection_of(blocks: &[&Located], old: &str, new: &str) -> Option<MdSelection> {
+    let gone = |b: &Located| b.change == Change::Removed;
+    let old_side = !blocks.is_empty() && blocks.iter().all(|b| gone(b));
+    let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
+    for b in blocks.iter().filter(|b| gone(b) == old_side) {
+        lo = lo.min(b.first_line); hi = hi.max(b.last_line);
+        let (src, mark) = if old_side { (old, '-') } else { (new, if b.change == Change::Added { '+' } else { ' ' }) };
+        for l in src.lines().skip(b.first_line.saturating_sub(1) as usize).take((b.last_line + 1 - b.first_line) as usize) { snippet.push(mark); snippet.push_str(l); snippet.push('\n'); }
+    }
+    (hi > 0).then_some(MdSelection { start: lo, end: hi, old_side, snippet })
 }
 
 pub fn is_markdown(path: &str) -> bool { let l = path.to_lowercase(); l.ends_with(".md") || l.ends_with(".markdown") || l.ends_with(".mdx") }
@@ -155,6 +386,84 @@ mod tests {
         // the two bullets are separate, individually commentable blocks
         assert_eq!(got, vec![(1, 1), (3, 4), (6, 6), (7, 7), (9, 11), (13, 13), (15, 15)]);
         assert!(matches!(l[1].block, Block::Para(_)) && matches!(l[6].block, Block::Quote(_)));
+    }
+    #[test] fn tables_and_code_are_commentable_per_line() {
+        let src = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n";
+        let got: Vec<(u32, u32)> = parse_located(src).iter().map(|x| (x.first_line, x.last_line)).collect();
+        // intro, table header + delimiter, two rows, then the code lines (fences belong to the first and last)
+        assert_eq!(got, vec![(1, 1), (3, 4), (5, 5), (6, 6), (8, 9), (10, 11)]);
+        let l = parse_located(src);
+        assert!(matches!(&l[1].block, Block::Table { head, rows } if head.len() == 2 && rows.is_empty()));
+        assert!(matches!(&l[2].block, Block::Table { head, rows } if head.is_empty() && rows.len() == 1 && plain(&rows[0][1]) == "2"));
+        assert!(matches!(&l[4].block, Block::CodeLine { text, first: true, last: false, .. } if text == "let a = 1;"));
+        assert!(matches!(&l[5].block, Block::CodeLine { last: true, .. }));
+    }
+    #[test] fn rich_diff_marks_added_removed_and_edited_words() {
+        let old = "# T\n\nThe quick brown fox.\n\ngone para\n\nkeep\n";
+        let new = "# T\n\nThe quick red fox.\n\nkeep\n\nbrand new\n";
+        let d = parse_diff(old, new);
+        let kinds: Vec<Change> = d.iter().map(|x| x.change).collect();
+        assert_eq!(kinds, vec![Change::None, Change::Modified, Change::Removed, Change::None, Change::Added]);
+        let Block::Para(sp) = &d[1].block else { panic!() };
+        assert!(sp.iter().any(|s| s.change == Change::Added && s.text.trim() == "red") && sp.iter().any(|s| s.change == Change::Removed && s.text.trim() == "brown"));
+        assert!(matches!(&d[2].block, Block::Para(s) if s.iter().all(|x| x.change == Change::Removed) && plain(s) == "gone para"));
+        assert!(matches!(&d[4].block, Block::Para(s) if s.iter().all(|x| x.change == Change::Added)));
+        assert_eq!(parse_diff("a\n", "a\n").iter().filter(|x| x.change != Change::None).count(), 0);
+    }
+    #[test] fn rich_diff_table_rows_and_unrelated_rewrites() {
+        let d = parse_diff("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n", "| a | b |\n|---|---|\n| 1 | 9 |\n| 3 | 4 |\n| 5 | 6 |\n");
+        let kinds: Vec<Change> = d.iter().map(|x| x.change).collect();
+        assert_eq!(kinds, vec![Change::None, Change::Modified, Change::None, Change::Added]);
+        // a paragraph replaced by something unrelated reads as removed + added, not as a word soup
+        let d = parse_diff("alpha beta gamma\n", "totally different words here now\n");
+        assert_eq!(d.iter().map(|x| x.change).collect::<Vec<_>>(), vec![Change::Removed, Change::Added]);
+    }
+    fn kinds(d: &[Located]) -> Vec<Change> { d.iter().map(|x| x.change).collect() }
+    #[test] fn rich_diff_removal_at_the_end_of_the_file() {
+        let d = parse_diff("a\n\nb\n\nlast\n", "a\n\nb\n");
+        assert_eq!(kinds(&d), vec![Change::None, Change::None, Change::Removed]);
+        assert!(matches!(&d[2].block, Block::Para(s) if plain(s) == "last"));
+    }
+    #[test] fn rich_diff_removal_between_two_edited_paragraphs() {
+        let d = parse_diff("one two\n\ngone block\n\nthree four\n", "one TWO\n\nthree FOUR\n");
+        assert_eq!(kinds(&d), vec![Change::Modified, Change::Removed, Change::Modified]);
+        assert!(matches!(&d[1].block, Block::Para(s) if plain(s) == "gone block"));
+        assert!(matches!(&d[2].block, Block::Para(s) if plain(s).contains("FOUR")));
+    }
+    #[test] fn rich_diff_fenced_code_with_a_blank_line_is_wholly_added_or_removed() {
+        let with = "intro\n\n```\na\n\nb\n```\n";
+        let d = parse_diff("intro\n", with);
+        assert_eq!(kinds(&d), vec![Change::None, Change::Added, Change::Added, Change::Added]);
+        assert!(matches!(&d[2].block, Block::CodeLine { text, change: Change::Added, .. } if text.is_empty()));
+        let d = parse_diff(with, "intro\n");
+        assert_eq!(kinds(&d), vec![Change::None, Change::Removed, Change::Removed, Change::Removed]);
+        assert!(matches!(&d[2].block, Block::CodeLine { text, change: Change::Removed, .. } if text.is_empty()));
+    }
+    #[test] fn rich_diff_adjacent_edited_paragraphs_in_one_change_region() {
+        let d = parse_diff("alpha beta\n\ngamma delta\n", "alpha BETA\n\ngamma DELTA\n");
+        assert_eq!(kinds(&d), vec![Change::Modified, Change::Modified]);
+        let removed = |b: &Block| match b { Block::Para(s) => s.iter().filter(|x| x.change == Change::Removed).map(|x| x.text.trim().to_string()).collect::<Vec<_>>(), _ => vec![] };
+        assert_eq!(removed(&d[0].block), vec!["beta"]); assert_eq!(removed(&d[1].block), vec!["delta"]);
+    }
+    #[test] fn removed_words_keep_their_formatting() {
+        let d = parse_diff("use `foo` and **bold** here\n", "use and here\n");
+        let Block::Para(sp) = &d[0].block else { panic!("{:?}", d[0].block) };
+        assert!(sp.iter().any(|s| s.change == Change::Removed && s.code && s.text == "foo"), "{sp:?}");
+        assert!(sp.iter().any(|s| s.change == Change::Removed && s.bold && s.text == "bold"), "{sp:?}");
+    }
+    #[test] fn selection_quotes_the_side_it_anchors_on() {
+        let (old, new) = ("keep\n\ngone\n\nstay\n", "keep\n\nstay\n\nfresh\n");
+        let d = parse_diff(old, new);
+        assert_eq!(kinds(&d), vec![Change::None, Change::Removed, Change::None, Change::Added]);
+        let all: Vec<&Located> = d.iter().collect();
+        // only removed blocks: old lines, quoted from the old text
+        let s = selection_of(&all[1..2], old, new).unwrap();
+        assert_eq!((s.start, s.end, s.old_side, s.snippet.as_str()), (3, 3, true, "-gone\n"));
+        // a mixed selection anchors on the new lines of the blocks that exist there, and does not quote the removed one
+        let s = selection_of(&all, old, new).unwrap();
+        assert_eq!((s.start, s.end, s.old_side), (1, 5, false));
+        assert_eq!(s.snippet, " keep\n stay\n+fresh\n");
+        assert!(selection_of(&[], old, new).is_none());
     }
     #[test] fn robust_on_garbage() { for s in ["", "***", "```", "| x", "> > >", "[a](", "# \n#"] { let _ = parse(s); } assert!(is_markdown("a/README.MD") && !is_markdown("a.rs")); }
 }

@@ -85,13 +85,13 @@ pub struct View {
     liked: HashSet<String>, likes_for: Vec<String>,
     new_head: Option<String>, head_dismissed: bool, rev_open: bool, rev_in: Input, me: Option<String>, keys: std::collections::BTreeMap<String, String>, palette_open: bool, pal_files: bool, pal_in: Input, pal_idx: usize, help_open: bool,
     pub m: Model, settings: Settings, theme: Theme, pal: Pal, fonts: Fonts,
-    refreshing: bool, md_srcs: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
+    refreshing: bool, md_srcs: HashMap<usize, String>, md_olds: HashMap<usize, String>, find_open: bool, find_in: Input, find_hits: Vec<Hit>, find_cur: usize, find_page: Page, ov_scroll: gpui::ScrollHandle,
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds, b_panes: FieldBounds,
     /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
     panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
-    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
+    shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md_rendered: bool, md_was: bool, md_jump: bool, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
     sel: Option<(usize, usize)>, anchor: Option<usize>, dragging: bool, row_y: HashMap<usize, f32>, sel_x: f32, sb_drag: Option<(usize, f32)>, hxs: Vec<f32>, hb_drag: Option<(usize, f32)>, hx_texts: Vec<std::rc::Rc<std::cell::Cell<f32>>>,
     tree: bool, collapsed: HashSet<String>, trows: Vec<TreeRow>, multi: BTreeSet<usize>, last_clicked: Option<usize>,
@@ -147,9 +147,9 @@ impl View {
         let chat = m.store.messages(m.vm.review).unwrap_or_default();
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
-        let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
+        let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), md_olds: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
             b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
-            shown: None, nav_changed: true, base: vec![], rows: vec![], md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
+            shown: None, nav_changed: true, base: vec![], rows: vec![], md_rendered: false, md_was: false, md_jump: false, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![],
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
             left_open: settings.left_open, right_open: settings.right_open, left_w: settings.left_width, right_w: settings.right_width, resizing: None, commits_h: settings.commits_height, resizing_cd: None, commits_open: true, drafts_open: true, page: if m.info.is_some() && settings.first_view == perusal_app::settings::FirstView::Overview { Page::Overview } else { Page::Code }, info: m.info.clone(), hover_c: None, auto_c: HashSet::new(),
@@ -213,13 +213,17 @@ impl View {
     // ---------- diff rows
     fn load_diff(&mut self) {
         let batch = self.m.vm.current_batch().to_vec();
-        if batch.is_empty() { self.base.clear(); self.rows.clear(); self.md = None; self.shown = None; self.panes.clear(); return; }
+        if batch.is_empty() { self.base.clear(); self.rows.clear(); self.shown = None; self.panes.clear(); return; }
         if self.shown.as_ref() == Some(&batch) { return; }
         self.reset_hx();
+        let new_batch = self.nav_changed;
         if self.nav_changed { self.md_rendered = self.settings.markdown == MdMode::Rendered && batch.iter().any(|&i| markdown::is_markdown(&self.m.vm.files[i].path) && !self.m.vm.files[i].symlink); self.nav_changed = false; }
-        self.shown = Some(batch.clone()); self.md = None; self.sym_target = None; self.sym_path = None;
+        // opening a batch rendered, or switching to the rendered view, starts at the first change instead of the top of the file
+        if self.md_rendered && (new_batch || !self.md_was) { self.md_jump = true; }
+        self.md_was = self.md_rendered;
+        self.shown = Some(batch.clone()); self.sym_target = None; self.sym_path = None;
         let p = self.pal;
-        self.md_srcs.clear();
+        self.md_srcs.clear(); self.md_olds.clear();
         let mut rows: Vec<Row> = Vec::new();
         let mk = |fi: usize, kind: RowKind| Row { fi, kind, ord: None, new_line: None, marks: vec![] };
         for &fi in &batch {
@@ -228,20 +232,18 @@ impl View {
             let (old_rev, new_rev) = self.diff_revs();
             let old = perusal_gitops::show(&self.m.repo, &old_rev, &f.path).unwrap_or_default();
             let new = perusal_gitops::show(&self.m.repo, &new_rev, &f.path).unwrap_or_default();
-            if batch.len() == 1 && self.md_rendered && !f.symlink {
-                let src = if new.is_empty() { old } else { new }; self.md = Some(markdown::parse_located(&src)); self.md_src = src; self.base.clear(); self.rows.clear(); return;
-            }
             if batch.len() > 1 { rows.push(mk(fi, RowKind::FileHeader)); if self.file_collapsed(fi) { continue; } }
             if f.symlink {
                 let t = |s: &str| s.trim().to_string();
                 rows.push(mk(fi, RowKind::Note(match (old.is_empty(), new.is_empty()) { (true, false) => format!("Symbolic link to {}", t(&new)), (false, true) => format!("Symbolic link to {} was removed", t(&old)), _ => format!("Symbolic link retargeted: {} → {}", t(&old), t(&new)) })));
                 if batch.len() == 1 { let tgt = resolve_link(&f.path, if new.is_empty() { &old } else { &new }); self.sym_path = Some(tgt.clone()); self.sym_target = self.m.vm.files.iter().position(|x| x.path == tgt && !x.symlink); }
             }
-            if batch.len() > 1 && self.md_rendered && !f.symlink && markdown::is_markdown(&f.path) && !f.noisy() {
-                let src = if new.is_empty() { old.clone() } else { new.clone() };
-                // each block is its own selectable row, so lines can be commented on while the group is shown rendered
-                for lb in markdown::parse_located(&src) { let last = lb.last_line; rows.push(Row { fi, kind: RowKind::MdBlock(lb), ord: None, new_line: Some(last), marks: vec![] }); }
-                self.md_srcs.insert(fi, src); continue;
+            if self.md_rendered && !f.symlink && markdown::is_markdown(&f.path) && (!f.noisy() || self.forced.contains(&fi)) {
+                // rendered like GitHub's rich diff: additions green, deletions red and struck through, edited words marked.
+                // Each block (a paragraph, list item, table row or code line) is its own selectable row, so any line can be commented on.
+                let lbs = if old.is_empty() || new.is_empty() { markdown::parse_located(if new.is_empty() { &old } else { &new }) } else { markdown::parse_diff(&old, &new) };
+                for lb in lbs { let (last, gone) = (lb.last_line, lb.change == markdown::Change::Removed); rows.push(Row { fi, kind: RowKind::MdBlock(lb), ord: None, new_line: (!gone).then_some(last), marks: vec![] }); }
+                self.md_srcs.insert(fi, if new.is_empty() { old.clone() } else { new.clone() }); self.md_olds.insert(fi, old.clone()); continue;
             }
             if f.noisy() && !f.symlink && !self.forced.contains(&fi) {
                 let why = if f.binary { "is a binary file, so there is no text to show" } else if f.generated { "is collapsed because it looks generated or vendored" } else { "is collapsed because it is very large" };
@@ -275,6 +277,10 @@ impl View {
         }
         let mut ord = 0; for r in &mut rows { if matches!(r.kind, RowKind::Uni(_) | RowKind::Split(..) | RowKind::MdBlock(_)) { r.ord = Some(ord); ord += 1; } }
         self.base = rows; self.rebuild_rows();
+        if std::mem::take(&mut self.md_jump) {
+            let first = self.rows.iter().position(|r| matches!(&r.kind, RowKind::MdBlock(lb) if lb.change != markdown::Change::None));
+            if let Some(row) = first { if let Some(pn) = self.panes.get(self.pane_of(row)) { pn.list.scroll_to(gpui::ListOffset { item_ix: row.saturating_sub(pn.range.start).saturating_sub(1), offset_in_item: px(0.0) }); } }
+        }
     }
 
     /// Comments for a file: (end line it belongs to, card). Remote threads (anyone's) and your own drafts.
@@ -389,21 +395,16 @@ impl View {
     // ---------- selection
     fn in_sel(&self, ord: usize) -> bool { self.sel.map(|(a, b)| ord >= a && ord <= b).unwrap_or(false) }
     fn selection(&self) -> Option<Selection> {
-        if let (Some(blocks), Some((a, b))) = (&self.md, self.md_sel) {
-            let fi = self.current_file()?; let (lo, hi) = (a.min(b), a.max(b));
-            let (first, last) = (blocks.get(lo)?.first_line, blocks.get(hi)?.last_line);
-            let snippet: String = self.md_src.lines().skip(first.saturating_sub(1) as usize).take((last + 1 - first) as usize).collect::<Vec<_>>().join("\n");
-            return Some(Selection { file: self.m.vm.files[fi].path.clone(), start: first, end: last, snippet, old_side: false });
-        }
         let (a, b) = self.sel?; let fi = self.rows.iter().find(|r| r.ord == Some(a))?.fi;
         let (mut lo, mut hi, mut snippet) = (u32::MAX, 0u32, String::new());
         let (mut olo, mut ohi) = (u32::MAX, 0u32);
+        // a rendered Markdown file has only block rows: anchor and quote them from one side (see `markdown::selection_of`)
+        let blocks: Vec<&Located> = self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)).filter_map(|r| if let RowKind::MdBlock(lb) = &r.kind { Some(lb) } else { None }).collect();
+        if !blocks.is_empty() {
+            let (old, new) = (self.md_olds.get(&fi).map(String::as_str).unwrap_or(""), self.md_srcs.get(&fi).map(String::as_str).unwrap_or(""));
+            return markdown::selection_of(&blocks, old, new).map(|m| Selection { file: self.m.vm.files[fi].path.clone(), start: m.start, end: m.end, snippet: m.snippet, old_side: m.old_side });
+        }
         for r in self.rows.iter().filter(|r| r.fi == fi && r.ord.map(|o| o >= a && o <= b).unwrap_or(false)) {
-            if let RowKind::MdBlock(lb) = &r.kind {
-                lo = lo.min(lb.first_line); hi = hi.max(lb.last_line);
-                if let Some(src) = self.md_srcs.get(&fi) { for l in src.lines().skip(lb.first_line.saturating_sub(1) as usize).take((lb.last_line + 1 - lb.first_line) as usize) { snippet.push(' '); snippet.push_str(l); snippet.push('\n'); } }
-                continue;
-            }
             let lines: Vec<&Line> = match &r.kind { RowKind::Uni(l) => vec![&l.line], RowKind::Split(l, rr) => l.iter().chain(rr.iter()).map(|x| &x.line).collect(), _ => vec![] };
             for l in lines {
                 if let Some(n) = l.new_no { lo = lo.min(n); hi = hi.max(n); } else if let Some(n) = l.old_no { olo = olo.min(n); ohi = ohi.max(n); }
@@ -424,8 +425,8 @@ impl View {
         if shift { if let Some(a) = self.anchor { self.sel = Some((a.min(ord), a.max(ord))); return; } }
         self.anchor = Some(ord); self.sel = Some((ord, ord)); self.dragging = true; self.row_y.clear();
     }
-    fn clear_selection(&mut self) { self.sel = None; self.anchor = None; self.md_sel = None; self.row_y.clear(); }
-    fn has_selection(&self) -> bool { self.sel.is_some() || self.md_sel.is_some() }
+    fn clear_selection(&mut self) { self.sel = None; self.anchor = None; self.row_y.clear(); }
+    fn has_selection(&self) -> bool { self.sel.is_some() }
 
     // ---------- filter, sort, presets
     fn apply_filter(&mut self) {
@@ -1338,8 +1339,15 @@ impl View {
             RowKind::Note(t) => return base.bg(p.accent.opacity(0.10)).px_3().gap_2().text_color(p.fg).child(icon(ic::LINK, 15.0, p.accent)).child(t.clone()).into_any_element(),
             RowKind::Hunk(t) => return base.bg(p.accent.opacity(0.10)).text_color(p.muted).text_xs().child(div().w(px(70.0)).flex_none()).child(t.clone()).into_any_element(),
             RowKind::Comment(c) => return self.comment_card(fi, &c.clone(), cx).into_any_element(),
-            RowKind::MdBlock(lb) => div().id(ix).w_full().px_6().py(px(3.0)).font_family(self.fonts.ui.clone()).text_size(px(14.0)).bg(if selected { p.accent.opacity(0.14) } else { gpui::transparent_black() })
-                .child(kit::markdown_view_find(std::slice::from_ref(&lb.block), &p, &mono, &self.find_query(), self.md_block_current(ix))),
+            RowKind::MdBlock(lb) => {
+                use markdown::{Block, Change};
+                let (bg, bar) = match lb.change { Change::Added => (p.added, p.success), Change::Removed => (p.removed, p.danger), Change::Modified => (gpui::transparent_black(), p.warn), Change::None => (gpui::transparent_black(), gpui::transparent_black()) };
+                // table rows and code lines stack into one box, so they carry no padding or row tint of their own
+                let tight = matches!(lb.block, Block::CodeLine { .. } | Block::Table { .. });
+                div().id(ix).w_full().px_6().py(px(if tight { 0.0 } else { 3.0 })).border_l_4().border_color(bar).font_family(self.fonts.ui.clone()).text_size(px(14.0))
+                    .bg(if selected { p.accent.opacity(0.14) } else if tight { gpui::transparent_black() } else { bg })
+                    .child(kit::markdown_view_find(std::slice::from_ref(&lb.block), &p, &mono, &self.find_query(), self.md_block_current(ix)))
+            }
             RowKind::Uni(rl) => {
                 let l = &rl.line;
                 let bg = match l.kind { Kind::Added => p.added, Kind::Removed => p.removed, Kind::Context => gpui::transparent_black() };
@@ -1409,7 +1417,7 @@ impl View {
         let (ox, w): (f32, f32) = (f32::from(b.origin.x) + r.x * bw, r.w * bw);
         let cols = if self.diff_mode == DiffMode::Split { 2.0 } else { 1.0 };
         let max = (self.hx_texts.get(k).map(|c| c.get()).unwrap_or(0.0) - (w - 130.0) / cols).max(0.0);
-        (max > 1.0 && w > 60.0 && self.md.is_none()).then_some((ox, w - 12.0, max))
+        (max > 1.0 && w > 60.0).then_some((ox, w - 12.0, max))
     }
 
     fn hscrollbar(&mut self, k: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1660,23 +1668,7 @@ impl View {
             h
         });
 
-        let drafts = self.m.store.drafts(self.m.vm.review).unwrap_or_default();
-        let body: AnyElement = if let Some(blocks) = &self.md {
-            let cur_path = first.as_ref().map(|f| f.path.clone()).unwrap_or_default();
-            let items: Vec<_> = blocks.iter().enumerate().map(|(i, b)| {
-                let on = self.md_sel.map(|(a, c)| i >= a.min(c) && i <= a.max(c)).unwrap_or(false);
-                let n = drafts.iter().filter(|d| d.file.as_deref() == Some(cur_path.as_str()) && d.start_line.map(|s| s <= b.last_line && d.end_line.unwrap_or(s) >= b.first_line).unwrap_or(false)).count();
-                div().id(("mdb", i)).relative().px_3().py(px(2.0)).rounded_md().cursor_pointer().border_l_2().border_color(if on { p.accent } else { gpui::transparent_black() }).when(on, |d| d.bg(p.accent.opacity(0.12))).hover(move |s| s.bg(p.hover.opacity(0.6)))
-                    .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                        this.md_sel = match (ev.modifiers().shift, this.md_sel) { (true, Some((a, _))) => Some((a, i)), _ => Some((i, i)) };
-                        if let Some(pos) = ev.mouse_position() { let y: f32 = pos.y.into(); this.row_y.insert(i, y); this.sel_x = pos.x.into(); } cx.notify();
-                    }))
-                    .child(markdown_view(std::slice::from_ref(&b.block), &p, &mono))
-                    .when(n > 0, |d| d.child(div().absolute().top(px(2.0)).right(px(4.0)).flex().items_center().gap_1().text_xs().text_color(p.accent).child(icon(ic::COMMENT, 14.0, p.accent)).child(format!("{n}"))))
-            }).collect();
-            div().id("md").flex_1().min_h_0().overflow_y_scroll().p_6().pb(px(90.0)).child(div().max_w(px(880.0)).flex().flex_col().gap_2()
-                .child(div().text_xs().text_color(p.muted).pb_2().child("Rendered preview. Click a block to comment on it; Shift+click extends the selection.")).children(items)).into_any_element()
-        } else if self.rows.is_empty() {
+        let body: AnyElement = if self.rows.is_empty() {
             div().flex_1().flex().items_center().justify_center().text_color(p.muted).child("Nothing to show for this selection.").into_any_element()
         } else {
             self.diff_panes(cx)
@@ -1685,7 +1677,7 @@ impl View {
         // toolbar that floats above the selected lines
         let sel = self.selection();
         let toolbar = sel.clone().filter(|_| self.composer.is_none()).and_then(|s| {
-            let range = if self.md.is_some() { self.md_sel.map(|(a, b)| (a.min(b), a.max(b))) } else { self.sel };
+            let range = self.sel;
             let (lo, hi) = range?; let miny = self.row_y.iter().filter(|(o, _)| **o >= lo && **o <= hi).map(|(_, y)| *y).fold(f32::MAX, f32::min);
             if miny == f32::MAX { return None; }
             let b = self.b_body.get(); let (ox, oy): (f32, f32) = (b.origin.x.into(), b.origin.y.into()); let w: f32 = b.size.width.into();
