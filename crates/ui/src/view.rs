@@ -9,7 +9,7 @@ use perusal_agents::{CtxDraft, CtxThread, ReviewContext, launch_with, on_path, p
 use perusal_app::events::{self, Snapshot};
 use perusal_app::markdown::{self, Located};
 use perusal_app::notify::Kind as NKind;
-use perusal_app::panes::{drop_zone, Arrangement, BatchView, Corner, DividerId, Drop, Edge, Layout, Rect};
+use perusal_app::panes::{drop_zone, Arrangement, BatchView, Corner, DividerId, Drop, Layout, Rect};
 use perusal_app::settings::{DiffMode, MdMode, Settings};
 use perusal_app::theme::{self, Theme};
 use perusal_app::tree::{self, TreeRow};
@@ -89,7 +89,7 @@ pub struct View {
     focus: Option<Fid>, gen: Input, sort_open: bool, gen_for: Option<perusal_agents::GenKind>, gen_busy: bool, gen_cancel: Arc<AtomicBool>, gen_msg: Option<String>, forced: HashSet<usize>, collapsed_files: HashSet<usize>, sym_path: Option<String>, filter: Input, sort: Input, comment: Input, ask: Input, summary: Input, preset_name: Input, rename: Input,
     b_body: FieldBounds, b_composer: FieldBounds, b_panes: FieldBounds,
     /// Split panes: per-pane lists, the tiling, whether the batch is shown in panes, and the drag in progress.
-    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
+    panes: Vec<Pane>, layout: Layout, batch_panes: bool, arrangement: Arrangement, pane_drag: Option<PaneDrag>, pane_hover: Option<(usize, Drop)>, pane_from: usize, pane_snapped: bool, fullscreen: bool, wheel_acc: f32,
     error: Option<String>, zoom: f32, composer: Option<Comp>, finish_open: bool, presets_open: bool,
     shown: Option<Vec<usize>>, nav_changed: bool, base: Vec<Row>, rows: Vec<Row>, md: Option<Vec<Located>>, md_src: String, md_rendered: bool, md_sel: Option<(usize, usize)>, diff_mode: DiffMode, sym_target: Option<usize>,
     collapsed_c: HashSet<String>, raw_c: HashSet<String>,
@@ -148,7 +148,7 @@ impl View {
         let (title, mr_state) = (m.title.clone(), m.mr_state.clone());
         let (keys, key_err) = extra::load_keys(settings.vim_keys);
         let mut v = View { liked: HashSet::new(), likes_for: vec![], new_head: None, head_dismissed: false, rev_open: false, rev_in: Input::new(""), me: None, keys, palette_open: false, pal_files: false, pal_in: Input::new(""), pal_idx: 0, help_open: false, refreshing: false, md_srcs: HashMap::new(), find_open: false, find_in: Input::new(""), find_hits: vec![], find_cur: 0, find_page: Page::Code, ov_scroll: gpui::ScrollHandle::new(), pal: Pal::new(&theme), theme, fonts, focus: None, gen: Input::new(""), sort_open: false, gen_for: None, gen_busy: false, gen_cancel: Arc::new(AtomicBool::new(false)), gen_msg: None, forced: HashSet::new(), collapsed_files: HashSet::new(), sym_path: None, filter: Input::new(&f0), sort: Input::new(&s0), comment: Input::multi(""), ask: Input::new(""), summary: Input::multi(""), preset_name: Input::new(""), rename: Input::new(&title),
-            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
+            b_body: new_bounds(), b_composer: new_bounds(), b_panes: new_bounds(), panes: vec![], layout: Layout::new(1, settings.pane_arrangement), batch_panes: settings.batch_view == BatchView::Panes, arrangement: settings.pane_arrangement, pane_drag: None, pane_hover: None, pane_from: 0, pane_snapped: false, fullscreen: false, wheel_acc: 0.0, error: None, zoom: 1.0, composer: None, finish_open: false, presets_open: false,
             shown: None, nav_changed: true, base: vec![], rows: vec![], md: None, md_src: String::new(), md_rendered: false, md_sel: None, diff_mode: settings.diff_mode, sym_target: None,
             collapsed_c: HashSet::new(), raw_c: HashSet::new(), sel: None, anchor: None, dragging: false, row_y: HashMap::new(), sel_x: 0.0, sb_drag: None, hxs: vec![], hb_drag: None, hx_texts: vec![],
             tree: settings.files_tree, collapsed: HashSet::new(), trows: vec![], multi: BTreeSet::new(), last_clicked: None, sug: vec![], sug_replace: 0, sug_idx: None, sug_for: Fid::Filter,
@@ -1497,6 +1497,7 @@ impl View {
                             let (w, h): (f32, f32) = (b.size.width.into(), b.size.height.into());
                             drop_zone((f32::from(pos.x) - f32::from(b.origin.x)) / w.max(1.0), (f32::from(pos.y) - f32::from(b.origin.y)) / h.max(1.0))
                         }).map(|z| (k, z));
+                        this.pane_from = ev.drag(cx).from;
                         if (hover.is_some() || this.pane_hover.map(|h| h.0) == Some(k)) && this.pane_hover != hover { this.pane_hover = hover; cx.notify(); }
                     }))
                     .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
@@ -1504,23 +1505,20 @@ impl View {
                         let done = match zone { Drop::Swap => this.layout.swap(d.from, k), Drop::Split(e) => this.layout.move_pane(d.from, k, e) };
                         if done { this.clear_selection(); } cx.notify();
                     })))
-                .children(self.pane_hover.filter(|h| h.0 == k).map(|(_, z)| {
-                    let (x, y, w, h) = match z { Drop::Swap => (0.0, 0.0, 1.0, 1.0), Drop::Split(Edge::Left) => (0.0, 0.0, 0.5, 1.0), Drop::Split(Edge::Right) => (0.5, 0.0, 0.5, 1.0), Drop::Split(Edge::Top) => (0.0, 0.0, 1.0, 0.5), Drop::Split(Edge::Bottom) => (0.0, 0.5, 1.0, 0.5) };
-                    div().absolute().left(relative(x)).top(relative(y)).w(relative(w)).h(relative(h)).bg(p.accent.opacity(if z == Drop::Swap { 0.14 } else { 0.28 })).border_2().border_color(p.accent)
-                }))
-                .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, _, cx| {
-                    let dx: f32 = ev.delta.pixel_delta(px(20.0)).x.into();
-                    if dx != 0.0 && !ev.modifiers.control {
-                        let max = this.hbar_geom(k).map(|g| g.2).unwrap_or(0.0);
-                        if let Some(h) = this.hxs.get_mut(k) { let n = (*h - dx).clamp(0.0, max); if n != *h { *h = n; cx.notify(); } }
-                    }
-                }))
                 .child(list(list_state, cx.processor(move |this, ix: usize, _w, cx| { let g = start + ix; let el = this.render_row(g, cx); match this.row_tint(g) { Some(c) => div().w_full().bg(c).child(el).into_any_element(), None => el } })).size_full())
                 .children(sb).children(hsb)
                 .when(paned && multi, |d| d.child(div().id(("grip", k)).absolute().top(px(3.0)).left(px(4.0)).w(px(28.0)).h(px(20.0)).flex().items_center().justify_center().rounded_md().cursor_grab().text_color(p.muted).hover(move |s| s.bg(p.hover))
                     .on_drag(DraggedPane { from: k, title: title.clone(), pal: p }, |d, _, _, cx| cx.new(|_| DragPaneView(d.clone())))
                     .tooltip_text("Drag onto another pane: the middle swaps them, a side splits that pane".to_string(), &p).child(div().flex().flex_col().gap(px(3.0)).children((0..2).map(|_| div().flex().gap(px(3.0)).children((0..3).map(|_| div().size(px(3.0)).rounded_full().bg(p.muted))))))));
             area = area.child(pane);
+        }
+        // where the dragged pane would end up: the layout after the drop, outlined in blue
+        if let Some((to, z)) = self.pane_hover.filter(|_| paned) {
+            let mut after = self.layout.clone(); let from = self.pane_from;
+            let ok = match z { Drop::Swap => after.swap(from, to), Drop::Split(e) => after.move_pane(from, to, e) };
+            if let Some(r) = after.rects().get(from).map(|x| x.1).filter(|_| ok) {
+                area = area.child(deferred(div().absolute().left(relative(r.x)).top(relative(r.y)).w(relative(r.w)).h(relative(r.h)).bg(p.accent.opacity(0.30)).border_4().border_color(p.accent).rounded_sm()).with_priority(100));
+            }
         }
         if paned {
             let active = |d: &Option<PaneDrag>, id: &DividerId| matches!(d, Some(PaneDrag::Divider(x)) if x == id);
